@@ -1,0 +1,9 @@
+# 本地密钥与敏感目录（勿提交）
+OpenAI_apikey/
+.env
+.env.local
+.env.*.local
+
+# 常见系统文件
+.DS_Store
+Thumbs.db

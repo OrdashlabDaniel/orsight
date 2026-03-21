@@ -1,0 +1,184 @@
+{
+  "images": [
+    {
+      "image_name": "Weixin Image_20260314085921_346_1.jpg",
+      "records": [
+        {
+          "date": null,
+          "route": null,
+          "driver": null,
+          "total": null,
+          "unscanned": null,
+          "exceptions": null,
+          "station_team": null,
+          "task_count": null,
+          "review_required": true,
+          "review_reason": "Pending AI extraction and human review.",
+          "source_fields": {}
+        }
+      ]
+    },
+    {
+      "image_name": "Weixin Image_20260314085922_347_1.jpg",
+      "records": [
+        {
+          "date": null,
+          "route": null,
+          "driver": null,
+          "total": null,
+          "unscanned": null,
+          "exceptions": null,
+          "station_team": null,
+          "task_count": null,
+          "review_required": true,
+          "review_reason": "Pending AI extraction and human review.",
+          "source_fields": {}
+        }
+      ]
+    },
+    {
+      "image_name": "Weixin Image_20260314085923_348_1.jpg",
+      "records": [
+        {
+          "date": null,
+          "route": null,
+          "driver": null,
+          "total": null,
+          "unscanned": null,
+          "exceptions": null,
+          "station_team": null,
+          "task_count": null,
+          "review_required": true,
+          "review_reason": "Pending AI extraction and human review.",
+          "source_fields": {}
+        }
+      ]
+    },
+    {
+      "image_name": "Weixin Image_20260314085925_349_1.jpg",
+      "records": [
+        {
+          "date": null,
+          "route": null,
+          "driver": null,
+          "total": null,
+          "unscanned": null,
+          "exceptions": null,
+          "station_team": null,
+          "task_count": null,
+          "review_required": true,
+          "review_reason": "Pending AI extraction and human review.",
+          "source_fields": {}
+        }
+      ]
+    },
+    {
+      "image_name": "Weixin Image_20260314085926_350_1.jpg",
+      "records": [
+        {
+          "date": null,
+          "route": null,
+          "driver": null,
+          "total": null,
+          "unscanned": null,
+          "exceptions": null,
+          "station_team": null,
+          "task_count": null,
+          "review_required": true,
+          "review_reason": "Pending AI extraction and human review.",
+          "source_fields": {}
+        }
+      ]
+    },
+    {
+      "image_name": "Weixin Image_20260314085927_351_1.jpg",
+      "records": [
+        {
+          "date": null,
+          "route": null,
+          "driver": null,
+          "total": null,
+          "unscanned": null,
+          "exceptions": null,
+          "station_team": null,
+          "task_count": null,
+          "review_required": true,
+          "review_reason": "Pending AI extraction and human review.",
+          "source_fields": {}
+        }
+      ]
+    },
+    {
+      "image_name": "Weixin Image_20260314085928_352_1.jpg",
+      "records": [
+        {
+          "date": null,
+          "route": null,
+          "driver": null,
+          "total": null,
+          "unscanned": null,
+          "exceptions": null,
+          "station_team": null,
+          "task_count": null,
+          "review_required": true,
+          "review_reason": "Pending AI extraction and human review.",
+          "source_fields": {}
+        }
+      ]
+    },
+    {
+      "image_name": "Weixin Image_20260314085930_353_1.jpg",
+      "records": [
+        {
+          "date": null,
+          "route": null,
+          "driver": null,
+          "total": null,
+          "unscanned": null,
+          "exceptions": null,
+          "station_team": null,
+          "task_count": null,
+          "review_required": true,
+          "review_reason": "Pending AI extraction and human review.",
+          "source_fields": {}
+        }
+      ]
+    },
+    {
+      "image_name": "Weixin Image_20260314085931_354_1.jpg",
+      "records": [
+        {
+          "date": null,
+          "route": null,
+          "driver": null,
+          "total": null,
+          "unscanned": null,
+          "exceptions": null,
+          "station_team": null,
+          "task_count": null,
+          "review_required": true,
+          "review_reason": "Pending AI extraction and human review.",
+          "source_fields": {}
+        }
+      ]
+    },
+    {
+      "image_name": "Weixin Image_20260314085932_355_1.jpg",
+      "records": [
+        {
+          "date": null,
+          "route": null,
+          "driver": null,
+          "total": null,
+          "unscanned": null,
+          "exceptions": null,
+          "station_team": null,
+          "task_count": null,
+          "review_required": true,
+          "review_reason": "Pending AI extraction and human review.",
+          "source_fields": {}
+        }
+      ]
+    }
+  ]
+}

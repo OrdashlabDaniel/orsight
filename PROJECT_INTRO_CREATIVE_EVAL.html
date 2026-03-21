@@ -1,0 +1,586 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>POD Audit Tool - Project Introduction</title>
+  <style>
+    :root {
+      --bg: #f3f6fb;
+      --paper: #ffffff;
+      --text: #142033;
+      --muted: #56657d;
+      --line: #d9e1ec;
+      --brand: #2463eb;
+      --brand-soft: #eaf1ff;
+      --good: #0f9f6e;
+      --warn: #dc8b00;
+      --ink: #0a1220;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: linear-gradient(180deg, #eef3fb 0%, #f8fbff 100%);
+      color: var(--text);
+      font-family: "Microsoft YaHei", "PingFang SC", "Segoe UI", sans-serif;
+      line-height: 1.65;
+    }
+
+    .page {
+      width: 210mm;
+      margin: 0 auto;
+      padding: 16mm 16mm 18mm;
+    }
+
+    .hero {
+      padding: 18px 22px 22px;
+      border: 1px solid #d9e4f5;
+      border-radius: 24px;
+      background:
+        radial-gradient(circle at top right, rgba(36, 99, 235, 0.14), transparent 34%),
+        linear-gradient(135deg, #fefeff 0%, #f5f8ff 100%);
+      box-shadow: 0 20px 40px rgba(33, 51, 84, 0.08);
+    }
+
+    .eyebrow {
+      display: inline-block;
+      padding: 5px 10px;
+      border-radius: 999px;
+      background: var(--brand-soft);
+      color: var(--brand);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+    }
+
+    h1 {
+      margin: 14px 0 10px;
+      font-size: 30px;
+      line-height: 1.2;
+      color: var(--ink);
+    }
+
+    .subtitle {
+      margin: 0;
+      font-size: 15px;
+      color: var(--muted);
+    }
+
+    .hero-grid {
+      display: grid;
+      grid-template-columns: 1.4fr 1fr;
+      gap: 16px;
+      margin-top: 18px;
+    }
+
+    .metric-panel,
+    .card,
+    .timeline,
+    .highlight-box {
+      background: var(--paper);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+    }
+
+    .metric-panel {
+      padding: 16px;
+    }
+
+    .metric-list {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 12px;
+    }
+
+    .metric {
+      padding: 12px;
+      border-radius: 14px;
+      background: #f8fbff;
+      border: 1px solid #e2ebf8;
+    }
+
+    .metric strong {
+      display: block;
+      font-size: 14px;
+      color: var(--ink);
+    }
+
+    .metric span {
+      display: block;
+      margin-top: 4px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .section {
+      margin-top: 18px;
+    }
+
+    .section h2 {
+      margin: 0 0 10px;
+      font-size: 20px;
+      color: var(--ink);
+    }
+
+    .section-lead {
+      margin: 0 0 12px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .grid-2 {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px;
+    }
+
+    .grid-3 {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .card {
+      padding: 16px 16px 14px;
+    }
+
+    .card h3 {
+      margin: 0 0 8px;
+      font-size: 16px;
+      color: var(--ink);
+    }
+
+    p {
+      margin: 0 0 10px;
+    }
+
+    ul {
+      margin: 10px 0 0 18px;
+      padding: 0;
+    }
+
+    li {
+      margin: 4px 0;
+    }
+
+    .tag-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 10px;
+    }
+
+    .tag {
+      padding: 5px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 600;
+      background: #f3f7ff;
+      color: #264777;
+      border: 1px solid #d7e5ff;
+    }
+
+    .stage {
+      display: inline-block;
+      padding: 6px 12px;
+      border-radius: 999px;
+      background: #eefbf6;
+      color: var(--good);
+      border: 1px solid #caefdf;
+      font-weight: 700;
+      font-size: 13px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+      overflow: hidden;
+      border-radius: 14px;
+    }
+
+    th,
+    td {
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      vertical-align: top;
+      text-align: left;
+    }
+
+    th {
+      background: #f6f9ff;
+      color: var(--ink);
+      font-weight: 700;
+    }
+
+    .timeline {
+      padding: 14px 16px;
+    }
+
+    .timeline-item {
+      position: relative;
+      padding-left: 18px;
+      margin: 12px 0;
+    }
+
+    .timeline-item::before {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 8px;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--brand);
+    }
+
+    .timeline-item strong {
+      display: block;
+      margin-bottom: 3px;
+      color: var(--ink);
+    }
+
+    .highlight-box {
+      padding: 16px;
+      background: linear-gradient(135deg, #fffef8 0%, #fffaf0 100%);
+      border-color: #f0dfb7;
+    }
+
+    .highlight-box h3 {
+      color: #8a5a00;
+    }
+
+    .footnote {
+      margin-top: 16px;
+      color: #6a778d;
+      font-size: 12px;
+    }
+
+    .page-break {
+      page-break-before: always;
+    }
+
+    @media print {
+      body {
+        background: #fff;
+      }
+
+      .page {
+        width: auto;
+        margin: 0;
+        padding: 10mm 8mm 12mm;
+      }
+
+      .hero,
+      .metric-panel,
+      .card,
+      .timeline,
+      .highlight-box {
+        box-shadow: none;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <section class="hero">
+      <div class="eyebrow">Creative Evaluation Brief</div>
+      <h1>POD Screenshot Audit Tool</h1>
+      <p class="subtitle">
+        一个面向站点日常运营场景的 AI 审核与填表工具。它把“截图识别、风险拦截、人工复核、Excel 导出、训练样本积累”整合为一个可落地的闭环流程。
+      </p>
+
+      <div class="hero-grid">
+        <div class="metric-panel">
+          <h3>项目定位</h3>
+          <p>
+            该项目不是通用 OCR 工具，而是一个高度垂直、围绕 POD 抽查业务规则设计的智能工作台。核心目标不是“尽量识别更多”，而是“在保证准确率与可追溯性的前提下提升录入效率”。
+          </p>
+          <div class="tag-row">
+            <span class="tag">AI + 规则引擎</span>
+            <span class="tag">高风险先拦截</span>
+            <span class="tag">人工复核闭环</span>
+            <span class="tag">本地可运行 MVP</span>
+          </div>
+        </div>
+
+        <div class="metric-panel">
+          <h3>评估摘要</h3>
+          <div class="metric-list">
+            <div class="metric">
+              <strong>产品类型</strong>
+              <span>运营提效型垂直 AI 工具</span>
+            </div>
+            <div class="metric">
+              <strong>目标用户</strong>
+              <span>站点审核人员 / 运营同事</span>
+            </div>
+            <div class="metric">
+              <strong>当前阶段</strong>
+              <span>内部单用户 MVP，已可运行</span>
+            </div>
+            <div class="metric">
+              <strong>核心价值</strong>
+              <span>减少人工重复录入与误填风险</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>1. 产品介绍</h2>
+      <p class="section-lead">
+        项目聚焦 POD 截图抽查这一高频但高度依赖人工经验的工作场景，把原先分散的“看图、抄表、复核、导出”步骤整合到统一页面中。
+      </p>
+
+      <div class="grid-2">
+        <div class="card">
+          <h3>解决的问题</h3>
+          <ul>
+            <li>人工从截图录入表格效率低，容易疲劳出错。</li>
+            <li>截图中字段位置相近，容易误把站点车队、实领件数、已领等字段写进错误列。</li>
+            <li>多任务截图、模糊截图、遮挡截图需要人工兜底，普通 OCR 难以可靠处理。</li>
+            <li>传统工具缺少“可复核、可追踪、可沉淀样本”的产品闭环。</li>
+          </ul>
+        </div>
+
+        <div class="card">
+          <h3>项目给出的答案</h3>
+          <ul>
+            <li>批量上传截图，由 AI 自动提取结构化记录。</li>
+            <li>通过业务规则校验与多次一致性检查，主动拦截高风险结果。</li>
+            <li>让用户在同一界面里查看原图、编辑表格、重新识别、打开标注。</li>
+            <li>把人工修正过的结果沉淀成训练样本，持续提高后续识别稳定性。</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>2. 产品流程</h2>
+      <div class="grid-3">
+        <div class="card">
+          <h3>输入</h3>
+          <p>用户批量上传 POD 截图，支持拖拽和逐张预览。</p>
+        </div>
+        <div class="card">
+          <h3>识别</h3>
+          <p>AI 按固定提示词提取日期、路线、司机、运单数量、未收数量、错扫数量等核心字段。</p>
+        </div>
+        <div class="card">
+          <h3>拦截</h3>
+          <p>系统对结果进行多轮一致性校验、字段来源校验、计数区域二次验证，主动标记待复核记录。</p>
+        </div>
+        <div class="card">
+          <h3>复核</h3>
+          <p>用户可在线修改表格内容，并打开独立图片查看窗口或标注工作台进行人工确认。</p>
+        </div>
+        <div class="card">
+          <h3>沉淀</h3>
+          <p>复核后的图片和框选结果可保存到训练池，用作后续 few-shot 示例。</p>
+        </div>
+        <div class="card">
+          <h3>输出</h3>
+          <p>最终导出 Excel，满足站点日常抽查结果提交需求。</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>3. 产品亮点</h2>
+      <div class="grid-2">
+        <div class="card">
+          <h3>不是“识别优先”，而是“可信优先”</h3>
+          <p>
+            该工具最有价值的点在于，它把“错误拦截”放在“结果输出”之前。比如当 `运单数量`
+            不能确认来自 `应领件数` 时，系统不会保留一个可能错误的数字，而是主动清空并要求人工复核。
+          </p>
+        </div>
+        <div class="card">
+          <h3>将人工动作设计进产品闭环</h3>
+          <p>
+            项目没有试图完全替代人工，而是把“人工查看原图、改值、标注、再次识别”设计成系统流程的一部分，因此更适合高准确率要求的业务环境。
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <section class="section page-break">
+      <h2>4. 技术实现</h2>
+      <p class="section-lead">
+        当前技术方案以快速落地和稳定迭代为导向，采用 Next.js 单体式 Web 应用结构，前后端协同成本低，适合 MVP 阶段快速推进。
+      </p>
+
+      <div class="card">
+        <table>
+          <thead>
+            <tr>
+              <th>层级</th>
+              <th>当前方案</th>
+              <th>说明</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>前端框架</td>
+              <td>Next.js 16 + React 19 + TypeScript</td>
+              <td>用于构建上传区、在线表格、图片查看弹窗、标注工作台等交互界面。</td>
+            </tr>
+            <tr>
+              <td>样式系统</td>
+              <td>Tailwind CSS 4</td>
+              <td>用于快速构建信息密度较高但仍保持清晰层次的后台工具界面。</td>
+            </tr>
+            <tr>
+              <td>AI 接口</td>
+              <td>OpenAI 风格 `chat/completions`</td>
+              <td>支持视觉理解模型识别截图内容，并强制返回 JSON。</td>
+            </tr>
+            <tr>
+              <td>模型策略</td>
+              <td>`gpt-5-mini` + `gpt-5`</td>
+              <td>批量场景优先成本效率，复核场景优先更强模型能力。</td>
+            </tr>
+            <tr>
+              <td>图像处理</td>
+              <td>`sharp`</td>
+              <td>用于裁剪计数区域，执行二次核验。</td>
+            </tr>
+            <tr>
+              <td>表格导出</td>
+              <td>`xlsx`</td>
+              <td>生成最终 Excel 文件，直接衔接现有业务交付形态。</td>
+            </tr>
+            <tr>
+              <td>训练样本池</td>
+              <td>本地 JSON + 本地图片目录</td>
+              <td>当前是本地文件式训练池，用于 few-shot 示例增强，不是真正在线微调。</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="grid-2 section">
+        <div class="card">
+          <h3>核心技术策略</h3>
+          <ul>
+            <li>单张图片执行 4 次识别，结果不一致时直接标记风险。</li>
+            <li>要求模型显式返回 `totalSourceLabel`，验证运单数量是否来自 `应领件数`。</li>
+            <li>额外裁剪 `应领件数`、`实领件数`、`已领` 区域进行二次数字核验。</li>
+            <li>将人工校正过的案例回流到训练池，形成持续提准机制。</li>
+          </ul>
+        </div>
+
+        <div class="card">
+          <h3>为什么这个技术方案有价值</h3>
+          <ul>
+            <li>不是单纯依赖大模型“看图猜答案”，而是把业务规则硬编码进验证链路。</li>
+            <li>技术架构足够轻，适合快速迭代业务规则与提示词。</li>
+            <li>未来可平滑迁移到云存储、数据库、用户体系和订阅模型。</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>5. UX / 交互设计思路</h2>
+      <div class="grid-2">
+        <div class="card">
+          <h3>面向业务人员的低学习成本设计</h3>
+          <ul>
+            <li>左侧上传、右侧表格的双栏结构，符合“先看图、再改表”的工作心智。</li>
+            <li>识别后结果直接落到可编辑表格，无需切换到额外编辑页面。</li>
+            <li>高风险记录高亮显示，让用户优先处理问题项而不是逐条全量检查。</li>
+          </ul>
+        </div>
+
+        <div class="card">
+          <h3>独立的图片查看与标注体验</h3>
+          <ul>
+            <li>`查看图片` 是独立浮层，靠近上传区，不遮挡主表格，方便边看边修。</li>
+            <li>`打开标注` 是另一套独立工作台，用于训练样本标框，避免和普通查看混淆。</li>
+            <li>图片查看支持缩放和平移，适合检查细节数字与模糊区域。</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="highlight-box section">
+        <h3>UX 评价</h3>
+        <p>
+          从创意评估角度看，这个项目的 UX 亮点不在炫技，而在于对真实工作流的理解非常具体。它把“错误最容易发生在哪一步、用户最需要在哪一步看到原图、什么时候该让系统拦截而不是放行”都映射到了交互上，因此具备较强的场景贴合度。
+        </p>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>6. 当前开发阶段</h2>
+      <p><span class="stage">阶段判断：内部可用 MVP / 单用户工作流产品</span></p>
+      <div class="timeline">
+        <div class="timeline-item">
+          <strong>已完成</strong>
+          <span>批量上传、AI 提取、在线编辑、路线分组、去重、风险高亮、再次识别、图片查看、标注工作台、训练池保存、Excel 导出等核心功能已具备。</span>
+        </div>
+        <div class="timeline-item">
+          <strong>已验证</strong>
+          <span>项目可本地启动，前端可编译，核心 API 可运行，说明系统已具备持续开发和演示基础。</span>
+        </div>
+        <div class="timeline-item">
+          <strong>当前定位</strong>
+          <span>更适合作为站点内部提效工具，而不是面向公众的完整 SaaS 产品。</span>
+        </div>
+        <div class="timeline-item">
+          <strong>下一阶段</strong>
+          <span>补齐登录、云存储、数据库持久化、历史记录与使用追踪后，可向轻量商用版本演进。</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="section page-break">
+      <h2>7. 当前风险与发展空间</h2>
+      <div class="grid-2">
+        <div class="card">
+          <h3>当前风险</h3>
+          <ul>
+            <li>训练池和图片资源目前仍是本地文件存储，尚未云端化。</li>
+            <li>缺少用户体系、历史记录、权限与计费能力。</li>
+            <li>业务规则强依赖当前 POD 截图结构，泛化到其他站点时需要再适配。</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3>发展空间</h3>
+          <ul>
+            <li>演进为站点级审核平台，支持多人协作与记录沉淀。</li>
+            <li>接入数据库后可形成历史异常对比、每日审核台账与质检报告。</li>
+            <li>可进一步抽象为“规则驱动的业务型视觉审核产品框架”。</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>8. 创意评估结论</h2>
+      <div class="card">
+        <p>
+          这是一个<strong>场景切得很准</strong>的垂直 AI 产品创意。它的价值不在于做出一个“更通用的识图工具”，而在于围绕具体业务错误模式，把 AI、规则、交互、人工复核和样本沉淀组合成一个高可信工作流。
+        </p>
+        <p>
+          从创意成熟度看，项目已经不只是概念验证，而是进入了<strong>可展示、可试用、可继续产品化</strong>的阶段。对于内部评估、立项讨论、产品包装或后续融资材料准备，它具备较好的基础。
+        </p>
+        <p>
+          如果后续补齐云存储、登录体系、数据库和使用追踪，这个项目有机会从内部效率工具升级为面向站点运营场景的轻量 SaaS 产品。
+        </p>
+      </div>
+
+      <p class="footnote">
+        Document purpose: creative evaluation / product introduction. Source basis: current codebase, handoff document, implemented UX and technical architecture as of the latest local project state.
+      </p>
+    </section>
+  </div>
+</body>
+</html>
