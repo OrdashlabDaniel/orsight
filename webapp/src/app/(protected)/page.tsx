@@ -272,6 +272,43 @@ export default function Home() {
     };
   }, []);
 
+  const handleFilesRef = useRef<((fileList: FileList | File[] | null) => Promise<void>) | null>(null);
+
+  useEffect(() => {
+    function handlePaste(event: ClipboardEvent) {
+      if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) {
+        return;
+      }
+      
+      const items = event.clipboardData?.items;
+      if (!items) return;
+
+      const files: File[] = [];
+      for (let i = 0; i < items.length; i++) {
+        if (items[i].type.indexOf("image") !== -1) {
+          const file = items[i].getAsFile();
+          if (file) {
+            const ext = file.type.split('/')[1] || 'png';
+            const newFile = new File([file], `pasted-image-${Date.now()}-${i}.${ext}`, { type: file.type, lastModified: file.lastModified });
+            files.push(newFile);
+          }
+        }
+      }
+
+      if (files.length > 0) {
+        event.preventDefault();
+        if (handleFilesRef.current) {
+          void handleFilesRef.current(files);
+        }
+      }
+    }
+
+    document.addEventListener("paste", handlePaste);
+    return () => {
+      document.removeEventListener("paste", handlePaste);
+    };
+  }, []);
+
   const selectedUpload = useMemo(
     () => uploads.find((upload) => upload.id === selectedUploadId) || uploads[0] || null,
     [selectedUploadId, uploads],
@@ -507,7 +544,7 @@ export default function Home() {
     };
   }
 
-  async function handleFiles(fileList: FileList | null) {
+  async function handleFiles(fileList: FileList | File[] | null) {
     if (!fileList?.length) {
       return;
     }
@@ -528,17 +565,21 @@ export default function Home() {
 
       setUploads((current) => {
         const merged = [...current, ...nextUploads];
-        if (!selectedUploadId && merged[0]) {
-          setSelectedUploadId(merged[0].id);
-        }
+        setSelectedUploadId((currentId) => {
+          if (!currentId && merged[0]) {
+            return merged[0].id;
+          }
+          return currentId;
+        });
         return merged;
       });
       setNoticeMessage(`已加入 ${nextUploads.length} 张图片。`);
       setErrorMessage("");
-    } catch (error) {
+    } catch {
       setErrorMessage("读取图片内容失败，可能是文件已被其他程序移动或删除，请重试。");
     }
   }
+  handleFilesRef.current = handleFiles;
 
   function handleDragOver(event: React.DragEvent<HTMLLabelElement>) {
     event.preventDefault();
@@ -1066,7 +1107,7 @@ export default function Home() {
           <div ref={uploadPanelRef} className="flex min-h-0 flex-col rounded-3xl border border-slate-200 bg-white shadow-sm">
             <div className="border-b border-slate-200 px-5 py-4">
               <h2 className="text-lg font-semibold">图片上传区</h2>
-              <p className="mt-1 text-sm text-slate-500">支持批量上传 JPG / PNG，上传后可逐张预览。</p>
+              <p className="mt-1 text-sm text-slate-500">支持批量上传 JPG / PNG，支持直接 Ctrl+V 粘贴截图。</p>
             </div>
 
             <div className="space-y-4 p-5">
@@ -1081,9 +1122,9 @@ export default function Home() {
                 onDragLeave={handleDragLeave}
                 onDrop={handleDrop}
               >
-                <span className="text-sm font-medium">点击或拖拽上传图片</span>
+                <span className="text-sm font-medium">点击、拖拽或粘贴上传图片</span>
                 <span className="mt-1 text-xs text-slate-500">
-                  {isDraggingFiles ? "松开鼠标即可上传图片" : "可一次选择多张截图"}
+                  {isDraggingFiles ? "松开鼠标即可上传图片" : "可一次选择多张，或直接 Ctrl+V 粘贴"}
                 </span>
                 <input className="hidden" type="file" accept="image/*" multiple onChange={(event) => void handleFiles(event.target.files)} />
               </label>
