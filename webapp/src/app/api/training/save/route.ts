@@ -102,15 +102,15 @@ export async function POST(request: Request) {
       boxes: normalizeBoxes(payload.boxes),
     };
 
-    if (!example.output.date || !example.output.route || !example.output.driver) {
-      return NextResponse.json({ error: "Missing required output fields." }, { status: 400 });
-    }
-
     if (imageDataUrl) {
       await saveTrainingImageDataUrl(imageName, imageDataUrl);
     }
 
-    const nextExamples = await upsertTrainingExample(example);
+    // Only upsert the example to the database if it actually has some data (i.e. it's not just a raw image upload)
+    let nextExamples = await loadTrainingExamples();
+    if (example.output.date || example.output.route || example.output.driver || example.notes) {
+      nextExamples = await upsertTrainingExample(example);
+    }
     return NextResponse.json({
       ok: true,
       saved: example,
