@@ -10,7 +10,7 @@ import {
   validateRecord,
   visionPrompt,
 } from "@/lib/pod";
-import { buildTrainingPromptSection, loadTrainingExamples } from "@/lib/training";
+import { buildTrainingPromptSection, loadTrainingExamples, loadGlobalRules } from "@/lib/training";
 
 const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || "https://api.openai.com/v1";
 const OPENAI_PRIMARY_MODEL = process.env.OPENAI_PRIMARY_MODEL || process.env.OPENAI_MODEL || "gpt-5-mini";
@@ -71,6 +71,7 @@ async function callVisionModel(file: File, model: string): Promise<RawModelRecor
   }
 
   const examples = await loadTrainingExamples();
+  const globalRules = await loadGlobalRules();
   const bytes = Buffer.from(await file.arrayBuffer());
   const dataUrl = `data:${file.type || "image/jpeg"};base64,${bytes.toString("base64")}`;
 
@@ -82,7 +83,7 @@ async function callVisionModel(file: File, model: string): Promise<RawModelRecor
       {
         role: "user",
         content: [
-          { type: "text", text: `${visionPrompt}${buildTrainingPromptSection(examples)}` },
+          { type: "text", text: `${visionPrompt}${buildTrainingPromptSection(examples, globalRules)}` },
           { type: "image_url", image_url: { url: dataUrl } },
         ] as OpenAIMessageContent[],
       },

@@ -95,6 +95,73 @@ export default function TrainingMode() {
 
   const [popupPosition, setPopupPosition] = useState<PopupPosition | null>(null);
 
+  const [globalRules, setGlobalRules] = useState<{ instructions: string; documents: Array<{ name: string; content: string }> }>({ instructions: "", documents: [] });
+  const [isSavingRules, setIsSavingRules] = useState(false);
+  const [isUploadingDoc, setIsUploadingDoc] = useState(false);
+
+  useEffect(() => {
+    void loadGlobalRules();
+  }, []);
+
+  async function loadGlobalRules() {
+    try {
+      const res = await fetch("/api/training/rules");
+      if (res.ok) {
+        const data = await res.json();
+        setGlobalRules(data);
+      }
+    } catch (e) {
+      console.error("Failed to load global rules", e);
+    }
+  }
+
+  async function saveGlobalRules() {
+    setIsSavingRules(true);
+    try {
+      const res = await fetch("/api/training/rules", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(globalRules),
+      });
+      if (!res.ok) throw new Error("保存失败");
+      setNoticeMessage("全局规则与文档已保存，将在下次 AI 填表时生效。");
+    } catch (e) {
+      setErrorMessage("保存全局规则失败。");
+    } finally {
+      setIsSavingRules(false);
+    }
+  }
+
+  async function handleDocumentUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    
+    setIsUploadingDoc(true);
+    setErrorMessage("");
+    try {
+      const text = await file.text();
+      
+      setGlobalRules(prev => ({
+        ...prev,
+        documents: [...prev.documents, { name: file.name, content: text }]
+      }));
+      setNoticeMessage(`成功解析文档：${file.name}`);
+    } catch {
+      setErrorMessage("文档解析失败，请确保格式受支持（.txt, .csv 等）。");
+    } finally {
+      setIsUploadingDoc(false);
+      e.target.value = "";
+    }
+  }
+
+  function removeDocument(index: number) {
+    setGlobalRules(prev => {
+      const nextDocs = [...prev.documents];
+      nextDocs.splice(index, 1);
+      return { ...prev, documents: nextDocs };
+    });
+  }
+
   const annotationCanvasRef = useRef<HTMLDivElement | null>(null);
   const popupAnchorRef = useRef<HTMLElement | null>(null);
   const uploadPanelRef = useRef<HTMLDivElement | null>(null);
@@ -519,156 +586,201 @@ export default function TrainingMode() {
         </header>
 
         <section className="grid min-h-[calc(100vh-170px)] grid-cols-1 gap-4 xl:grid-cols-[420px_minmax(0,1fr)]">
-          <div ref={uploadPanelRef} className="flex min-h-0 flex-col rounded-3xl border border-slate-200 bg-white shadow-sm">
-            <div className="border-b border-slate-200 px-5 py-4">
-              <h2 className="text-lg font-semibold">待标注图片</h2>
-              <p className="mt-1 text-sm text-slate-500">上传或粘贴需要加入训练池的图片。</p>
-            </div>
-
-            <div className="space-y-4 p-5">
-              <label
-                className={`flex cursor-pointer flex-col items-center justify-center rounded-2xl border border-dashed px-4 py-8 text-center transition ${
-                  isDraggingFiles
-                    ? "border-emerald-500 bg-emerald-50"
-                    : "border-slate-300 bg-slate-50 hover:border-slate-400 hover:bg-slate-100"
-                }`}
-                onDragOver={handleDragOver}
-                onDragEnter={handleDragOver}
-                onDragLeave={handleDragLeave}
-                onDrop={handleDrop}
-              >
-                <span className="text-sm font-medium">点击、拖拽或粘贴上传图片</span>
-                <span className="mt-1 text-xs text-slate-500">
-                  {isDraggingFiles ? "松开鼠标即可上传图片" : "可一次选择多张，或直接 Ctrl+V 粘贴"}
-                </span>
-                <input className="hidden" type="file" accept="image/*" multiple onChange={(event) => void handleFiles(event.target.files)} />
-              </label>
-
-              <div className="flex flex-wrap gap-2">
-                <button
-                  className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-700 disabled:cursor-not-allowed disabled:bg-slate-400"
-                  onClick={async () => {
-                    if (!uploads.length) {
-                      setErrorMessage("请先上传图片。");
-                      return;
-                    }
-                    setIsSavingTraining(true);
-                    setErrorMessage("");
-                    try {
-                      let successCount = 0;
-                      for (const upload of uploads) {
-                        try {
-                          const imageDataUrl = await imageSourceToDataUrl(upload.previewUrl);
-                          await fetch("/api/training/save", {
-                            method: "POST",
-                            headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({
-                              imageName: upload.file.name,
-                              imageDataUrl,
-                              notes: "直接存入训练池，未标注",
-                              output: {
-                                date: "",
-                                route: "",
-                                driver: "",
-                                total: 0,
-                                unscanned: 0,
-                                exceptions: 0,
-                                stationTeam: "",
-                              },
-                              boxes: [],
-                            }),
-                          });
-                          successCount++;
-                        } catch (err) {
-                          console.error(`Failed to save ${upload.file.name}:`, err);
-                        }
-                      }
-                      await loadTrainingStatus();
-                      setNoticeMessage(`成功将 ${successCount} 张图片直接存入训练池！`);
-                      clearAll();
-                    } catch (error) {
-                      setErrorMessage(error instanceof Error ? error.message : "批量存入失败。");
-                    } finally {
-                      setIsSavingTraining(false);
-                    }
-                  }}
-                  disabled={isSavingTraining || !uploads.length}
-                >
-                  {isSavingTraining ? "保存中..." : "全部直接存入训练池"}
-                </button>
-                <button
-                  className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-medium hover:bg-slate-50"
-                  onClick={async () => {
-                    try {
-                      const items = await navigator.clipboard.read();
-                      const files: File[] = [];
-                      for (const item of items) {
-                        const imageTypes = item.types.filter((type) => type.startsWith("image/"));
-                        for (const type of imageTypes) {
-                          const blob = await item.getType(type);
-                          const ext = type.split("/")[1] || "png";
-                          files.push(
-                            new File([blob], `pasted-image-${Date.now()}-${files.length}.${ext}`, {
-                              type,
-                              lastModified: Date.now(),
-                            }),
-                          );
-                        }
-                      }
-                      if (files.length > 0) {
-                        void handleFiles(files);
-                      } else {
-                        setErrorMessage("剪贴板中没有图片。");
-                      }
-                    } catch {
-                      setErrorMessage("无法读取剪贴板，请确保已授予浏览器权限，或直接使用 Ctrl+V 快捷键粘贴。");
-                    }
-                  }}
-                >
-                  从剪贴板粘贴
-                </button>
-                <button className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-medium hover:bg-slate-50" onClick={clearAll}>
-                  清空
-                </button>
+          <div className="flex flex-col gap-4">
+            <div className="flex min-h-0 flex-col rounded-3xl border border-slate-200 bg-white shadow-sm">
+              <div className="border-b border-slate-200 px-5 py-4">
+                <h2 className="text-lg font-semibold">全局规则与知识库</h2>
+                <p className="mt-1 text-sm text-slate-500">上传 PDF/TXT 文档，或输入自定义提取规则，AI 填表时将严格遵守。</p>
               </div>
-
-              {errorMessage ? (
-                <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{errorMessage}</div>
-              ) : null}
-
-              {noticeMessage ? (
-                <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">{noticeMessage}</div>
-              ) : null}
-
-              <div className="grid gap-4 xl:grid-cols-1">
-                <div className="max-h-[600px] overflow-auto rounded-2xl border border-slate-200">
-                  {uploads.length ? (
-                    <ul className="divide-y divide-slate-200">
-                      {uploads.map((upload) => (
-                        <li key={upload.id}>
-                          <button
-                            className={`flex w-full items-center gap-3 px-3 py-2 text-left text-sm transition-colors ${
-                              selectedUploadId === upload.id ? "bg-blue-50 ring-1 ring-inset ring-blue-400" : "bg-white hover:bg-slate-50"
-                            }`}
-                            onClick={(e) => handleImageClick(upload, e)}
-                          >
-                            <div className="relative h-12 w-12 shrink-0 overflow-hidden rounded-lg border border-slate-200 bg-slate-100">
-                              <Image src={upload.previewUrl} alt={upload.file.name} className="object-cover" fill unoptimized />
-                            </div>
-                            <div className="min-w-0 flex-1">
-                              <div className="truncate font-medium text-slate-700">{upload.file.name}</div>
-                              <div className="mt-0.5 text-xs text-slate-500">
-                                {(upload.file.size / 1024).toFixed(1)} KB
-                              </div>
-                            </div>
-                            <div className="text-xs font-medium text-blue-600">点击标注</div>
-                          </button>
+              <div className="flex flex-col gap-4 p-5">
+                <div>
+                  <label className="mb-2 block text-sm font-medium text-slate-700">自定义提取规则</label>
+                  <textarea
+                    className="w-full resize-none rounded-xl border border-slate-300 px-3 py-2 text-sm outline-none focus:border-blue-500"
+                    rows={4}
+                    placeholder="例如：如果路线包含 'M'，则认为是早班..."
+                    value={globalRules.instructions}
+                    onChange={(e) => setGlobalRules({ ...globalRules, instructions: e.target.value })}
+                  />
+                </div>
+                <div>
+                  <label className="mb-2 block text-sm font-medium text-slate-700">参考文档 (TXT/CSV)</label>
+                  <label className="inline-flex cursor-pointer items-center justify-center rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50">
+                    {isUploadingDoc ? "解析中..." : "上传文档"}
+                    <input type="file" accept=".txt,.csv,.md" className="hidden" onChange={(e) => void handleDocumentUpload(e)} disabled={isUploadingDoc} />
+                  </label>
+                  {globalRules.documents.length > 0 && (
+                    <ul className="mt-3 space-y-2">
+                      {globalRules.documents.map((doc, idx) => (
+                        <li key={idx} className="flex items-center justify-between rounded-lg bg-slate-50 px-3 py-2 text-sm">
+                          <span className="truncate text-slate-700" title={doc.name}>{doc.name}</span>
+                          <button className="text-rose-500 hover:text-rose-700" onClick={() => removeDocument(idx)}>删除</button>
                         </li>
                       ))}
                     </ul>
-                  ) : (
-                    <div className="px-4 py-8 text-center text-sm text-slate-500">上传后这里会显示待标注图片</div>
                   )}
+                </div>
+                <button
+                  className="rounded-xl bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-blue-300"
+                  onClick={() => void saveGlobalRules()}
+                  disabled={isSavingRules}
+                >
+                  {isSavingRules ? "保存中..." : "保存全局规则"}
+                </button>
+              </div>
+            </div>
+
+            <div ref={uploadPanelRef} className="flex min-h-0 flex-1 flex-col rounded-3xl border border-slate-200 bg-white shadow-sm">
+              <div className="border-b border-slate-200 px-5 py-4">
+                <h2 className="text-lg font-semibold">待标注图片</h2>
+                <p className="mt-1 text-sm text-slate-500">上传或粘贴需要加入训练池的图片。</p>
+              </div>
+
+              <div className="space-y-4 p-5">
+                <label
+                  className={`flex cursor-pointer flex-col items-center justify-center rounded-2xl border border-dashed px-4 py-8 text-center transition ${
+                    isDraggingFiles
+                      ? "border-emerald-500 bg-emerald-50"
+                      : "border-slate-300 bg-slate-50 hover:border-slate-400 hover:bg-slate-100"
+                  }`}
+                  onDragOver={handleDragOver}
+                  onDragEnter={handleDragOver}
+                  onDragLeave={handleDragLeave}
+                  onDrop={handleDrop}
+                >
+                  <span className="text-sm font-medium">点击、拖拽或粘贴上传图片</span>
+                  <span className="mt-1 text-xs text-slate-500">
+                    {isDraggingFiles ? "松开鼠标即可上传图片" : "可一次选择多张，或直接 Ctrl+V 粘贴"}
+                  </span>
+                  <input className="hidden" type="file" accept="image/*" multiple onChange={(event) => void handleFiles(event.target.files)} />
+                </label>
+
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-700 disabled:cursor-not-allowed disabled:bg-slate-400"
+                    onClick={async () => {
+                      if (!uploads.length) {
+                        setErrorMessage("请先上传图片。");
+                        return;
+                      }
+                      setIsSavingTraining(true);
+                      setErrorMessage("");
+                      try {
+                        let successCount = 0;
+                        for (const upload of uploads) {
+                          try {
+                            const imageDataUrl = await imageSourceToDataUrl(upload.previewUrl);
+                            await fetch("/api/training/save", {
+                              method: "POST",
+                              headers: { "Content-Type": "application/json" },
+                              body: JSON.stringify({
+                                imageName: upload.file.name,
+                                imageDataUrl,
+                                notes: "直接存入训练池，未标注",
+                                output: {
+                                  date: "",
+                                  route: "",
+                                  driver: "",
+                                  total: 0,
+                                  unscanned: 0,
+                                  exceptions: 0,
+                                  stationTeam: "",
+                                },
+                                boxes: [],
+                              }),
+                            });
+                            successCount++;
+                          } catch (err) {
+                            console.error(`Failed to save ${upload.file.name}:`, err);
+                          }
+                        }
+                        await loadTrainingStatus();
+                        setNoticeMessage(`成功将 ${successCount} 张图片直接存入训练池！`);
+                        clearAll();
+                      } catch (error) {
+                        setErrorMessage(error instanceof Error ? error.message : "批量存入失败。");
+                      } finally {
+                        setIsSavingTraining(false);
+                      }
+                    }}
+                    disabled={isSavingTraining || !uploads.length}
+                  >
+                    {isSavingTraining ? "保存中..." : "全部直接存入训练池"}
+                  </button>
+                  <button
+                    className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-medium hover:bg-slate-50"
+                    onClick={async () => {
+                      try {
+                        const items = await navigator.clipboard.read();
+                        const files: File[] = [];
+                        for (const item of items) {
+                          const imageTypes = item.types.filter((type) => type.startsWith("image/"));
+                          for (const type of imageTypes) {
+                            const blob = await item.getType(type);
+                            const ext = type.split("/")[1] || "png";
+                            files.push(
+                              new File([blob], `pasted-image-${Date.now()}-${files.length}.${ext}`, {
+                                type,
+                                lastModified: Date.now(),
+                              }),
+                            );
+                          }
+                        }
+                        if (files.length > 0) {
+                          void handleFiles(files);
+                        } else {
+                          setErrorMessage("剪贴板中没有图片。");
+                        }
+                      } catch {
+                        setErrorMessage("无法读取剪贴板，请确保已授予浏览器权限，或直接使用 Ctrl+V 快捷键粘贴。");
+                      }
+                    }}
+                  >
+                    从剪贴板粘贴
+                  </button>
+                  <button className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-medium hover:bg-slate-50" onClick={clearAll}>
+                    清空
+                  </button>
+                </div>
+
+                {errorMessage ? (
+                  <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{errorMessage}</div>
+                ) : null}
+
+                {noticeMessage ? (
+                  <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">{noticeMessage}</div>
+                ) : null}
+
+                <div className="grid gap-4 xl:grid-cols-1">
+                  <div className="max-h-[600px] overflow-auto rounded-2xl border border-slate-200">
+                    {uploads.length ? (
+                      <ul className="divide-y divide-slate-200">
+                        {uploads.map((upload) => (
+                          <li key={upload.id}>
+                            <button
+                              className={`flex w-full items-center gap-3 px-3 py-2 text-left text-sm transition-colors ${
+                                selectedUploadId === upload.id ? "bg-blue-50 ring-1 ring-inset ring-blue-400" : "bg-white hover:bg-slate-50"
+                              }`}
+                              onClick={(e) => handleImageClick(upload, e)}
+                            >
+                              <div className="relative h-12 w-12 shrink-0 overflow-hidden rounded-lg border border-slate-200 bg-slate-100">
+                                <Image src={upload.previewUrl} alt={upload.file.name} className="object-cover" fill unoptimized />
+                              </div>
+                              <div className="min-w-0 flex-1">
+                                <div className="truncate font-medium text-slate-700">{upload.file.name}</div>
+                                <div className="mt-0.5 text-xs text-slate-500">
+                                  {(upload.file.size / 1024).toFixed(1)} KB
+                                </div>
+                              </div>
+                              <div className="text-xs font-medium text-blue-600">点击标注</div>
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <div className="px-4 py-8 text-center text-sm text-slate-500">上传后这里会显示待标注图片</div>
+                    )}
+                  </div>
                 </div>
               </div>
             </div>

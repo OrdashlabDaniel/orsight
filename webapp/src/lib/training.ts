@@ -36,26 +36,83 @@ export type TrainingExample = {
   boxes?: TrainingBox[];
 };
 
-export async function loadTrainingExamples(): Promise<TrainingExample[]> {
+export type GlobalRules = {
+  instructions: string;
+  documents: Array<{
+    name: string;
+    content: string;
+  }>;
+};
+
+const GLOBAL_RULES_KEY = "__global_rules__";
+
+export async function loadGlobalRules(): Promise<GlobalRules> {
   const admin = getSupabaseAdmin();
   if (!isSupabaseConfigured() || !admin) {
-    return loadLocalTrainingExamples();
+    // Fallback to local if needed, but for now just return empty
+    return { instructions: "", documents: [] };
   }
 
   try {
     const { data, error } = await admin
       .from("training_examples")
-      .select("data");
+      .select("data")
+      .eq("image_name", GLOBAL_RULES_KEY)
+      .single();
+
+    if (error || !data) {
+      return { instructions: "", documents: [] };
+    }
+
+    return data.data as GlobalRules;
+  } catch (error) {
+    console.error("Exception loading global rules:", error);
+    return { instructions: "", documents: [] };
+  }
+}
+
+export async function saveGlobalRules(rules: GlobalRules) {
+  const admin = getSupabaseAdmin();
+  if (!isSupabaseConfigured() || !admin) {
+    return;
+  }
+
+  const { error } = await admin
+    .from("training_examples")
+    .upsert(
+      {
+        image_name: GLOBAL_RULES_KEY,
+        data: rules,
+      },
+      { onConflict: "image_name" },
+    );
+
+  if (error) {
+    throw new Error(`Failed to save global rules: ${error.message}`);
+  }
+}
+
+export async function loadTrainingExamples(): Promise<TrainingExample[]> {
+  const admin = getSupabaseAdmin();
+  if (!isSupabaseConfigured() || !admin) {
+    return loadLocalTrainingExamples().filter(ex => ex.imageName !== GLOBAL_RULES_KEY);
+  }
+
+  try {
+    const { data, error } = await admin
+      .from("training_examples")
+      .select("data")
+      .neq("image_name", GLOBAL_RULES_KEY);
 
     if (error) {
       console.error("Error loading examples from Supabase:", error);
-      return loadLocalTrainingExamples();
+      return loadLocalTrainingExamples().filter(ex => ex.imageName !== GLOBAL_RULES_KEY);
     }
 
     return data.map((row) => row.data as TrainingExample);
   } catch (error) {
     console.error("Exception loading examples:", error);
-    return loadLocalTrainingExamples();
+    return loadLocalTrainingExamples().filter(ex => ex.imageName !== GLOBAL_RULES_KEY);
   }
 }
 
@@ -282,34 +339,48 @@ function saveLocalTrainingImageDataUrl(imageName: string, dataUrl: string) {
   fs.writeFileSync(path.join(dirPath, imageName), buffer);
 }
 
-export function buildTrainingPromptSection(examples: TrainingExample[], limit = 8): string {
-  if (!examples.length) {
-    return "";
+export function buildTrainingPromptSection(examples: TrainingExample[], globalRules?: GlobalRules | null, limit = 8): string {
+  let section = "";
+
+  if (globalRules) {
+    if (globalRules.instructions) {
+      section += `\n\n【全局提取规则与用户指示】\n${globalRules.instructions}\n`;
+    }
+    if (globalRules.documents && globalRules.documents.length > 0) {
+      section += `\n\n【参考文档与知识库】\n`;
+      globalRules.documents.forEach((doc, idx) => {
+        section += `--- 文档 ${idx + 1}: ${doc.name} ---\n${doc.content}\n`;
+      });
+    }
   }
 
-  const chosen = examples.slice(0, limit);
-  const lines = chosen.map((example, index) => {
-    const prefix = `示例 ${index + 1}`;
-    const meta = [
-      example.imageName ? `图片名=${example.imageName}` : "",
-      example.notes ? `备注=${example.notes}` : "",
-    ]
-      .filter(Boolean)
-      .join("；");
+  if (examples.length > 0) {
+    const chosen = examples.slice(0, limit);
+    const lines = chosen.map((example, index) => {
+      const prefix = `示例 ${index + 1}`;
+      const meta = [
+        example.imageName ? `图片名=${example.imageName}` : "",
+        example.notes ? `备注=${example.notes}` : "",
+      ]
+        .filter(Boolean)
+        .join("；");
 
-    return [
-      `${prefix}${meta ? `（${meta}）` : ""}`,
-      `date=${example.output.date}`,
-      `route=${example.output.route}`,
-      `driver=${example.output.driver}`,
-      `total=${example.output.total}`,
-      `unscanned=${example.output.unscanned}`,
-      `exceptions=${example.output.exceptions}`,
-      example.output.stationTeam ? `stationTeam=${example.output.stationTeam}` : "",
-    ]
-      .filter(Boolean)
-      .join(" | ");
-  });
+      return [
+        `${prefix}${meta ? `（${meta}）` : ""}`,
+        `date=${example.output.date}`,
+        `route=${example.output.route}`,
+        `driver=${example.output.driver}`,
+        `total=${example.output.total}`,
+        `unscanned=${example.output.unscanned}`,
+        `exceptions=${example.output.exceptions}`,
+        example.output.stationTeam ? `stationTeam=${example.output.stationTeam}` : "",
+      ]
+        .filter(Boolean)
+        .join(" | ");
+    });
 
-  return `\n\n下面是历史正确样本，请优先遵循这些字段映射方式，不要编造未展示信息：\n${lines.join("\n")}`;
+    section += `\n\n下面是历史正确样本，请优先遵循这些字段映射方式，不要编造未展示信息：\n${lines.join("\n")}`;
+  }
+
+  return section;
 }
