@@ -172,7 +172,7 @@ export function validateRecord(record: PodRecord): ExtractionIssue[] {
     if (value === "" && !required) {
       continue;
     }
-    if (typeof value !== "number" || value < 0) {
+    if (value !== "" && (typeof value !== "number" || value < 0)) {
       issues.push({
         imageName: record.imageName,
         route: record.route,
