@@ -33,6 +33,7 @@ type RawModelRecord = {
   totalSourceLabel?: unknown;
   unscanned?: unknown;
   exceptions?: unknown;
+  waybillStatus?: unknown;
   stationTeam?: unknown;
   reviewRequired?: unknown;
   reviewReason?: unknown;
@@ -237,6 +238,7 @@ function mapRecord(imageName: string, raw: RawModelRecord, index: number): PodRe
     totalSourceLabel: normalizeText(raw.totalSourceLabel),
     unscanned: normalizeNumber(raw.unscanned),
     exceptions: normalizeNumber(raw.exceptions),
+    waybillStatus: normalizeText(raw.waybillStatus),
     stationTeam: normalizeText(raw.stationTeam),
     reviewRequired: Boolean(raw.reviewRequired),
     reviewReason: normalizeText(raw.reviewReason) || null,
@@ -252,6 +254,7 @@ function recordSignature(record: PodRecord): string {
     totalSourceLabel: record.totalSourceLabel,
     unscanned: record.unscanned,
     exceptions: record.exceptions,
+    waybillStatus: record.waybillStatus,
   });
 }
 

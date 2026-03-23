@@ -15,6 +15,7 @@ type SaveTrainingPayload = {
     totalSourceLabel?: unknown;
     unscanned?: unknown;
     exceptions?: unknown;
+    waybillStatus?: unknown;
     stationTeam?: unknown;
   };
   boxes?: unknown;
@@ -99,6 +100,7 @@ export async function POST(request: Request) {
         totalSourceLabel: normalizeText(output?.totalSourceLabel) || undefined,
         unscanned: normalizeNumber(output?.unscanned) || 0,
         exceptions: normalizeNumber(output?.exceptions) || 0,
+        waybillStatus: normalizeText(output?.waybillStatus) || undefined,
         stationTeam: normalizeText(output?.stationTeam) || undefined,
       },
       boxes: normalizeBoxes(payload.boxes),

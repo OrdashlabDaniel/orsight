@@ -11,7 +11,7 @@ type UploadItem = {
   previewUrl: string;
 };
 
-type AnnotationField = "date" | "route" | "driver" | "total" | "unscanned" | "exceptions" | "stationTeam";
+type AnnotationField = "date" | "route" | "driver" | "total" | "unscanned" | "exceptions" | "waybillStatus" | "stationTeam";
 
 type AnnotationBox = {
   field: AnnotationField;
@@ -36,6 +36,7 @@ type TrainingStatusItem = {
       totalSourceLabel?: string;
       unscanned: number;
       exceptions: number;
+      waybillStatus?: string;
       stationTeam?: string;
     };
     boxes?: AnnotationBox[];
@@ -69,6 +70,7 @@ const annotationFields: Array<{ key: AnnotationField; label: string }> = [
   { key: "total", label: "运单数量" },
   { key: "unscanned", label: "未收数量" },
   { key: "exceptions", label: "错扫数量" },
+  { key: "waybillStatus", label: "运单状态" },
   { key: "stationTeam", label: "站点车队" },
 ];
 
@@ -396,6 +398,7 @@ export default function TrainingMode() {
       totalSourceLabel: existingExample?.output.totalSourceLabel || "",
       unscanned: existingExample?.output.unscanned || undefined,
       exceptions: existingExample?.output.exceptions || undefined,
+      waybillStatus: existingExample?.output.waybillStatus || "",
       stationTeam: existingExample?.output.stationTeam || "",
     });
 
@@ -546,6 +549,7 @@ export default function TrainingMode() {
             totalSourceLabel: manualRecord.totalSourceLabel || "",
             unscanned: Number(manualRecord.unscanned) || 0,
             exceptions: Number(manualRecord.exceptions) || 0,
+            waybillStatus: manualRecord.waybillStatus || "",
             stationTeam: manualRecord.stationTeam || "",
           },
           boxes: annotationBoxes,
@@ -688,6 +692,7 @@ export default function TrainingMode() {
                                 totalSourceLabel: "",
                                 unscanned: 0,
                                 exceptions: 0,
+                                waybillStatus: "",
                                 stationTeam: "",
                               },
                                 boxes: [],

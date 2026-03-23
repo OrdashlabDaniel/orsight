@@ -10,6 +10,7 @@ export type TrainingField =
   | "total"
   | "unscanned"
   | "exceptions"
+  | "waybillStatus"
   | "stationTeam";
 
 export type TrainingBox = {
@@ -32,6 +33,7 @@ export type TrainingExample = {
     totalSourceLabel?: string;
     unscanned: number;
     exceptions: number;
+    waybillStatus?: string;
     stationTeam?: string;
   };
   boxes?: TrainingBox[];
@@ -375,6 +377,7 @@ export function buildTrainingPromptSection(examples: TrainingExample[], globalRu
         example.output.totalSourceLabel ? `totalSourceLabel=${example.output.totalSourceLabel}` : "",
         `unscanned=${example.output.unscanned}`,
         `exceptions=${example.output.exceptions}`,
+        example.output.waybillStatus ? `waybillStatus=${example.output.waybillStatus}` : "",
         example.output.stationTeam ? `stationTeam=${example.output.stationTeam}` : "",
       ]
         .filter(Boolean)

@@ -18,7 +18,7 @@ type UploadItem = {
   previewUrl: string;
 };
 
-type AnnotationField = "date" | "route" | "driver" | "total" | "unscanned" | "exceptions" | "stationTeam";
+type AnnotationField = "date" | "route" | "driver" | "total" | "unscanned" | "exceptions" | "waybillStatus" | "stationTeam";
 
 type AnnotationBox = {
   field: AnnotationField;
@@ -83,7 +83,7 @@ type ViewerDragState = {
 };
 
 const editableColumns: Array<{
-  key: keyof Pick<PodRecord, "date" | "route" | "driver" | "total" | "unscanned" | "exceptions">;
+  key: keyof Pick<PodRecord, "date" | "route" | "driver" | "total" | "unscanned" | "exceptions" | "waybillStatus">;
   label: string;
   type?: "text" | "number";
 }> = [
@@ -93,6 +93,7 @@ const editableColumns: Array<{
   { key: "total", label: "运单数量", type: "number" },
   { key: "unscanned", label: "未收数量", type: "number" },
   { key: "exceptions", label: "错扫数量", type: "number" },
+  { key: "waybillStatus", label: "运单状态" },
 ];
 
 const annotationFields: Array<{ key: AnnotationField; label: string }> = [
@@ -102,6 +103,7 @@ const annotationFields: Array<{ key: AnnotationField; label: string }> = [
   { key: "total", label: "运单数量" },
   { key: "unscanned", label: "未收数量" },
   { key: "exceptions", label: "错扫数量" },
+  { key: "waybillStatus", label: "运单状态" },
   { key: "stationTeam", label: "站点车队" },
 ];
 
