@@ -1137,6 +1137,37 @@ export default function Home() {
                 >
                   {isExtracting ? "AI 识别中..." : "开始 AI 填表"}
                 </button>
+                <button
+                  className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-medium hover:bg-slate-50"
+                  onClick={async () => {
+                    try {
+                      const items = await navigator.clipboard.read();
+                      const files: File[] = [];
+                      for (const item of items) {
+                        const imageTypes = item.types.filter((type) => type.startsWith("image/"));
+                        for (const type of imageTypes) {
+                          const blob = await item.getType(type);
+                          const ext = type.split("/")[1] || "png";
+                          files.push(
+                            new File([blob], `pasted-image-${Date.now()}-${files.length}.${ext}`, {
+                              type,
+                              lastModified: Date.now(),
+                            }),
+                          );
+                        }
+                      }
+                      if (files.length > 0) {
+                        void handleFiles(files);
+                      } else {
+                        setErrorMessage("剪贴板中没有图片。");
+                      }
+                    } catch (err) {
+                      setErrorMessage("无法读取剪贴板，请确保已授予浏览器权限，或直接使用 Ctrl+V 快捷键粘贴。");
+                    }
+                  }}
+                >
+                  从剪贴板粘贴
+                </button>
                 <button className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-medium hover:bg-slate-50" onClick={clearAll}>
                   清空
                 </button>
