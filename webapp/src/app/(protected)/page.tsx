@@ -116,6 +116,7 @@ function buildExportRows(records: PodRecord[]) {
     record.unscanned,
     record.exceptions,
     record.waybillStatus || "",
+    record.stationTeam || "",
   ]);
 }
 
