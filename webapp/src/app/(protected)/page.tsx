@@ -183,11 +183,14 @@ export default function Home() {
   const viewerAnchorRef = useRef<HTMLElement | null>(null);
   const uploadPanelRef = useRef<HTMLDivElement | null>(null);
 
+  const uploadsRef = useRef(uploads);
+  uploadsRef.current = uploads;
+
   useEffect(() => {
     return () => {
-      uploads.forEach((upload) => URL.revokeObjectURL(upload.previewUrl));
+      uploadsRef.current.forEach((upload) => URL.revokeObjectURL(upload.previewUrl));
     };
-  }, [uploads]);
+  }, []);
 
   useEffect(() => {
     void loadTrainingStatus();
