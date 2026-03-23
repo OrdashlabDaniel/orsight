@@ -546,6 +546,57 @@ export default function TrainingMode() {
 
               <div className="flex flex-wrap gap-2">
                 <button
+                  className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-700 disabled:cursor-not-allowed disabled:bg-slate-400"
+                  onClick={async () => {
+                    if (!uploads.length) {
+                      setErrorMessage("请先上传图片。");
+                      return;
+                    }
+                    setIsSavingTraining(true);
+                    setErrorMessage("");
+                    try {
+                      let successCount = 0;
+                      for (const upload of uploads) {
+                        try {
+                          const imageDataUrl = await imageSourceToDataUrl(upload.previewUrl);
+                          await fetch("/api/training/save", {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({
+                              imageName: upload.file.name,
+                              imageDataUrl,
+                              notes: "直接存入训练池，未标注",
+                              output: {
+                                date: "",
+                                route: "",
+                                driver: "",
+                                total: 0,
+                                unscanned: 0,
+                                exceptions: 0,
+                                stationTeam: "",
+                              },
+                              boxes: [],
+                            }),
+                          });
+                          successCount++;
+                        } catch (err) {
+                          console.error(`Failed to save ${upload.file.name}:`, err);
+                        }
+                      }
+                      await loadTrainingStatus();
+                      setNoticeMessage(`成功将 ${successCount} 张图片直接存入训练池！`);
+                      clearAll();
+                    } catch (error) {
+                      setErrorMessage(error instanceof Error ? error.message : "批量存入失败。");
+                    } finally {
+                      setIsSavingTraining(false);
+                    }
+                  }}
+                  disabled={isSavingTraining || !uploads.length}
+                >
+                  {isSavingTraining ? "保存中..." : "全部直接存入训练池"}
+                </button>
+                <button
                   className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-medium hover:bg-slate-50"
                   onClick={async () => {
                     try {
