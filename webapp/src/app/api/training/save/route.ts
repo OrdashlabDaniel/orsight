@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { getAuthUserOrSkip } from "@/lib/auth-server";
-import { saveTrainingImageDataUrl, type TrainingBox, type TrainingExample, upsertTrainingExample } from "@/lib/training";
+import { saveTrainingImageDataUrl, type TrainingBox, type TrainingExample, upsertTrainingExample, loadTrainingExamples } from "@/lib/training";
 
 type SaveTrainingPayload = {
   imageName?: unknown;
