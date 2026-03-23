@@ -739,6 +739,40 @@ export default function Home() {
     }
   }
 
+  function handleImageClick(upload: UploadItem, event: React.MouseEvent<HTMLElement>) {
+    setSelectedUploadId(upload.id);
+
+    const matchedRecord = records.find((r) => getSourceImageNames(r).includes(upload.file.name));
+
+    if (matchedRecord) {
+      openRecordImage(matchedRecord, event.currentTarget);
+      setTimeout(() => {
+        const row = document.getElementById(`record-row-${matchedRecord.id}`);
+        if (row) {
+          row.scrollIntoView({ behavior: "smooth", block: "center" });
+        }
+      }, 50);
+    } else {
+      const anchor = resolveRowAnchor(event.currentTarget);
+      viewerAnchorRef.current = anchor;
+      if (anchor) {
+        setViewerPopupPosition(calculatePopupPosition(anchor, "viewer"));
+      }
+
+      if (annotatingRecord) {
+        closeRecordPopup();
+      }
+
+      setViewingRecord(null);
+      setViewerImageName(upload.file.name);
+      setViewerImageSrc(upload.previewUrl);
+      setViewerLoadError("");
+      setViewerScale(1);
+      setViewerPan({ x: 0, y: 0 });
+      setNoticeMessage(`已打开图片：${upload.file.name}`);
+    }
+  }
+
   function openRecordImage(record: PodRecord, anchorElement?: HTMLElement) {
     const imageName = getSourceImageNames(record)[0];
     if (!imageName) {
@@ -1131,31 +1165,25 @@ export default function Home() {
               ) : null}
 
               <div className="grid gap-4 xl:grid-cols-1">
-                <div className="overflow-hidden rounded-2xl border border-slate-200 bg-slate-50">
-                  <div className="border-b border-slate-200 px-4 py-3 text-sm font-medium">图片预览</div>
-                  <div className="relative aspect-[3/4] w-full bg-slate-100">
-                    {selectedUpload ? (
-                      <Image src={selectedUpload.previewUrl} alt={selectedUpload.file.name} className="h-full w-full object-contain" fill unoptimized />
-                    ) : (
-                      <div className="flex h-full items-center justify-center text-sm text-slate-500">暂无图片</div>
-                    )}
-                  </div>
-                </div>
-
-                <div className="max-h-80 overflow-auto rounded-2xl border border-slate-200">
+                <div className="max-h-[600px] overflow-auto rounded-2xl border border-slate-200">
                   {uploads.length ? (
                     <ul className="divide-y divide-slate-200">
                       {uploads.map((upload) => (
                         <li key={upload.id}>
                           <button
-                            className={`w-full px-4 py-3 text-left text-sm ${
-                              selectedUpload?.id === upload.id ? "bg-slate-900 text-white" : "bg-white hover:bg-slate-50"
+                            className={`flex w-full items-center gap-3 px-3 py-2 text-left text-sm transition-colors ${
+                              selectedUpload?.id === upload.id ? "bg-blue-50 ring-1 ring-inset ring-blue-400" : "bg-white hover:bg-slate-50"
                             }`}
-                            onClick={() => setSelectedUploadId(upload.id)}
+                            onClick={(e) => handleImageClick(upload, e)}
                           >
-                            <div className="truncate font-medium">{upload.file.name}</div>
-                            <div className={`mt-1 text-xs ${selectedUpload?.id === upload.id ? "text-slate-300" : "text-slate-500"}`}>
-                              {(upload.file.size / 1024).toFixed(1)} KB
+                            <div className="relative h-12 w-12 shrink-0 overflow-hidden rounded-lg border border-slate-200 bg-slate-100">
+                              <Image src={upload.previewUrl} alt={upload.file.name} className="object-cover" fill unoptimized />
+                            </div>
+                            <div className="min-w-0 flex-1">
+                              <div className="truncate font-medium text-slate-700">{upload.file.name}</div>
+                              <div className="mt-0.5 text-xs text-slate-500">
+                                {(upload.file.size / 1024).toFixed(1)} KB
+                              </div>
                             </div>
                           </button>
                         </li>
@@ -1293,6 +1321,7 @@ export default function Home() {
                         {routeRecords.map((record) => (
                           <tr
                             key={record.id}
+                            id={`record-row-${record.id}`}
                             className={`odd:bg-white even:bg-slate-50 ${
                               needsManualAnnotation(record) ? "bg-rose-50/70" : ""
                             } ${
@@ -1375,7 +1404,7 @@ export default function Home() {
           </div>
         </section>
 
-        {viewingRecord && viewerPopupPosition ? (
+        {viewerImageName && viewerPopupPosition ? (
           <div
             className="fixed z-50 max-h-[85vh] overflow-hidden rounded-3xl border border-slate-200 bg-white p-5 shadow-2xl"
             style={{
@@ -1398,9 +1427,15 @@ export default function Home() {
             </div>
 
             <div className="mb-3 flex flex-wrap items-center gap-2">
-              <span className="rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-700">
-                {viewingRecord.route} / {viewingRecord.driver}
-              </span>
+              {viewingRecord ? (
+                <span className="rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-700">
+                  {viewingRecord.route} / {viewingRecord.driver}
+                </span>
+              ) : (
+                <span className="rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-700">
+                  未生成记录
+                </span>
+              )}
               <button
                 className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100"
                 onClick={() => zoomViewer(0.25)}
@@ -1419,12 +1454,14 @@ export default function Home() {
               >
                 重置
               </button>
-              <button
-                className="rounded-lg border border-blue-300 bg-blue-50 px-3 py-1.5 text-xs font-medium text-blue-700 hover:bg-blue-100"
-                onClick={(event) => void openAnnotationPanel(viewingRecord, event.currentTarget)}
-              >
-                转到标注
-              </button>
+              {viewingRecord && (
+                <button
+                  className="rounded-lg border border-blue-300 bg-blue-50 px-3 py-1.5 text-xs font-medium text-blue-700 hover:bg-blue-100"
+                  onClick={(event) => void openAnnotationPanel(viewingRecord, event.currentTarget)}
+                >
+                  转到标注
+                </button>
+              )}
             </div>
 
             <div
