@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 
 import { getDisplayUsernameFromUser } from "@/lib/auth-username";
@@ -11,6 +11,7 @@ import { isSupabaseAuthEnabled } from "@/lib/supabase";
 
 export function UserNav() {
   const router = useRouter();
+  const pathname = usePathname();
   const [displayName, setDisplayName] = useState<string | null>(null);
 
   const supabaseOn = isSupabaseAuthEnabled();
@@ -71,10 +72,13 @@ export function UserNav() {
         {devMock && !supabaseOn ? (
           <span className="rounded bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-900">假登录</span>
         ) : null}
-        <Link href="/" className="font-medium text-slate-700 hover:text-slate-900">
-          工作台
+        <Link href="/" className={`font-medium ${pathname === "/" ? "text-blue-600" : "text-slate-700 hover:text-slate-900"}`}>
+          填表模式
         </Link>
-        <Link href="/account" className="text-slate-600 hover:text-slate-900">
+        <Link href="/training" className={`font-medium ${pathname === "/training" ? "text-blue-600" : "text-slate-700 hover:text-slate-900"}`}>
+          训练模式
+        </Link>
+        <Link href="/account" className={`font-medium ${pathname === "/account" ? "text-blue-600" : "text-slate-600 hover:text-slate-900"}`}>
           用户信息
         </Link>
         {displayName ? (

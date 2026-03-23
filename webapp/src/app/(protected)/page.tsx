@@ -1091,7 +1091,7 @@ export default function Home() {
     <main className="min-h-screen bg-slate-100 px-4 py-4 text-slate-900">
       <div className="mx-auto flex max-w-[1800px] flex-col gap-4">
         <header className="rounded-3xl border border-slate-200 bg-white px-6 py-5 shadow-sm">
-          <h1 className="text-2xl font-semibold">OrSight</h1>
+          <h1 className="text-2xl font-semibold">OrSight - 填表模式</h1>
           <p className="mt-2 text-sm text-slate-600">
             左侧批量上传 POD 签退截图，右侧查看 AI 填表结果。对四次不一致的条目可以打开标注工作台，手动画框后存入训练池。
           </p>
@@ -1161,7 +1161,7 @@ export default function Home() {
                       } else {
                         setErrorMessage("剪贴板中没有图片。");
                       }
-                    } catch (err) {
+                    } catch {
                       setErrorMessage("无法读取剪贴板，请确保已授予浏览器权限，或直接使用 Ctrl+V 快捷键粘贴。");
                     }
                   }}
