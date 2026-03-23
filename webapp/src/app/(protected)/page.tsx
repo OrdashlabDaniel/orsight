@@ -504,26 +504,37 @@ export default function Home() {
     };
   }
 
-  function handleFiles(fileList: FileList | null) {
+  async function handleFiles(fileList: FileList | null) {
     if (!fileList?.length) {
       return;
     }
 
-    const nextUploads = Array.from(fileList).map((file, index) => ({
-      id: `${file.name}-${file.lastModified}-${index}`,
-      file,
-      previewUrl: URL.createObjectURL(file),
-    }));
+    try {
+      const nextUploads = await Promise.all(
+        Array.from(fileList).map(async (file, index) => {
+          // 立即将文件读取到内存中，避免微信等应用清理临时文件导致 File 对象失效（拖拽图片破损问题）
+          const buffer = await file.arrayBuffer();
+          const clonedFile = new File([buffer], file.name, { type: file.type, lastModified: file.lastModified });
+          return {
+            id: `${clonedFile.name}-${clonedFile.lastModified}-${index}-${Date.now()}`,
+            file: clonedFile,
+            previewUrl: URL.createObjectURL(clonedFile),
+          };
+        })
+      );
 
-    setUploads((current) => {
-      const merged = [...current, ...nextUploads];
-      if (!selectedUploadId && merged[0]) {
-        setSelectedUploadId(merged[0].id);
-      }
-      return merged;
-    });
-    setNoticeMessage(`已加入 ${nextUploads.length} 张图片。`);
-    setErrorMessage("");
+      setUploads((current) => {
+        const merged = [...current, ...nextUploads];
+        if (!selectedUploadId && merged[0]) {
+          setSelectedUploadId(merged[0].id);
+        }
+        return merged;
+      });
+      setNoticeMessage(`已加入 ${nextUploads.length} 张图片。`);
+      setErrorMessage("");
+    } catch (error) {
+      setErrorMessage("读取图片内容失败，可能是文件已被其他程序移动或删除，请重试。");
+    }
   }
 
   function handleDragOver(event: React.DragEvent<HTMLLabelElement>) {
@@ -544,7 +555,7 @@ export default function Home() {
     event.preventDefault();
     event.stopPropagation();
     setIsDraggingFiles(false);
-    handleFiles(event.dataTransfer.files);
+    void handleFiles(event.dataTransfer.files);
   }
 
   function clearAll() {
@@ -1037,7 +1048,7 @@ export default function Home() {
                 <span className="mt-1 text-xs text-slate-500">
                   {isDraggingFiles ? "松开鼠标即可上传图片" : "可一次选择多张截图"}
                 </span>
-                <input className="hidden" type="file" accept="image/*" multiple onChange={(event) => handleFiles(event.target.files)} />
+                <input className="hidden" type="file" accept="image/*" multiple onChange={(event) => void handleFiles(event.target.files)} />
               </label>
 
               <div className="flex flex-wrap gap-2">
