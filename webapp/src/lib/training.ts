@@ -29,6 +29,7 @@ export type TrainingExample = {
     route: string;
     driver: string;
     total: number;
+    totalSourceLabel?: string;
     unscanned: number;
     exceptions: number;
     stationTeam?: string;
@@ -371,6 +372,7 @@ export function buildTrainingPromptSection(examples: TrainingExample[], globalRu
         `route=${example.output.route}`,
         `driver=${example.output.driver}`,
         `total=${example.output.total}`,
+        example.output.totalSourceLabel ? `totalSourceLabel=${example.output.totalSourceLabel}` : "",
         `unscanned=${example.output.unscanned}`,
         `exceptions=${example.output.exceptions}`,
         example.output.stationTeam ? `stationTeam=${example.output.stationTeam}` : "",

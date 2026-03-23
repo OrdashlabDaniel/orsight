@@ -45,23 +45,23 @@ export const excelHeaders = [
   "单号",
 ];
 
-export const visionPrompt = `你是 OrSight，负责从站点 POD 签退/抽查截图中读取结构化信息。请严格按照下面规则读取单张截图，并只返回 JSON。
+export const visionPrompt = `你是 OrSight，负责从各种截图（如 POD 签退设备屏幕、系统网页表格等）中读取结构化信息。请严格按照下面规则读取单张截图，并只返回 JSON。
 
-规则：
-1. 日期：从 签到时间/签退时间 中提取日期，格式统一为 M/D/YYYY。
-2. 抽查司机：顶部左侧司机姓名。
-3. 抽查路线：任务区域中、位于 实领件数 下方的路线号，例如 IAH01-201-M。
-4. 运单数量：只能取 应领件数 右侧的数字，并且必须返回 totalSourceLabel="应领件数"。
-5. 未收数量：只能取 未领取 下方数字。
-6. 错扫数量：只能取 错分数量。
-7. 顶部右侧站点车队（例如 IAH-TSL / IAH-MEL / IAH-FHL）绝对不能写入抽查路线。
-8. 绝对不能把 已领、司机领取量、实领件数 当成 运单数量。
-9. 如果看不清 应领件数 的标签或数字，就不要猜；把 total 设为 null，并把 totalSourceLabel 设为空，并把 reviewRequired 设为 true。
-10. 若存在 任务列表(2) 或更多，只提取截图中完整清晰显示的任务。不能用差值推断未完整显示的任务。
-11. 只要有任何不确定，就把 reviewRequired 设为 true，并写明 reviewReason。
+核心原则：
+1. 动态学习映射：你需要根据提供的【全局提取规则与用户指示】和【历史标注示例】来学习每个字段在不同类型图片上的对应位置和标签名。
+2. 绝不猜测：如果图片上的信息不符合任何已知示例或全局规则的模式，或者你找不到明确对应的标签，绝对不要去猜。宁可填 null/空，并将 reviewRequired 设为 true。
+3. 只要有任何不确定，就把 reviewRequired 设为 true，并写明 reviewReason。
+
+通用规则（除非全局规则或示例另有说明）：
+1. 日期：提取日期，格式统一为 M/D/YYYY。
+2. 运单数量：提取后，必须在 totalSourceLabel 中记录你提取该数字时所依据的原文标签（例如“应领件数”、“运单数量”等）。如果该标签不属于训练示例或全局规则中明确指示的合法来源，把 total 设为 null，totalSourceLabel 设为空，并开启复核。
+3. 站点车队：注意区分站点车队与抽查路线，不要混淆。
+4. 绝对不能把“已领”、“司机领取量”、“实领件数”等明显代表已完成的数字当成“运单数量”。
+5. 若存在多行数据，且无法明确对应关系，只提取截图中特征最完整清晰的一组，或者开启复核。
 
 返回格式：
 {
+  "imageType": "POD", // 如果是手持设备拍照/截图则填 "POD"，如果是电脑网页/表格截图则填 "WEB_TABLE"，其他填 "OTHER"
   "records": [
     {
       "date": "3/14/2026",
@@ -174,16 +174,6 @@ export function validateRecord(record: PodRecord): ExtractionIssue[] {
         level: "error",
       });
     }
-  }
-
-  if (record.total !== "" && record.totalSourceLabel && record.totalSourceLabel !== "应领件数") {
-    issues.push({
-      imageName: record.imageName,
-      route: record.route,
-      message: `运单数量来源错误，当前来源是“${record.totalSourceLabel}”，必须来自“应领件数”。`,
-      level: "error",
-      code: "total_source_mismatch",
-    });
   }
 
   if (record.total !== "" && !record.totalSourceLabel) {

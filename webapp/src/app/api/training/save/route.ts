@@ -12,6 +12,7 @@ type SaveTrainingPayload = {
     route?: unknown;
     driver?: unknown;
     total?: unknown;
+    totalSourceLabel?: unknown;
     unscanned?: unknown;
     exceptions?: unknown;
     stationTeam?: unknown;
@@ -95,6 +96,7 @@ export async function POST(request: Request) {
         route: normalizeText(output?.route),
         driver: normalizeText(output?.driver),
         total: normalizeNumber(output?.total) || 0,
+        totalSourceLabel: normalizeText(output?.totalSourceLabel) || undefined,
         unscanned: normalizeNumber(output?.unscanned) || 0,
         exceptions: normalizeNumber(output?.exceptions) || 0,
         stationTeam: normalizeText(output?.stationTeam) || undefined,

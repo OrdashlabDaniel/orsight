@@ -65,7 +65,7 @@ function appendReviewReason(currentReason: string | null | undefined, nextReason
   return Array.from(new Set(parts)).join(" | ");
 }
 
-async function callVisionModel(file: File, model: string): Promise<RawModelRecord[]> {
+async function callVisionModel(file: File, model: string): Promise<{ records: RawModelRecord[], imageType: string }> {
   if (!OPENAI_API_KEY) {
     throw new Error("Missing OPENAI_API_KEY. Please configure the AI model first.");
   }
@@ -117,14 +117,17 @@ async function callVisionModel(file: File, model: string): Promise<RawModelRecor
     throw new Error("Vision API returned empty content.");
   }
 
-  let parsed: { records?: RawModelRecord[] };
+  let parsed: { records?: RawModelRecord[], imageType?: string };
   try {
-    parsed = JSON.parse(content) as { records?: RawModelRecord[] };
+    parsed = JSON.parse(content) as { records?: RawModelRecord[], imageType?: string };
   } catch (error) {
     throw new Error(`Model did not return valid JSON: ${String(error)}`);
   }
 
-  return parsed.records || [];
+  return {
+    records: parsed.records || [],
+    imageType: parsed.imageType || "OTHER",
+  };
 }
 
 async function callCounterVerifier(file: File, model: string): Promise<CounterVerificationResult> {
@@ -256,7 +259,7 @@ function attemptSignature(records: PodRecord[]): string {
   return JSON.stringify(records.map(recordSignature).sort());
 }
 
-function markSourceMismatchForReview(records: PodRecord[]) {
+function markSourceMismatchForReview(records: PodRecord[], validLabels: Set<string>) {
   return records.map((record) => {
     if (record.total !== "" && !record.totalSourceLabel) {
       return {
@@ -265,19 +268,19 @@ function markSourceMismatchForReview(records: PodRecord[]) {
         reviewRequired: true,
         reviewReason: appendReviewReason(
           record.reviewReason,
-          "运单数量来源缺失：未能确认数字来自“应领件数”，必须人工检查。",
+          "运单数量来源缺失：未能确认数字来源标签，必须人工检查。",
         ),
       };
     }
 
-    if (record.total !== "" && record.totalSourceLabel && record.totalSourceLabel !== "应领件数") {
+    if (record.total !== "" && record.totalSourceLabel && validLabels.size > 0 && !validLabels.has(record.totalSourceLabel)) {
       return {
         ...record,
         total: "" as const,
         reviewRequired: true,
         reviewReason: appendReviewReason(
           record.reviewReason,
-          `运单数量来源异常：当前来源为“${record.totalSourceLabel}”，必须人工检查。`,
+          `运单数量来源异常：当前来源为“${record.totalSourceLabel}”，不在训练池已知的合法来源中，必须人工检查。`,
         ),
       };
     }
@@ -393,8 +396,11 @@ async function runConsistencyCheck(file: File, model: string) {
     Array.from({ length: attemptCount }, () => callVisionModel(file, model)),
   );
 
+  // We assume the imageType is consistent across attempts, take the first one
+  const imageType = attempts[0]?.imageType || "OTHER";
+
   const mappedAttempts = attempts.map((attempt, attemptIndex) =>
-    attempt.map((rawRecord, recordIndex) => mapRecord(file.name, rawRecord, recordIndex + attemptIndex * 100)),
+    attempt.records.map((rawRecord, recordIndex) => mapRecord(file.name, rawRecord, recordIndex + attemptIndex * 100)),
   );
 
   const firstAttemptRecords = mappedAttempts[0] || [];
@@ -442,6 +448,7 @@ async function runConsistencyCheck(file: File, model: string) {
   return {
     records: finalRecords,
     issues,
+    imageType,
   };
 }
 
@@ -466,12 +473,30 @@ export async function POST(request: Request) {
     const records: PodRecord[] = [];
     const issues: ExtractionIssue[] = [];
 
+    const examples = await loadTrainingExamples();
+    const validLabels = new Set<string>();
+    for (const ex of examples) {
+      if (ex.output.totalSourceLabel) {
+        validLabels.add(ex.output.totalSourceLabel);
+      }
+    }
+    // Also add some default valid labels just in case
+    validLabels.add("应领件数");
+
     for (const file of files) {
       const consistencyResult = await runConsistencyCheck(file, model);
-      const sourceCheckedRecords = markSourceMismatchForReview(consistencyResult.records);
-      const counterVerification = await callCounterVerifier(file, model);
-      const counterChecked = applyCounterVerification(file.name, sourceCheckedRecords, counterVerification);
-      const checkedRecords = counterChecked.records;
+      const sourceCheckedRecords = markSourceMismatchForReview(consistencyResult.records, validLabels);
+      
+      let checkedRecords = sourceCheckedRecords;
+      let counterIssues: ExtractionIssue[] = [];
+
+      // Only run counter verification for POD images
+      if (consistencyResult.imageType === "POD") {
+        const counterVerification = await callCounterVerifier(file, model);
+        const counterChecked = applyCounterVerification(file.name, sourceCheckedRecords, counterVerification);
+        checkedRecords = counterChecked.records;
+        counterIssues = counterChecked.issues;
+      }
 
       if (!checkedRecords.length) {
         issues.push({
@@ -481,7 +506,7 @@ export async function POST(request: Request) {
           code: "empty_result",
         });
         issues.push(...consistencyResult.issues);
-        issues.push(...counterChecked.issues);
+        issues.push(...counterIssues);
         continue;
       }
 
@@ -490,7 +515,7 @@ export async function POST(request: Request) {
         issues.push(...validateRecord(record));
       });
       issues.push(...consistencyResult.issues);
-      issues.push(...counterChecked.issues);
+      issues.push(...counterIssues);
     }
 
     return NextResponse.json({

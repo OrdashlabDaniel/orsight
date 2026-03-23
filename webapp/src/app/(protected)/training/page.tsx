@@ -88,7 +88,7 @@ export default function TrainingMode() {
   const [annotationNotes, setAnnotationNotes] = useState("");
   
   // Manual record fields
-  const [manualRecord, setManualRecord] = useState<Partial<PodRecord> & { stationTeam?: string }>({});
+  const [manualRecord, setManualRecord] = useState<Partial<PodRecord> & { stationTeam?: string; totalSourceLabel?: string }>({});
 
   const [drawingState, setDrawingState] = useState<DrawingState | null>(null);
   const [isSavingTraining, setIsSavingTraining] = useState(false);
@@ -392,6 +392,7 @@ export default function TrainingMode() {
       route: existingExample?.output.route || "",
       driver: existingExample?.output.driver || "",
       total: existingExample?.output.total || undefined,
+      totalSourceLabel: existingExample?.output.totalSourceLabel || "",
       unscanned: existingExample?.output.unscanned || undefined,
       exceptions: existingExample?.output.exceptions || undefined,
       stationTeam: existingExample?.output.stationTeam || "",
@@ -541,6 +542,7 @@ export default function TrainingMode() {
             route: manualRecord.route || "",
             driver: manualRecord.driver || "",
             total: Number(manualRecord.total) || 0,
+            totalSourceLabel: manualRecord.totalSourceLabel || "",
             unscanned: Number(manualRecord.unscanned) || 0,
             exceptions: Number(manualRecord.exceptions) || 0,
             stationTeam: manualRecord.stationTeam || "",
@@ -677,15 +679,16 @@ export default function TrainingMode() {
                                 imageName: upload.file.name,
                                 imageDataUrl,
                                 notes: "直接存入训练池，未标注",
-                                output: {
-                                  date: "",
-                                  route: "",
-                                  driver: "",
-                                  total: 0,
-                                  unscanned: 0,
-                                  exceptions: 0,
-                                  stationTeam: "",
-                                },
+                              output: {
+                                date: "",
+                                route: "",
+                                driver: "",
+                                total: 0,
+                                totalSourceLabel: "",
+                                unscanned: 0,
+                                exceptions: 0,
+                                stationTeam: "",
+                              },
                                 boxes: [],
                               }),
                             });
@@ -920,6 +923,15 @@ export default function TrainingMode() {
                           onChange={(e) => setManualRecord({ ...manualRecord, [field.key]: e.target.value })}
                           placeholder={`输入${field.label}`}
                         />
+                        {field.key === "total" && (
+                          <input
+                            type="text"
+                            className="mt-2 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-blue-500"
+                            value={manualRecord.totalSourceLabel || ""}
+                            onChange={(e) => setManualRecord({ ...manualRecord, totalSourceLabel: e.target.value })}
+                            placeholder="输入运单数量的来源标签 (如: 应领件数)"
+                          />
+                        )}
                       </div>
                     ))}
                   </div>
