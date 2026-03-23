@@ -43,7 +43,6 @@ export const excelHeaders = [
   "未收数量",
   "错扫数量",
   "响应更新状态",
-  "站点车队",
 ];
 
 export const visionPrompt = `你是 OrSight，负责从各种截图（如 POD 签退设备屏幕、系统网页表格等）中读取结构化信息。请严格按照下面规则读取单张截图，并只返回 JSON。
@@ -214,7 +213,6 @@ export function toExcelRows(records: PodRecord) {
     records.unscanned,
     records.exceptions,
     records.waybillStatus || "",
-    records.stationTeam || "",
   ];
 }
 
