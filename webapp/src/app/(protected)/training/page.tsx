@@ -753,7 +753,7 @@ export default function TrainingMode() {
                         <input
                           type={field.key === "total" || field.key === "unscanned" || field.key === "exceptions" ? "number" : "text"}
                           className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-blue-500"
-                          value={manualRecord[field.key as keyof typeof manualRecord] || ""}
+                          value={String(manualRecord[field.key as keyof typeof manualRecord] ?? "")}
                           onChange={(e) => setManualRecord({ ...manualRecord, [field.key]: e.target.value })}
                           placeholder={`输入${field.label}`}
                         />
