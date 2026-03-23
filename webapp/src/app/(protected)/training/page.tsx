@@ -33,6 +33,7 @@ type TrainingStatusItem = {
       route: string;
       driver: string;
       total: number;
+      totalSourceLabel?: string;
       unscanned: number;
       exceptions: number;
       stationTeam?: string;
