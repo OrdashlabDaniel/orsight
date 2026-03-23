@@ -161,14 +161,17 @@ export function validateRecord(record: PodRecord): ExtractionIssue[] {
     });
   }
 
-  const numericFields: Array<[keyof PodRecord, string]> = [
-    ["total", "运单数量"],
-    ["unscanned", "未收数量"],
-    ["exceptions", "错扫数量"],
+  const numericFields: Array<[keyof PodRecord, string, boolean]> = [
+    ["total", "运单数量", true],
+    ["unscanned", "未收数量", true],
+    ["exceptions", "错扫数量", false], // 错扫数量可以为空
   ];
 
-  for (const [field, label] of numericFields) {
+  for (const [field, label, required] of numericFields) {
     const value = record[field];
+    if (value === "" && !required) {
+      continue;
+    }
     if (typeof value !== "number" || value < 0) {
       issues.push({
         imageName: record.imageName,

@@ -258,10 +258,6 @@ function recordSignature(record: PodRecord): string {
   });
 }
 
-function attemptSignature(records: PodRecord[]): string {
-  return JSON.stringify(records.map(recordSignature).sort());
-}
-
 function markSourceMismatchForReview(records: PodRecord[], validLabels: Set<string>) {
   return records.map((record) => {
     if (record.total !== "" && !record.totalSourceLabel) {
@@ -407,46 +403,39 @@ async function runConsistencyCheck(file: File, model: string) {
   );
 
   const firstAttemptRecords = mappedAttempts[0] || [];
-  const firstSignature = attemptSignature(firstAttemptRecords);
-  const mismatchedAttempts = mappedAttempts
-    .map((records, index) => ({
-      index,
-      signature: attemptSignature(records),
-      records,
-    }))
-    .filter((attempt) => attempt.signature !== firstSignature);
-
   const issues: ExtractionIssue[] = [];
-  let finalRecords = firstAttemptRecords;
 
-  if (mismatchedAttempts.length) {
-    if (finalRecords.length) {
-      finalRecords = finalRecords.map((record) => ({
+  const finalRecords = firstAttemptRecords.map((record) => {
+    const sig = recordSignature(record);
+    
+    // Check if this exact record signature exists in all other attempts
+    let isConsistent = true;
+    for (let i = 1; i < attemptCount; i++) {
+      const attemptRecords = mappedAttempts[i] || [];
+      const hasMatch = attemptRecords.some(r => recordSignature(r) === sig);
+      if (!hasMatch) {
+        isConsistent = false;
+        break;
+      }
+    }
+
+    if (!isConsistent) {
+      issues.push({
+        imageName: file.name,
+        route: record.route,
+        level: "warning",
+        code: "consistency_mismatch",
+        message: "该条目在四次识别中存在不一致结果，请人工确认或再次识别。",
+      });
+      return {
         ...record,
         reviewRequired: true,
         reviewReason: appendReviewReason(record.reviewReason, "四次识别结果不一致，需要人工复核。"),
-      }));
+      };
     }
 
-    if (finalRecords.length) {
-      finalRecords.forEach((record) => {
-        issues.push({
-          imageName: file.name,
-          route: record.route,
-          level: "warning",
-          code: "consistency_mismatch",
-          message: "四次识别中存在不一致结果，该条目已标记，请人工确认或再次识别。",
-        });
-      });
-    } else {
-      issues.push({
-        imageName: file.name,
-        level: "warning",
-        code: "consistency_mismatch",
-        message: "四次识别结果不一致且首次识别无有效条目，请人工处理。",
-      });
-    }
-  }
+    return record;
+  });
 
   return {
     records: finalRecords,
