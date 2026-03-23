@@ -485,6 +485,7 @@ export async function POST(request: Request) {
     }
     // Also add some default valid labels just in case
     validLabels.add("应领件数");
+    validLabels.add("运单数量");
 
     for (const file of files) {
       const consistencyResult = await runConsistencyCheck(file, model);

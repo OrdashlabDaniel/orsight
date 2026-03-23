@@ -70,7 +70,7 @@ const annotationFields: Array<{ key: AnnotationField; label: string }> = [
   { key: "total", label: "运单数量" },
   { key: "unscanned", label: "未收数量" },
   { key: "exceptions", label: "错扫数量" },
-  { key: "waybillStatus", label: "运单状态" },
+  { key: "waybillStatus", label: "响应更新状态" },
   { key: "stationTeam", label: "站点车队" },
 ];
 
