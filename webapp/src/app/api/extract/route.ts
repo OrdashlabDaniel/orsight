@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import sharp from "sharp";
 
 import { getAuthUserOrSkip } from "@/lib/auth-server";
+import { getSupabaseAdmin } from "@/lib/supabase";
 import {
   type ExtractionIssue,
   type PodRecord,
@@ -66,7 +67,7 @@ function appendReviewReason(currentReason: string | null | undefined, nextReason
   return Array.from(new Set(parts)).join(" | ");
 }
 
-async function callVisionModel(file: File, model: string): Promise<{ records: RawModelRecord[], imageType: string }> {
+async function callVisionModel(file: File, model: string): Promise<{ records: RawModelRecord[], imageType: string, usage?: any }> {
   if (!OPENAI_API_KEY) {
     throw new Error("Missing OPENAI_API_KEY. Please configure the AI model first.");
   }
@@ -111,6 +112,7 @@ async function callVisionModel(file: File, model: string): Promise<{ records: Ra
         content?: string;
       };
     }>;
+    usage?: any;
   };
 
   const content = payload.choices?.[0]?.message?.content;
@@ -128,10 +130,11 @@ async function callVisionModel(file: File, model: string): Promise<{ records: Ra
   return {
     records: parsed.records || [],
     imageType: parsed.imageType || "OTHER",
+    usage: payload.usage,
   };
 }
 
-async function callCounterVerifier(file: File, model: string): Promise<CounterVerificationResult> {
+async function callCounterVerifier(file: File, model: string): Promise<{ result: CounterVerificationResult, usage?: any }> {
   if (!OPENAI_API_KEY) {
     throw new Error("Missing OPENAI_API_KEY. Please configure the AI model first.");
   }
@@ -141,7 +144,7 @@ async function callCounterVerifier(file: File, model: string): Promise<CounterVe
   const metadata = await image.metadata();
 
   if (!metadata.width || !metadata.height) {
-    return {};
+    return { result: {} };
   }
 
   async function cropToDataUrl(region: CropRegion) {
@@ -213,17 +216,18 @@ async function callCounterVerifier(file: File, model: string): Promise<CounterVe
         content?: string;
       };
     }>;
+    usage?: any;
   };
 
   const content = payload.choices?.[0]?.message?.content;
   if (!content) {
-    return {};
+    return { result: {} };
   }
 
   try {
-    return JSON.parse(content) as CounterVerificationResult;
+    return { result: JSON.parse(content) as CounterVerificationResult, usage: payload.usage };
   } catch {
-    return {};
+    return { result: {} };
   }
 }
 
@@ -398,6 +402,18 @@ async function runConsistencyCheck(file: File, model: string) {
   // We assume the imageType is consistent across attempts, take the first one
   const imageType = attempts[0]?.imageType || "OTHER";
 
+  let totalPromptTokens = 0;
+  let totalCompletionTokens = 0;
+  let totalTokens = 0;
+
+  for (const attempt of attempts) {
+    if (attempt.usage) {
+      totalPromptTokens += attempt.usage.prompt_tokens || 0;
+      totalCompletionTokens += attempt.usage.completion_tokens || 0;
+      totalTokens += attempt.usage.total_tokens || 0;
+    }
+  }
+
   const mappedAttempts = attempts.map((attempt, attemptIndex) =>
     attempt.records.map((rawRecord, recordIndex) => mapRecord(file.name, rawRecord, recordIndex + attemptIndex * 100)),
   );
@@ -441,6 +457,11 @@ async function runConsistencyCheck(file: File, model: string) {
     records: finalRecords,
     issues,
     imageType,
+    usage: {
+      prompt_tokens: totalPromptTokens,
+      completion_tokens: totalCompletionTokens,
+      total_tokens: totalTokens,
+    }
   };
 }
 
@@ -483,12 +504,41 @@ export async function POST(request: Request) {
       let checkedRecords = sourceCheckedRecords;
       let counterIssues: ExtractionIssue[] = [];
 
+      let totalPromptTokens = consistencyResult.usage?.prompt_tokens || 0;
+      let totalCompletionTokens = consistencyResult.usage?.completion_tokens || 0;
+      let totalTokens = consistencyResult.usage?.total_tokens || 0;
+
       // Only run counter verification for POD images
       if (consistencyResult.imageType === "POD") {
         const counterVerification = await callCounterVerifier(file, model);
-        const counterChecked = applyCounterVerification(file.name, sourceCheckedRecords, counterVerification);
+        const counterChecked = applyCounterVerification(file.name, sourceCheckedRecords, counterVerification.result);
         checkedRecords = counterChecked.records;
         counterIssues = counterChecked.issues;
+        
+        if (counterVerification.usage) {
+          totalPromptTokens += counterVerification.usage.prompt_tokens || 0;
+          totalCompletionTokens += counterVerification.usage.completion_tokens || 0;
+          totalTokens += counterVerification.usage.total_tokens || 0;
+        }
+      }
+
+      // Log usage to Supabase if user is logged in
+      if (user && user.id) {
+        const admin = getSupabaseAdmin();
+        if (admin) {
+          // Fire and forget, don't await to block the response
+          admin.from('usage_logs').insert({
+            user_id: user.id,
+            action_type: 'extract_table',
+            image_count: 1,
+            prompt_tokens: totalPromptTokens,
+            completion_tokens: totalCompletionTokens,
+            total_tokens: totalTokens,
+            model_used: model,
+          }).then(({ error }) => {
+            if (error) console.error("Failed to log usage:", error);
+          });
+        }
       }
 
       if (!checkedRecords.length) {
