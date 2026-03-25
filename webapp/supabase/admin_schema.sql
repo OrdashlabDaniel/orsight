@@ -44,10 +44,15 @@ create policy "Users can view their own usage logs"
   on public.usage_logs for select
   using (auth.uid() = user_id);
 
--- admin_users: Only admins can view the admin_users list
+-- admin_users: Only admins can view the full admin_users list (nested EXISTS)
 create policy "Admins can view admin_users"
   on public.admin_users for select
   using (exists (select 1 from public.admin_users where id = auth.uid()));
+
+-- Middleware (anon JWT) must read *own* row without recursive RLS on EXISTS above
+create policy "Users can read own admin_users row"
+  on public.admin_users for select
+  using (auth.uid() = id);
 
 -- Admins can view all usage logs
 create policy "Admins can view all usage logs"

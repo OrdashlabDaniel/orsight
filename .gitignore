@@ -4,6 +4,9 @@ OpenAI_apikey/
 .env.local
 .env.*.local
 
+# Supabase CLI 临时目录
+webapp/supabase/.temp/
+
 # 常见系统文件
 .DS_Store
 Thumbs.db

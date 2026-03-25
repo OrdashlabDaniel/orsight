@@ -4,9 +4,11 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
+    "dev:ipv4": "node scripts/next-dev-ipv4.cjs",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "sync-env": "powershell -ExecutionPolicy Bypass -File ./scripts/sync-supabase-env-from-webapp.ps1"
   },
   "dependencies": {
     "@supabase/ssr": "^0.9.0",

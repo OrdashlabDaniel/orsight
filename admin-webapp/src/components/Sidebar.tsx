@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
-import { LayoutDashboard, Users, LogOut } from "lucide-react";
+import { BarChart3, LayoutDashboard, LogOut, Users } from "lucide-react";
 
 export function Sidebar() {
   const pathname = usePathname();
@@ -19,6 +19,7 @@ export function Sidebar() {
   const navItems = [
     { name: "Dashboard", href: "/", icon: LayoutDashboard },
     { name: "Users", href: "/users", icon: Users },
+    { name: "用量看板（免登录）", href: "/viz", icon: BarChart3 },
   ];
 
   return (

@@ -4,7 +4,12 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useState } from "react";
 
-import { POD_USERNAME_METADATA_KEY, usernameToPodLoginEmail } from "@/lib/auth-username";
+import {
+  GOFO_EMPLOYEE_METADATA_KEY,
+  GOFO_SITE_METADATA_KEY,
+  POD_USERNAME_METADATA_KEY,
+  usernameToPodLoginEmail,
+} from "@/lib/auth-username";
 import { isDevMockLoginEnabled } from "@/lib/dev-mock-auth";
 import { createClient } from "@/lib/supabase/browser";
 import { isLoginStrictlyRequired, isSupabaseAuthEnabled } from "@/lib/supabase";
@@ -16,8 +21,10 @@ export function LoginForm() {
   const configReason = searchParams.get("reason") === "config";
 
   const [mode, setMode] = useState<"login" | "register">("login");
-  const [username, setUsername] = useState("");
+  const [account, setAccount] = useState("");
   const [password, setPassword] = useState("");
+  const [isGofoEmployee, setIsGofoEmployee] = useState(false);
+  const [gofoSite, setGofoSite] = useState("");
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(false);
 
@@ -73,9 +80,9 @@ export function LoginForm() {
     setLoading(true);
 
     try {
-      const trimmedName = username.trim();
-      if (!trimmedName) {
-        setMessage("请输入用户名。");
+      const trimmedAccount = account.trim();
+      if (!trimmedAccount) {
+        setMessage(mode === "login" ? "请输入邮箱或用户名。" : "请输入邮箱。");
         return;
       }
 
@@ -87,7 +94,7 @@ export function LoginForm() {
         const res = await fetch("/api/auth/dev-login", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ username: trimmedName, password }),
+          body: JSON.stringify({ username: trimmedAccount, password }),
         });
         const data = (await res.json().catch(() => ({}))) as { error?: string };
         if (!res.ok) {
@@ -100,24 +107,44 @@ export function LoginForm() {
       }
 
       const supabase = createClient();
-      const loginEmail = await usernameToPodLoginEmail(trimmedName);
 
       if (mode === "register") {
+        const email = trimmedAccount.toLowerCase();
+        if (!email.includes("@")) {
+          setMessage("请输入有效邮箱地址。");
+          return;
+        }
+        const trimmedSite = gofoSite.trim();
+        if (isGofoEmployee && !trimmedSite) {
+          setMessage("已勾选 GOFO 员工时，站点为必填。");
+          return;
+        }
         const { error } = await supabase.auth.signUp({
-          email: loginEmail,
+          email,
           password,
           options: {
-            data: { [POD_USERNAME_METADATA_KEY]: trimmedName },
+            data: {
+              [POD_USERNAME_METADATA_KEY]: email,
+              [GOFO_EMPLOYEE_METADATA_KEY]: isGofoEmployee,
+              [GOFO_SITE_METADATA_KEY]: isGofoEmployee ? trimmedSite : null,
+            },
           },
         });
         if (error) {
           setMessage(error.message);
           return;
         }
-        setMessage("注册成功，请直接登录（无需邮箱验证；若无法登录，请到 Supabase 控制台关闭「邮箱确认」）。");
+        setMessage("注册成功，请前往邮箱完成验证后再登录。");
         setMode("login");
+        setAccount(email);
+        setIsGofoEmployee(false);
+        setGofoSite("");
         return;
       }
+
+      const loginEmail = trimmedAccount.includes("@")
+        ? trimmedAccount.toLowerCase()
+        : await usernameToPodLoginEmail(trimmedAccount);
 
       const { error } = await supabase.auth.signInWithPassword({
         email: loginEmail,
@@ -144,22 +171,47 @@ export function LoginForm() {
         ) : null}
         <h1 className="text-center text-2xl font-semibold text-slate-900">OrSight</h1>
         <p className="mt-2 text-center text-sm text-slate-500">
-          {mode === "login" ? "登录后使用" : "注册新账号"}
+          {mode === "login" ? "登录后使用" : "注册新账号（需邮箱验证）"}
         </p>
 
         <form className="mt-8 space-y-4" onSubmit={(e) => void handleSubmit(e)}>
           <label className="block">
-            <span className="text-sm font-medium text-slate-700">用户名</span>
+            <span className="text-sm font-medium text-slate-700">{mode === "login" ? "邮箱或用户名" : "邮箱"}</span>
             <input
-              type="text"
+              type={mode === "login" ? "text" : "email"}
               required
-              autoComplete="username"
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-              placeholder="任意字符均可，不必是邮箱"
+              autoComplete={mode === "login" ? "username" : "email"}
+              value={account}
+              onChange={(e) => setAccount(e.target.value)}
+              placeholder={mode === "login" ? "邮箱（新账号）或用户名（旧账号）" : "请输入可接收验证邮件的邮箱"}
               className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 outline-none focus:border-blue-500"
             />
           </label>
+          {mode === "register" ? (
+            <>
+              <label className="flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2">
+                <input
+                  type="checkbox"
+                  checked={isGofoEmployee}
+                  onChange={(e) => setIsGofoEmployee(e.target.checked)}
+                />
+                <span className="text-sm text-slate-700">我是 GOFO 员工</span>
+              </label>
+              <label className="block">
+                <span className="text-sm font-medium text-slate-700">
+                  站点{isGofoEmployee ? "（必填）" : "（选填）"}
+                </span>
+                <input
+                  type="text"
+                  value={gofoSite}
+                  onChange={(e) => setGofoSite(e.target.value)}
+                  required={isGofoEmployee}
+                  placeholder="例如：上海站 / 广州站"
+                  className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 outline-none focus:border-blue-500"
+                />
+              </label>
+            </>
+          ) : null}
           <label className="block">
             <span className="text-sm font-medium text-slate-700">密码</span>
             <input
@@ -198,6 +250,8 @@ export function LoginForm() {
               onClick={() => {
                 setMode("register");
                 setMessage("");
+                setIsGofoEmployee(false);
+                setGofoSite("");
               }}
             >
               没有账号？注册
@@ -209,6 +263,8 @@ export function LoginForm() {
               onClick={() => {
                 setMode("login");
                 setMessage("");
+                setIsGofoEmployee(false);
+                setGofoSite("");
               }}
             >
               已有账号？登录

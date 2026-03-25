@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
 
-import { getDisplayUsernameFromUser } from "@/lib/auth-username";
+import { getDisplayUsernameFromUser, getGofoProfileFromUser } from "@/lib/auth-username";
 import { getAuthUserOrSkip } from "@/lib/auth-server";
 import { isDevMockLoginEnabled } from "@/lib/dev-mock-auth";
 import { isSupabaseAuthEnabled } from "@/lib/supabase";
@@ -40,6 +40,7 @@ export default async function AccountPage() {
 
   const createdAt = user.created_at ? new Date(user.created_at).toLocaleString("zh-CN") : "—";
   const isDevMockSession = devMock && !supabaseOn;
+  const gofoProfile = getGofoProfileFromUser(user);
 
   return (
     <main className="min-h-screen bg-slate-100 px-4 py-10">
@@ -73,6 +74,14 @@ export default async function AccountPage() {
           <div>
             <dt className="font-medium text-slate-500">注册时间</dt>
             <dd className="mt-1 text-slate-900">{createdAt}</dd>
+          </div>
+          <div>
+            <dt className="font-medium text-slate-500">是否 GOFO 员工</dt>
+            <dd className="mt-1 text-slate-900">{gofoProfile.isGofoEmployee ? "是" : "否"}</dd>
+          </div>
+          <div>
+            <dt className="font-medium text-slate-500">站点</dt>
+            <dd className="mt-1 text-slate-900">{gofoProfile.gofoSite || "—"}</dd>
           </div>
         </dl>
 

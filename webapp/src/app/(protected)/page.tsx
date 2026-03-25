@@ -635,7 +635,9 @@ export default function Home() {
       setTrainingExamplesLoaded(payload.trainingExamplesLoaded || 0);
       const organized = organizeRecords(payload.records || []);
       const dedupeMessage =
-        organized.duplicateCount > 0 ? `，已自动去重 ${organized.duplicateCount} 条完全重复记录` : "";
+        organized.duplicateCount > 0
+          ? `，已合并 ${organized.duplicateCount} 条跨图重复（不同截图中日期、路线、司机与收取数据完全一致）`
+          : "";
       setNoticeMessage(
         `AI 已完成识别，共生成 ${organized.records.length} 条记录${dedupeMessage}。批量识别已启用并发加速，默认使用 ${payload.modelUsed || primaryModelName}。`,
       );
@@ -682,7 +684,9 @@ export default function Home() {
 
       const organized = organizeRecords(nextRecords);
       const dedupeMessage =
-        organized.duplicateCount > 0 ? `，当前已自动去重 ${organized.duplicateCount} 条完全重复记录` : "";
+        organized.duplicateCount > 0
+          ? `，已合并 ${organized.duplicateCount} 条跨图重复（不同截图中日期、路线、司机与收取数据完全一致）`
+          : "";
       setNoticeMessage(
         `已使用 ${payload.modelUsed || reviewModelName} 重新识别 ${sourceImageNames.length} 张图片${dedupeMessage}。`,
       );
@@ -1204,7 +1208,9 @@ export default function Home() {
                   <div className="mt-1 text-xl font-semibold text-amber-700">{totalWarnings}</div>
                 </div>
                 <div className="rounded-2xl bg-rose-50 px-3 py-3">
-                  <div className="text-rose-700">去重数</div>
+                  <div className="text-rose-700" title="仅统计跨多张截图的完全重复行；同一张图内相同字段的多行不会合并">
+                    跨图合并数
+                  </div>
                   <div className="mt-1 text-xl font-semibold text-rose-700">{organizedRecordsResult.duplicateCount}</div>
                 </div>
               </div>
@@ -1275,6 +1281,24 @@ export default function Home() {
               <div>
                 <h2 className="text-lg font-semibold">在线表格</h2>
                 <p className="mt-1 text-sm text-slate-500">识别后可直接修改、复制到其他表格，或下载成 Excel。</p>
+                <p className="mt-1.5 flex flex-wrap items-baseline gap-x-1 gap-y-0.5 text-sm text-slate-700">
+                  <span className="font-medium text-slate-900">识别条目</span>
+                  <span>
+                    ：共 <strong>{organizedRecordsResult.records.length.toLocaleString()}</strong> 条
+                  </span>
+                  {organizedRecordsResult.duplicateCount > 0 ? (
+                    <span className="text-slate-500">
+                      （原始识别 {records.length.toLocaleString()} 行，跨图合并{" "}
+                      {organizedRecordsResult.duplicateCount.toLocaleString()} 条）
+                    </span>
+                  ) : null}
+                  {routeFilter.trim() &&
+                  filteredRecordsResult.records.length !== organizedRecordsResult.records.length ? (
+                    <span className="text-blue-800">
+                      · 当前显示 {filteredRecordsResult.records.length.toLocaleString()} 条（路线筛选）
+                    </span>
+                  ) : null}
+                </p>
               </div>
               <div className="flex flex-wrap items-center gap-4">
                 <div className="relative flex items-center">

@@ -1,5 +1,7 @@
 /** 存在 Supabase user_metadata 里，用于展示真实用户名 */
 export const POD_USERNAME_METADATA_KEY = "pod_username";
+export const GOFO_EMPLOYEE_METADATA_KEY = "is_gofo_employee";
+export const GOFO_SITE_METADATA_KEY = "gofo_site";
 
 /**
  * Supabase 的密码登录 API 需要 `email` 字段。
@@ -35,4 +37,14 @@ export function getDisplayUsernameFromUser(user: {
     return "（旧账号，无用户名记录）";
   }
   return user.email || "—";
+}
+
+export function getGofoProfileFromUser(user: {
+  user_metadata?: Record<string, unknown>;
+}): { isGofoEmployee: boolean; gofoSite: string | null } {
+  const rawEmployee = user.user_metadata?.[GOFO_EMPLOYEE_METADATA_KEY];
+  const rawSite = user.user_metadata?.[GOFO_SITE_METADATA_KEY];
+  const isGofoEmployee = rawEmployee === true;
+  const gofoSite = typeof rawSite === "string" && rawSite.trim() ? rawSite.trim() : null;
+  return { isGofoEmployee, gofoSite };
 }

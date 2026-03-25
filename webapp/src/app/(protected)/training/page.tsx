@@ -138,19 +138,42 @@ export default function TrainingMode() {
   async function handleDocumentUpload(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
-    
+
     setIsUploadingDoc(true);
     setErrorMessage("");
     try {
-      const text = await file.text();
-      
-      setGlobalRules(prev => ({
+      const name = file.name.toLowerCase();
+      let text: string;
+
+      if (/\.(txt|csv|md)$/i.test(file.name)) {
+        text = await file.text();
+      } else if (/\.(pdf|doc|docx)$/i.test(file.name)) {
+        const fd = new FormData();
+        fd.append("file", file);
+        const res = await fetch("/api/training/parse-document", { method: "POST", body: fd });
+        const payload = (await res.json()) as { text?: string; warning?: string; error?: string };
+        if (!res.ok) {
+          throw new Error(payload.error || "服务端解析失败。");
+        }
+        text = (payload.text || "").trim();
+        if (!text) {
+          throw new Error(payload.warning || "未能从该文件中提取到文本。");
+        }
+      } else {
+        throw new Error("不支持的扩展名，请使用 PDF、Word、TXT、CSV 或 Markdown。");
+      }
+
+      if (!text.trim()) {
+        throw new Error("文档内容为空。");
+      }
+
+      setGlobalRules((prev) => ({
         ...prev,
-        documents: [...prev.documents, { name: file.name, content: text }]
+        documents: [...prev.documents, { name: file.name, content: text }],
       }));
       setNoticeMessage(`成功解析文档：${file.name}`);
-    } catch {
-      setErrorMessage("文档解析失败，请确保格式受支持（.txt, .csv 等）。");
+    } catch (err) {
+      setErrorMessage(err instanceof Error ? err.message : "文档解析失败，请检查格式与大小（最大约 12MB）。");
     } finally {
       setIsUploadingDoc(false);
       e.target.value = "";
@@ -597,7 +620,9 @@ export default function TrainingMode() {
             <div className="flex min-h-0 flex-col rounded-3xl border border-slate-200 bg-white shadow-sm">
               <div className="border-b border-slate-200 px-5 py-4">
                 <h2 className="text-lg font-semibold">全局规则与知识库</h2>
-                <p className="mt-1 text-sm text-slate-500">上传 PDF/TXT 文档，或输入自定义提取规则，AI 填表时将严格遵守。</p>
+                <p className="mt-1 text-sm text-slate-500">
+                  上传 PDF、Word（.doc/.docx）、TXT/CSV 等参考文档，或输入自定义提取规则；AI 填表时会一并参考（扫描版 PDF 可能无法提取文字）。
+                </p>
               </div>
               <div className="flex flex-col gap-4 p-5">
                 <div>
@@ -611,10 +636,18 @@ export default function TrainingMode() {
                   />
                 </div>
                 <div>
-                  <label className="mb-2 block text-sm font-medium text-slate-700">参考文档 (TXT/CSV)</label>
+                  <label className="mb-2 block text-sm font-medium text-slate-700">
+                    参考文档（PDF / Word / TXT / CSV / MD）
+                  </label>
                   <label className="inline-flex cursor-pointer items-center justify-center rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50">
                     {isUploadingDoc ? "解析中..." : "上传文档"}
-                    <input type="file" accept=".txt,.csv,.md" className="hidden" onChange={(e) => void handleDocumentUpload(e)} disabled={isUploadingDoc} />
+                    <input
+                      type="file"
+                      accept=".txt,.csv,.md,.pdf,.doc,.docx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                      className="hidden"
+                      onChange={(e) => void handleDocumentUpload(e)}
+                      disabled={isUploadingDoc}
+                    />
                   </label>
                   {globalRules.documents.length > 0 && (
                     <ul className="mt-3 space-y-2">
