@@ -1,7 +1,7 @@
  "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { createClient } from "@/lib/supabase/browser";
 import { isSupabaseAuthEnabled } from "@/lib/supabase";
 
@@ -12,6 +12,7 @@ type FormCard = {
   status: string;
   ready: boolean;
   fillHref: string;
+  createdAt: number;
 };
 
 type RecycleBinItem = {
@@ -21,27 +22,22 @@ type RecycleBinItem = {
   expireAt: number;
 };
 
-const initialForms: FormCard[] = [
-  {
-    id: "form-1",
-    name: "填表1",
-    desc: "已完成：沿用当前线上填表与训练能力。",
-    status: "已完成",
-    ready: true,
-    fillHref: "/",
-  },
-  {
-    id: "form-2",
-    name: "填表2",
-    desc: "待配置：将接入独立规则、独立训练池。",
-    status: "规划中",
-    ready: false,
-    fillHref: "",
-  },
-];
+function createDefaultForms(): FormCard[] {
+  return [
+    {
+      id: "form-1",
+      name: "抽擦路线表",
+      desc: "已完成：沿用当前线上填表与训练能力。",
+      status: "已完成",
+      ready: true,
+      fillHref: "/",
+      createdAt: Date.now(),
+    },
+  ];
+}
 
 export default function FormsPoolPage() {
-  const [forms, setForms] = useState<FormCard[]>(initialForms);
+  const [forms, setForms] = useState<FormCard[]>([]);
   const [recycleBin, setRecycleBin] = useState<RecycleBinItem[]>([]);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingName, setEditingName] = useState("");
@@ -50,15 +46,9 @@ export default function FormsPoolPage() {
   const [deleteError, setDeleteError] = useState("");
   const [isDeleting, setIsDeleting] = useState(false);
 
-  const storageKey = "orsight.forms.pool.names";
+  const formsStorageKey = "orsight.forms.pool.forms";
   const recycleStorageKey = "orsight.forms.pool.recycleBin";
   const retentionMs = 30 * 24 * 60 * 60 * 1000;
-
-  function toFormOrder(a: FormCard, b: FormCard) {
-    const ai = initialForms.findIndex((x) => x.id === a.id);
-    const bi = initialForms.findIndex((x) => x.id === b.id);
-    return ai - bi;
-  }
 
   function getRemainingText(expireAt: number) {
     const ms = expireAt - Date.now();
@@ -69,6 +59,22 @@ export default function FormsPoolPage() {
 
   useEffect(() => {
     try {
+      const rawForms = localStorage.getItem(formsStorageKey);
+      const loadedForms = rawForms ? (JSON.parse(rawForms) as FormCard[]) : null;
+      const nextForms =
+        Array.isArray(loadedForms) && loadedForms.length > 0
+          ? loadedForms.filter(
+              (f): f is FormCard =>
+                !!f &&
+                typeof f.id === "string" &&
+                typeof f.name === "string" &&
+                typeof f.desc === "string" &&
+                typeof f.status === "string" &&
+                typeof f.ready === "boolean" &&
+                typeof f.fillHref === "string",
+            )
+          : createDefaultForms();
+
       const now = Date.now();
       const rawRecycle = localStorage.getItem(recycleStorageKey);
       const parsedRecycle = rawRecycle ? (JSON.parse(rawRecycle) as unknown) : [];
@@ -76,18 +82,6 @@ export default function FormsPoolPage() {
 
       if (Array.isArray(parsedRecycle)) {
         for (const item of parsedRecycle) {
-          // 兼容旧结构：string[]（仅存 id）
-          if (typeof item === "string") {
-            const matched = initialForms.find((f) => f.id === item);
-            if (!matched) continue;
-            recycleItems.push({
-              id: matched.id,
-              form: matched,
-              deletedAt: now,
-              expireAt: now + retentionMs,
-            });
-            continue;
-          }
           if (
             item &&
             typeof item === "object" &&
@@ -106,37 +100,19 @@ export default function FormsPoolPage() {
       setRecycleBin(activeRecycle);
       localStorage.setItem(recycleStorageKey, JSON.stringify(activeRecycle));
       const deletedSet = new Set(activeRecycle.map((x) => x.id));
-
-      const raw = localStorage.getItem(storageKey);
-      const saved = raw ? (JSON.parse(raw) as Record<string, string>) : {};
-      setForms(
-        initialForms
-          .filter((f) => !deletedSet.has(f.id))
-          .map((f) => ({
-            ...f,
-            name: typeof saved[f.id] === "string" && saved[f.id].trim() ? saved[f.id].trim() : f.name,
-          })),
-      );
+      setForms(nextForms.filter((f) => !deletedSet.has(f.id)));
     } catch {
-      // ignore malformed local storage
+      setForms(createDefaultForms());
     }
   }, []);
 
-  const nameMap = useMemo(() => {
-    const next: Record<string, string> = {};
-    for (const f of forms) {
-      next[f.id] = f.name;
-    }
-    return next;
-  }, [forms]);
-
   useEffect(() => {
     try {
-      localStorage.setItem(storageKey, JSON.stringify(nameMap));
+      localStorage.setItem(formsStorageKey, JSON.stringify(forms));
     } catch {
       // ignore storage write errors
     }
-  }, [nameMap]);
+  }, [forms]);
 
   useEffect(() => {
     try {
@@ -145,6 +121,21 @@ export default function FormsPoolPage() {
       // ignore storage write errors
     }
   }, [recycleBin]);
+
+  function createForm() {
+    const now = Date.now();
+    const count = forms.length + recycleBin.length + 1;
+    const newForm: FormCard = {
+      id: `form-${now}`,
+      name: `新建填表${count}`,
+      desc: "待配置：将接入独立规则、独立训练池。",
+      status: "规划中",
+      ready: false,
+      fillHref: "",
+      createdAt: now,
+    };
+    setForms((current) => [...current, newForm]);
+  }
 
   function startRename(form: FormCard) {
     setEditingId(form.id);
@@ -221,7 +212,7 @@ export default function FormsPoolPage() {
     setForms((current) => {
       const exists = current.some((f) => f.id === item.id);
       if (exists) return current;
-      return [...current, item.form].sort(toFormOrder);
+      return [...current, item.form];
     });
   }
 
@@ -332,11 +323,10 @@ export default function FormsPoolPage() {
             <div className="mt-4">
               <button
                 type="button"
-                disabled
-                className="inline-flex cursor-not-allowed rounded-lg border border-slate-300 bg-slate-100 px-3 py-2 text-sm font-medium text-slate-400"
-                title="下一步升级中"
+                onClick={() => createForm()}
+                className="inline-flex rounded-lg border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
               >
-                即将支持
+                新建填表
               </button>
             </div>
           </article>
