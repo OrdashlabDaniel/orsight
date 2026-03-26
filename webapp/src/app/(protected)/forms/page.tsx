@@ -2,6 +2,8 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
+import { createClient } from "@/lib/supabase/browser";
+import { isSupabaseAuthEnabled } from "@/lib/supabase";
 
 type FormCard = {
   id: string;
@@ -35,6 +37,10 @@ export default function FormsPoolPage() {
   const [forms, setForms] = useState<FormCard[]>(initialForms);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingName, setEditingName] = useState("");
+  const [deleteTarget, setDeleteTarget] = useState<FormCard | null>(null);
+  const [deletePassword, setDeletePassword] = useState("");
+  const [deleteError, setDeleteError] = useState("");
+  const [isDeleting, setIsDeleting] = useState(false);
 
   const storageKey = "orsight.forms.pool.names";
 
@@ -81,6 +87,50 @@ export default function FormsPoolPage() {
     setForms((current) => current.map((f) => (f.id === formId ? { ...f, name: nextName } : f)));
     setEditingId(null);
     setEditingName("");
+  }
+
+  async function confirmDelete() {
+    if (!deleteTarget) return;
+    if (!deletePassword.trim()) {
+      setDeleteError("请输入登录密码以确认删除。");
+      return;
+    }
+
+    setIsDeleting(true);
+    setDeleteError("");
+    try {
+      if (isSupabaseAuthEnabled()) {
+        const supabase = createClient();
+        const {
+          data: { user },
+          error: userErr,
+        } = await supabase.auth.getUser();
+        if (userErr || !user?.email) {
+          throw new Error("无法读取当前登录信息，请重新登录后再试。");
+        }
+        const { error: signInErr } = await supabase.auth.signInWithPassword({
+          email: user.email,
+          password: deletePassword,
+        });
+        if (signInErr) {
+          throw new Error("密码不正确，删除已取消。");
+        }
+      }
+
+      const id = deleteTarget.id;
+      setForms((current) => current.filter((f) => f.id !== id));
+      if (editingId === id) {
+        setEditingId(null);
+        setEditingName("");
+      }
+      setDeleteTarget(null);
+      setDeletePassword("");
+      setDeleteError("");
+    } catch (error) {
+      setDeleteError(error instanceof Error ? error.message : "删除失败，请重试。");
+    } finally {
+      setIsDeleting(false);
+    }
   }
 
   return (
@@ -135,6 +185,17 @@ export default function FormsPoolPage() {
                       >
                         重命名
                       </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setDeleteTarget(form);
+                          setDeletePassword("");
+                          setDeleteError("");
+                        }}
+                        className="rounded-md border border-rose-300 px-2 py-1 text-xs text-rose-700 hover:bg-rose-50"
+                      >
+                        删除
+                      </button>
                     </div>
                   )}
                   <p className="mt-1 text-sm text-slate-600">{form.desc}</p>
@@ -185,6 +246,55 @@ export default function FormsPoolPage() {
           </article>
         </section>
       </div>
+
+      {deleteTarget ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/35 px-4">
+          <div className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-5 shadow-xl">
+            <h3 className="text-lg font-semibold text-slate-900">删除填表</h3>
+            <p className="mt-2 text-sm text-slate-600">
+              你正在删除 <strong>{deleteTarget.name}</strong>。请输入当前登录密码确认。
+            </p>
+            <div className="mt-4">
+              <label className="text-sm font-medium text-slate-700">登录密码</label>
+              <input
+                type="password"
+                value={deletePassword}
+                onChange={(e) => setDeletePassword(e.target.value)}
+                autoFocus
+                className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-blue-500"
+                placeholder="输入密码以确认删除"
+              />
+            </div>
+            {deleteError ? (
+              <p className="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
+                {deleteError}
+              </p>
+            ) : null}
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  if (isDeleting) return;
+                  setDeleteTarget(null);
+                  setDeletePassword("");
+                  setDeleteError("");
+                }}
+                className="rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                disabled={isDeleting}
+                onClick={() => void confirmDelete()}
+                className="rounded-lg border border-rose-300 bg-rose-50 px-3 py-2 text-sm font-medium text-rose-700 hover:bg-rose-100 disabled:opacity-60"
+              >
+                {isDeleting ? "校验中..." : "确认删除"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </main>
   );
 }
