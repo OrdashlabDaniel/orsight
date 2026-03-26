@@ -1,6 +1,7 @@
 "use client";
 
 import Image from "next/image";
+import Link from "next/link";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import * as XLSX from "xlsx";
 
@@ -1096,6 +1097,14 @@ export default function Home() {
     <main className="min-h-screen bg-slate-100 px-4 py-4 text-slate-900">
       <div className="mx-auto flex max-w-[1800px] flex-col gap-4">
         <header className="rounded-3xl border border-slate-200 bg-white px-6 py-5 shadow-sm">
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2 text-sm">
+            <Link href="/forms" className="font-medium text-blue-600 hover:underline">
+              ← 返回填表池
+            </Link>
+            <Link href="/training" className="font-medium text-slate-700 hover:text-slate-900 hover:underline">
+              切换到训练模式
+            </Link>
+          </div>
           <h1 className="text-2xl font-semibold">OrSight - 填表模式</h1>
           <p className="mt-2 text-sm text-slate-600">
             左侧批量上传 POD 签退截图，右侧查看 AI 填表结果。对四次不一致的条目可以打开标注工作台，手动画框后存入训练池。

@@ -1,6 +1,7 @@
 "use client";
 
 import Image from "next/image";
+import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 
 import { type PodRecord } from "@/lib/pod";
@@ -604,6 +605,14 @@ export default function TrainingMode() {
     <main className="min-h-screen bg-slate-100 px-4 py-4 text-slate-900">
       <div className="mx-auto flex max-w-[1800px] flex-col gap-4">
         <header className="rounded-3xl border border-slate-200 bg-white px-6 py-5 shadow-sm">
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2 text-sm">
+            <Link href="/forms" className="font-medium text-blue-600 hover:underline">
+              ← 返回填表池
+            </Link>
+            <Link href="/" className="font-medium text-slate-700 hover:text-slate-900 hover:underline">
+              切换到填表模式
+            </Link>
+          </div>
           <h1 className="text-2xl font-semibold">OrSight - 训练模式</h1>
           <p className="mt-2 text-sm text-slate-600">
             在此模式下，您可以上传图片并手动标注字段，这些图片将长期存入云端训练池，作为 AI 识别的引导示例。
