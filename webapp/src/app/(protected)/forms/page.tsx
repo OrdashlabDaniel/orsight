@@ -14,6 +14,13 @@ type FormCard = {
   fillHref: string;
 };
 
+type RecycleBinItem = {
+  id: string;
+  form: FormCard;
+  deletedAt: number;
+  expireAt: number;
+};
+
 const initialForms: FormCard[] = [
   {
     id: "form-1",
@@ -35,6 +42,7 @@ const initialForms: FormCard[] = [
 
 export default function FormsPoolPage() {
   const [forms, setForms] = useState<FormCard[]>(initialForms);
+  const [recycleBin, setRecycleBin] = useState<RecycleBinItem[]>([]);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingName, setEditingName] = useState("");
   const [deleteTarget, setDeleteTarget] = useState<FormCard | null>(null);
@@ -43,17 +51,61 @@ export default function FormsPoolPage() {
   const [isDeleting, setIsDeleting] = useState(false);
 
   const storageKey = "orsight.forms.pool.names";
-  const deletedStorageKey = "orsight.forms.pool.deleted";
+  const recycleStorageKey = "orsight.forms.pool.recycleBin";
+  const retentionMs = 30 * 24 * 60 * 60 * 1000;
+
+  function toFormOrder(a: FormCard, b: FormCard) {
+    const ai = initialForms.findIndex((x) => x.id === a.id);
+    const bi = initialForms.findIndex((x) => x.id === b.id);
+    return ai - bi;
+  }
+
+  function getRemainingText(expireAt: number) {
+    const ms = expireAt - Date.now();
+    if (ms <= 0) return "已过期";
+    const days = Math.ceil(ms / (24 * 60 * 60 * 1000));
+    return `剩余 ${days} 天`;
+  }
 
   useEffect(() => {
     try {
-      const rawDeleted = localStorage.getItem(deletedStorageKey);
-      const deletedIds = rawDeleted ? (JSON.parse(rawDeleted) as string[]) : [];
-      const deletedSet = new Set(
-        Array.isArray(deletedIds)
-          ? deletedIds.filter((id): id is string => typeof id === "string" && id.trim().length > 0)
-          : [],
-      );
+      const now = Date.now();
+      const rawRecycle = localStorage.getItem(recycleStorageKey);
+      const parsedRecycle = rawRecycle ? (JSON.parse(rawRecycle) as unknown) : [];
+      const recycleItems: RecycleBinItem[] = [];
+
+      if (Array.isArray(parsedRecycle)) {
+        for (const item of parsedRecycle) {
+          // 兼容旧结构：string[]（仅存 id）
+          if (typeof item === "string") {
+            const matched = initialForms.find((f) => f.id === item);
+            if (!matched) continue;
+            recycleItems.push({
+              id: matched.id,
+              form: matched,
+              deletedAt: now,
+              expireAt: now + retentionMs,
+            });
+            continue;
+          }
+          if (
+            item &&
+            typeof item === "object" &&
+            typeof (item as RecycleBinItem).id === "string" &&
+            typeof (item as RecycleBinItem).deletedAt === "number" &&
+            typeof (item as RecycleBinItem).expireAt === "number" &&
+            (item as RecycleBinItem).form &&
+            typeof (item as RecycleBinItem).form.name === "string"
+          ) {
+            recycleItems.push(item as RecycleBinItem);
+          }
+        }
+      }
+
+      const activeRecycle = recycleItems.filter((x) => x.expireAt > now);
+      setRecycleBin(activeRecycle);
+      localStorage.setItem(recycleStorageKey, JSON.stringify(activeRecycle));
+      const deletedSet = new Set(activeRecycle.map((x) => x.id));
 
       const raw = localStorage.getItem(storageKey);
       const saved = raw ? (JSON.parse(raw) as Record<string, string>) : {};
@@ -85,6 +137,14 @@ export default function FormsPoolPage() {
       // ignore storage write errors
     }
   }, [nameMap]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(recycleStorageKey, JSON.stringify(recycleBin));
+    } catch {
+      // ignore storage write errors
+    }
+  }, [recycleBin]);
 
   function startRename(form: FormCard) {
     setEditingId(form.id);
@@ -129,14 +189,19 @@ export default function FormsPoolPage() {
 
       const id = deleteTarget.id;
       setForms((current) => current.filter((f) => f.id !== id));
-      try {
-        const rawDeleted = localStorage.getItem(deletedStorageKey);
-        const deletedIds = rawDeleted ? (JSON.parse(rawDeleted) as string[]) : [];
-        const nextDeleted = Array.from(new Set([...(Array.isArray(deletedIds) ? deletedIds : []), id]));
-        localStorage.setItem(deletedStorageKey, JSON.stringify(nextDeleted));
-      } catch {
-        // ignore storage write errors
-      }
+      const now = Date.now();
+      setRecycleBin((current) => {
+        const rest = current.filter((x) => x.id !== id);
+        return [
+          ...rest,
+          {
+            id,
+            form: deleteTarget,
+            deletedAt: now,
+            expireAt: now + retentionMs,
+          },
+        ];
+      });
       if (editingId === id) {
         setEditingId(null);
         setEditingName("");
@@ -149,6 +214,19 @@ export default function FormsPoolPage() {
     } finally {
       setIsDeleting(false);
     }
+  }
+
+  function restoreForm(item: RecycleBinItem) {
+    setRecycleBin((current) => current.filter((x) => x.id !== item.id));
+    setForms((current) => {
+      const exists = current.some((f) => f.id === item.id);
+      if (exists) return current;
+      return [...current, item.form].sort(toFormOrder);
+    });
+  }
+
+  function permanentlyDelete(itemId: string) {
+    setRecycleBin((current) => current.filter((x) => x.id !== itemId));
   }
 
   return (
@@ -262,6 +340,52 @@ export default function FormsPoolPage() {
               </button>
             </div>
           </article>
+        </section>
+
+        <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h2 className="text-lg font-semibold text-slate-900">填表回收站</h2>
+            <span className="text-xs text-slate-500">已删除填表保留 30 天，超时自动清空</span>
+          </div>
+
+          {recycleBin.length === 0 ? (
+            <p className="mt-3 text-sm text-slate-500">回收站为空。</p>
+          ) : (
+            <ul className="mt-3 space-y-2">
+              {recycleBin
+                .slice()
+                .sort((a, b) => b.deletedAt - a.deletedAt)
+                .map((item) => (
+                  <li
+                    key={item.id}
+                    className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2"
+                  >
+                    <div>
+                      <p className="text-sm font-medium text-slate-900">{item.form.name}</p>
+                      <p className="text-xs text-slate-500">
+                        删除于 {new Date(item.deletedAt).toLocaleString()} · {getRemainingText(item.expireAt)}
+                      </p>
+                    </div>
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => restoreForm(item)}
+                        className="rounded-md border border-slate-300 px-2.5 py-1 text-xs text-slate-700 hover:bg-white"
+                      >
+                        恢复
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => permanentlyDelete(item.id)}
+                        className="rounded-md border border-rose-300 px-2.5 py-1 text-xs text-rose-700 hover:bg-rose-50"
+                      >
+                        永久删除
+                      </button>
+                    </div>
+                  </li>
+                ))}
+            </ul>
+          )}
         </section>
       </div>
 
