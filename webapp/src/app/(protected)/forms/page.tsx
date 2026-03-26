@@ -43,17 +43,27 @@ export default function FormsPoolPage() {
   const [isDeleting, setIsDeleting] = useState(false);
 
   const storageKey = "orsight.forms.pool.names";
+  const deletedStorageKey = "orsight.forms.pool.deleted";
 
   useEffect(() => {
     try {
+      const rawDeleted = localStorage.getItem(deletedStorageKey);
+      const deletedIds = rawDeleted ? (JSON.parse(rawDeleted) as string[]) : [];
+      const deletedSet = new Set(
+        Array.isArray(deletedIds)
+          ? deletedIds.filter((id): id is string => typeof id === "string" && id.trim().length > 0)
+          : [],
+      );
+
       const raw = localStorage.getItem(storageKey);
-      if (!raw) return;
-      const saved = JSON.parse(raw) as Record<string, string>;
-      setForms((current) =>
-        current.map((f) => ({
-          ...f,
-          name: typeof saved[f.id] === "string" && saved[f.id].trim() ? saved[f.id].trim() : f.name,
-        })),
+      const saved = raw ? (JSON.parse(raw) as Record<string, string>) : {};
+      setForms(
+        initialForms
+          .filter((f) => !deletedSet.has(f.id))
+          .map((f) => ({
+            ...f,
+            name: typeof saved[f.id] === "string" && saved[f.id].trim() ? saved[f.id].trim() : f.name,
+          })),
       );
     } catch {
       // ignore malformed local storage
@@ -119,6 +129,14 @@ export default function FormsPoolPage() {
 
       const id = deleteTarget.id;
       setForms((current) => current.filter((f) => f.id !== id));
+      try {
+        const rawDeleted = localStorage.getItem(deletedStorageKey);
+        const deletedIds = rawDeleted ? (JSON.parse(rawDeleted) as string[]) : [];
+        const nextDeleted = Array.from(new Set([...(Array.isArray(deletedIds) ? deletedIds : []), id]));
+        localStorage.setItem(deletedStorageKey, JSON.stringify(nextDeleted));
+      } catch {
+        // ignore storage write errors
+      }
       if (editingId === id) {
         setEditingId(null);
         setEditingName("");
