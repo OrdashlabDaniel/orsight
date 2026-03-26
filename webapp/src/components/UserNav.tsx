@@ -76,10 +76,10 @@ export function UserNav() {
           填表池
         </Link>
         <Link href="/" className={`font-medium ${pathname === "/" ? "text-blue-600" : "text-slate-700 hover:text-slate-900"}`}>
-          填表1·填表模式
+          填表模式
         </Link>
         <Link href="/training" className={`font-medium ${pathname === "/training" ? "text-blue-600" : "text-slate-700 hover:text-slate-900"}`}>
-          填表1·训练模式
+          训练模式
         </Link>
         <Link href="/account" className={`font-medium ${pathname === "/account" ? "text-blue-600" : "text-slate-600 hover:text-slate-900"}`}>
           用户信息
