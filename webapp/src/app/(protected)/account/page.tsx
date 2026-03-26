@@ -24,8 +24,8 @@ export default async function AccountPage() {
             后可在此查看账号信息；本地测试可启用{" "}
             <code className="rounded bg-slate-100 px-1">NEXT_PUBLIC_DEV_MOCK_LOGIN=true</code>。
           </p>
-          <Link href="/" className="mt-6 inline-block text-sm text-blue-600 hover:underline">
-            返回填表模式
+          <Link href="/forms" className="mt-6 inline-block text-sm text-blue-600 hover:underline">
+            返回填表池
           </Link>
         </div>
       </main>
@@ -86,8 +86,8 @@ export default async function AccountPage() {
         </dl>
 
         <div className="mt-8 border-t border-slate-100 pt-6">
-          <Link href="/" className="text-sm font-medium text-blue-600 hover:underline">
-            ← 返回填表模式
+          <Link href="/forms" className="text-sm font-medium text-blue-600 hover:underline">
+            ← 返回填表池
           </Link>
         </div>
       </div>
