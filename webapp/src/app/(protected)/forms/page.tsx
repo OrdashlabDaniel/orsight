@@ -7,6 +7,7 @@ const forms = [
     desc: "已完成：沿用当前线上填表与训练能力。",
     status: "已完成",
     ready: true,
+    fillHref: "/",
   },
   {
     id: "form-2",
@@ -14,6 +15,7 @@ const forms = [
     desc: "待配置：将接入独立规则、独立训练池。",
     status: "规划中",
     ready: false,
+    fillHref: "",
   },
 ];
 
@@ -24,7 +26,7 @@ export default function FormsPoolPage() {
         <header className="rounded-2xl border border-slate-200 bg-white px-6 py-5 shadow-sm">
           <h1 className="text-2xl font-semibold">填表池</h1>
           <p className="mt-2 text-sm text-slate-600">
-            在这里管理多个填表。每个填表下都有「填表模式」与「图片识别训练模式」。
+            在这里管理多个填表。点击填表后将直接进入该填表的填表模式。
           </p>
         </header>
 
@@ -46,12 +48,22 @@ export default function FormsPoolPage() {
               </div>
 
               <div className="mt-4">
-                <Link
-                  href={`/forms/${form.id}`}
-                  className="inline-flex rounded-lg border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
-                >
-                  进入 {form.name}
-                </Link>
+                {form.ready ? (
+                  <Link
+                    href={form.fillHref}
+                    className="inline-flex rounded-lg border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
+                  >
+                    进入 {form.name}
+                  </Link>
+                ) : (
+                  <button
+                    type="button"
+                    disabled
+                    className="inline-flex cursor-not-allowed rounded-lg border border-slate-300 bg-slate-100 px-3 py-2 text-sm font-medium text-slate-400"
+                  >
+                    即将支持
+                  </button>
+                )}
               </div>
             </article>
           ))}
