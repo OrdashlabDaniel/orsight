@@ -22,3 +22,18 @@ export function usernameToPodLoginEmailSync(username: string): string {
 
   return `${b64.toLowerCase()}@pod-login.local`;
 }
+
+/** Legacy-compatible variant: keep base64url case as-is (older webapp behavior). */
+export function usernameToPodLoginEmailLegacySync(username: string): string {
+  const normalized = username.trim();
+  if (!normalized) {
+    throw new Error("用户名不能为空");
+  }
+  const digest = createHash("sha256").update(normalized, "utf8").digest();
+  const b64 = digest
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+  return `${b64}@pod-login.local`;
+}

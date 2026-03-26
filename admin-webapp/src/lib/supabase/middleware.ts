@@ -49,13 +49,15 @@ export async function updateSession(request: NextRequest) {
   if (!user && !isPublicPath) {
     const url = request.nextUrl.clone();
     url.pathname = "/login";
+    const nextPath = `${request.nextUrl.pathname}${request.nextUrl.search}`;
+    url.searchParams.set("next", nextPath);
     return NextResponse.redirect(url);
   }
 
   if (user) {
     const path = request.nextUrl.pathname;
-    // 公开可视化页：已登录的非管理员也可访问，不做 admin_users 拦截
-    const skipAdminGate = path.startsWith("/viz");
+    // 公开可视化页 + 管理员信息页：已登录用户可访问，不做 admin_users 拦截
+    const skipAdminGate = path.startsWith("/viz") || path.startsWith("/account");
 
     if (!skipAdminGate) {
       const { data: adminUser } = await supabase
@@ -74,7 +76,7 @@ export async function updateSession(request: NextRequest) {
 
       if (adminUser && path.startsWith("/login")) {
         const url = request.nextUrl.clone();
-        url.pathname = "/";
+        url.pathname = "/viz";
         return NextResponse.redirect(url);
       }
     }

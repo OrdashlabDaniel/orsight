@@ -4,6 +4,7 @@ import { redirect } from "next/navigation";
 
 import {
   POD_USERNAME_METADATA_KEY,
+  usernameToPodLoginEmailLegacySync,
   usernameToPodLoginEmailSync,
 } from "@/lib/pod-login-email";
 import { expandSupabaseNetworkMessage } from "@/lib/supabase/expand-network-error";
@@ -39,9 +40,21 @@ function formatSupabaseNetworkError(phase: string, err: unknown): string {
   return `ERR:${phase}时 ${tip} 原始：${String(err)}。`;
 }
 
-function resolveLoginEmail(identifier: string): { ok: true; email: string } | { ok: false } {
+function resolveLoginEmailCandidates(identifier: string): { ok: true; emails: string[] } | { ok: false } {
+  const value = identifier.trim();
+  if (!value) {
+    return { ok: false };
+  }
+
+  // New flow supports direct email sign-in; keep username hashing for compatibility.
+  if (value.includes("@")) {
+    return { ok: true, emails: [value.toLowerCase()] };
+  }
+
   try {
-    return { ok: true, email: usernameToPodLoginEmailSync(identifier) };
+    const modern = usernameToPodLoginEmailSync(value);
+    const legacy = usernameToPodLoginEmailLegacySync(value);
+    return { ok: true, emails: Array.from(new Set([modern, legacy])) };
   } catch {
     return { ok: false };
   }
@@ -62,32 +75,64 @@ export async function adminAuth(
   return adminSignIn(formData);
 }
 
+function resolveSafeNextPath(formData: FormData): string {
+  const raw = String(formData.get("next") ?? "").trim();
+  if (!raw) return "/viz";
+  // Prevent external redirects; only allow in-app absolute paths.
+  if (!raw.startsWith("/") || raw.startsWith("//")) return "/viz";
+  return raw;
+}
+
 async function adminSignIn(formData: FormData): Promise<string | null> {
   const identifier = String(formData.get("identifier") ?? "").trim();
   const password = String(formData.get("password") ?? "");
+  const nextPath = resolveSafeNextPath(formData);
 
   if (!identifier || !password) {
     return "ERR:请输入登录名和密码。";
   }
 
-  const resolved = resolveLoginEmail(identifier);
+  const resolved = resolveLoginEmailCandidates(identifier);
   if (!resolved.ok) {
     return "ERR:登录名无效。";
   }
 
   try {
     const supabase = await createClient();
-    const { data: signInData, error } = await supabase.auth.signInWithPassword({
-      email: resolved.email,
-      password,
-    });
+    let signInData: { user: { id?: string } | null } | null = null;
+    let lastErrMsg = "";
+    let sawSchemaErr = false;
 
-    if (error) {
+    for (const email of resolved.emails) {
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email,
+        password,
+      });
+      if (!error) {
+        signInData = data as { user: { id?: string } | null };
+        break;
+      }
+      lastErrMsg = error.message;
+      if (error.message.toLowerCase().includes("database error querying schema")) {
+        sawSchemaErr = true;
+      }
       const em = error.message.toLowerCase();
+      const isCredentialErr = em.includes("invalid login") || em.includes("invalid email or password");
+      if (!isCredentialErr) {
+        // Non-credential errors generally won't be fixed by trying other aliases.
+        break;
+      }
+    }
+
+    if (!signInData) {
+      if (sawSchemaErr) {
+        return "ERR:登录遇到 Supabase Auth 的 schema 查询异常。已自动尝试兼容登录名映射但仍失败；请先确认 Supabase 控制台中 Auth Hooks/自定义 JWT Hook 未引用不存在的 schema/table，或稍后重试。";
+      }
+      const em = lastErrMsg.toLowerCase();
       if (em.includes("invalid login") || em.includes("invalid email or password")) {
         return "ERR:登录名或密码不正确。请确认：① 登录名与注册时完全一致（区分大小写、前后无空格）；② 密码与注册时相同；③ 注册与后台使用同一 Supabase 项目（.env.local 与 /api/health/supabase 里的域名一致）。";
       }
-      return errMsg("登录", error.message);
+      return errMsg("登录", lastErrMsg || "未知错误");
     }
 
     const user = signInData.user;
@@ -120,7 +165,7 @@ async function adminSignIn(formData: FormData): Promise<string | null> {
       return "ERR:账号与密码正确，但你还不在管理员表 public.admin_users 中，因此无法进入后台。若注册时提示「已有管理员」，需要让现管理员在 Supabase SQL Editor 执行：insert into public.admin_users (id, email) values ('你的用户UUID','你的登录名'); 用户 UUID 可在 Authentication → Users 中查看。";
     }
 
-    redirect("/");
+    redirect(nextPath);
   } catch (err) {
     if (isNextRedirectError(err)) {
       throw err;
@@ -132,6 +177,7 @@ async function adminSignIn(formData: FormData): Promise<string | null> {
 async function adminRegister(formData: FormData): Promise<string | null> {
   const identifier = String(formData.get("identifier") ?? "").trim();
   const password = String(formData.get("password") ?? "");
+  const nextPath = resolveSafeNextPath(formData);
 
   if (!identifier || !password) {
     return "ERR:请输入登录名和密码。";
@@ -140,7 +186,7 @@ async function adminRegister(formData: FormData): Promise<string | null> {
     return "ERR:密码至少 6 位。";
   }
 
-  const resolved = resolveLoginEmail(identifier);
+  const resolved = resolveLoginEmailCandidates(identifier);
   if (!resolved.ok) {
     return "ERR:登录名无效。";
   }
@@ -154,7 +200,7 @@ async function adminRegister(formData: FormData): Promise<string | null> {
 
   try {
     const { data: created, error: createError } = await service.auth.admin.createUser({
-      email: resolved.email,
+      email: resolved.emails[0]!,
       password,
       email_confirm: true,
       user_metadata: { [POD_USERNAME_METADATA_KEY]: identifier },
@@ -191,7 +237,7 @@ async function adminRegister(formData: FormData): Promise<string | null> {
 
       const supabase = await createClient();
       const { error: signInError } = await supabase.auth.signInWithPassword({
-        email: resolved.email,
+        email: resolved.emails[0]!,
         password,
       });
 
@@ -199,7 +245,7 @@ async function adminRegister(formData: FormData): Promise<string | null> {
         return `${errMsg("注册·自动登录", signInError.message)} 请改用「登录」进入。`;
       }
 
-      redirect("/");
+      redirect(nextPath);
     }
 
     return "OK:注册成功。当前已有管理员，你的账号暂无后台权限；请让管理员在表 public.admin_users 中添加你的用户 ID 后再登录。";

@@ -206,10 +206,10 @@ export default async function VizPage(props: { searchParams?: Promise<SearchPara
           </div>
           <div className="flex flex-wrap gap-2">
             <Link
-              href="/login"
+              href="/account"
               className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
             >
-              管理员登录
+              管理员信息
             </Link>
           </div>
         </div>

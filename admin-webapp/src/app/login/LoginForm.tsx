@@ -8,6 +8,7 @@ import { adminAuth } from "./actions";
 export default function LoginForm() {
   const searchParams = useSearchParams();
   const urlError = searchParams.get("error");
+  const nextPath = searchParams.get("next") || "/viz";
   const [mode, setMode] = useState<"login" | "register">("login");
 
   const [flash, formAction, isPending] = useActionState(adminAuth, null);
@@ -83,6 +84,7 @@ export default function LoginForm() {
 
       <form action={formAction} className="space-y-4">
         <input type="hidden" name="intent" value={mode} />
+        <input type="hidden" name="next" value={nextPath} />
 
         <div>
           <label className="block text-sm font-medium text-slate-700">登录名</label>
