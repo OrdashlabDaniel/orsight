@@ -122,6 +122,7 @@ export default function TrainingMode() {
 
   const [drawingState, setDrawingState] = useState<DrawingState | null>(null);
   const [isSavingTraining, setIsSavingTraining] = useState(false);
+  const [isPreviewFillLoading, setIsPreviewFillLoading] = useState(false);
 
   const [globalRules, setGlobalRules] = useState<{
     instructions: string;
@@ -693,6 +694,65 @@ export default function TrainingMode() {
       reader.onerror = () => reject(new Error("图片读取失败。"));
       reader.readAsDataURL(blob);
     });
+  }
+
+  async function previewFillFromAnnotations() {
+    if (!annotatingItem || !annotationImageSrc || !annotationBoxes.length) {
+      setErrorMessage("请先完成框选并确保图片已加载。");
+      return;
+    }
+    setIsPreviewFillLoading(true);
+    setErrorMessage("");
+    try {
+      const imageDataUrl = await imageSourceToDataUrl(annotationImageSrc);
+      const res = await fetch("/api/training/preview-fill", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          imageDataUrl,
+          boxes: annotationBoxes,
+          fieldAggregations,
+        }),
+      });
+      const data = (await res.json()) as {
+        error?: string;
+        record?: Record<string, string | number | "">;
+        previewNote?: string;
+      };
+      if (!res.ok) {
+        throw new Error(data.error || "试填失败");
+      }
+      if (!data.record) {
+        throw new Error("未返回试填结果");
+      }
+      const r = data.record;
+      const numOrEmpty = (v: unknown): number | "" => {
+        if (v === "" || v === null || v === undefined) return "";
+        const n = typeof v === "number" ? v : Number(v);
+        return Number.isFinite(n) ? n : "";
+      };
+      setManualRecord((prev) => ({
+        ...prev,
+        ...(typeof r.date === "string" ? { date: r.date } : {}),
+        ...(typeof r.route === "string" ? { route: r.route } : {}),
+        ...(typeof r.driver === "string" ? { driver: r.driver } : {}),
+        ...(typeof r.totalSourceLabel === "string" ? { totalSourceLabel: r.totalSourceLabel } : {}),
+        ...(typeof r.waybillStatus === "string" ? { waybillStatus: r.waybillStatus } : {}),
+        ...(typeof r.stationTeam === "string" ? { stationTeam: r.stationTeam } : {}),
+        ...(r.total !== undefined ? { total: numOrEmpty(r.total) } : {}),
+        ...(r.unscanned !== undefined ? { unscanned: numOrEmpty(r.unscanned) } : {}),
+        ...(r.exceptions !== undefined ? { exceptions: numOrEmpty(r.exceptions) } : {}),
+      }));
+      setNoticeMessage(
+        data.previewNote
+          ? `AI 试填完成。说明：${data.previewNote} 请核对后再存入训练池。`
+          : "AI 试填完成，请核对右侧数值；可多框相加等规则已按你的合并方式参与识别。",
+      );
+    } catch (err) {
+      setErrorMessage(err instanceof Error ? err.message : "试填失败");
+    } finally {
+      setIsPreviewFillLoading(false);
+    }
   }
 
   async function saveAnnotationToTrainingPool() {
@@ -1349,14 +1409,29 @@ export default function TrainingMode() {
                   />
                 </div>
 
-                <button
-                  type="button"
-                  className="mt-auto w-full rounded-xl bg-emerald-600 px-4 py-3 font-medium text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:bg-emerald-300"
-                  onClick={() => void saveAnnotationToTrainingPool()}
-                  disabled={isSavingTraining}
-                >
-                  {isSavingTraining ? "保存中..." : "存入训练池"}
-                </button>
+                <div className="mt-auto flex flex-col gap-2">
+                  <button
+                    type="button"
+                    className="w-full rounded-xl border border-violet-300 bg-violet-50 px-4 py-3 text-sm font-medium text-violet-900 hover:bg-violet-100 disabled:cursor-not-allowed disabled:opacity-50"
+                    onClick={() => void previewFillFromAnnotations()}
+                    disabled={
+                      isPreviewFillLoading ||
+                      isSavingTraining ||
+                      !annotationImageSrc ||
+                      annotationBoxes.length === 0
+                    }
+                  >
+                    {isPreviewFillLoading ? "试填识别中…" : "AI 试填预览（按框选识别并填入上方）"}
+                  </button>
+                  <button
+                    type="button"
+                    className="w-full rounded-xl bg-emerald-600 px-4 py-3 font-medium text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:bg-emerald-300"
+                    onClick={() => void saveAnnotationToTrainingPool()}
+                    disabled={isSavingTraining || isPreviewFillLoading}
+                  >
+                    {isSavingTraining ? "保存中..." : "存入训练池"}
+                  </button>
+                </div>
               </div>
             </div>
             </div>
