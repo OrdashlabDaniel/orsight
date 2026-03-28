@@ -6,6 +6,13 @@ import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import * as XLSX from "xlsx";
 
 import {
+  TrainingAnnotationWorkbench,
+  type AnnotationField,
+  type AnnotationWorkbenchSeed,
+  type FieldAggregation,
+  type WorkbenchAnnotationBox,
+} from "@/components/TrainingAnnotationWorkbench";
+import {
   type ExtractionIssue,
   type ExtractionResponse,
   type PodRecord,
@@ -17,17 +24,6 @@ type UploadItem = {
   id: string;
   file: File;
   previewUrl: string;
-};
-
-type AnnotationField = "date" | "route" | "driver" | "total" | "unscanned" | "exceptions" | "waybillStatus" | "stationTeam";
-
-type AnnotationBox = {
-  field: AnnotationField;
-  value: string;
-  x: number;
-  y: number;
-  width: number;
-  height: number;
 };
 
 type TrainingStatusItem = {
@@ -45,7 +41,7 @@ type TrainingStatusItem = {
       exceptions: number;
       stationTeam?: string;
     };
-    boxes?: AnnotationBox[];
+    boxes?: WorkbenchAnnotationBox[];
   } | null;
 };
 
@@ -55,15 +51,6 @@ type TrainingStatusResponse = {
   unlabeledImages: number;
   items: TrainingStatusItem[];
 };
-
-type DrawingState = {
-  startX: number;
-  startY: number;
-  currentX: number;
-  currentY: number;
-};
-
-type RecordPopupMode = "view" | "annotate";
 
 type PopupPosition = {
   top: number;
@@ -97,16 +84,19 @@ const editableColumns: Array<{
   { key: "waybillStatus", label: "响应更新状态" },
 ];
 
-const annotationFields: Array<{ key: AnnotationField; label: string }> = [
-  { key: "date", label: "日期" },
-  { key: "route", label: "抽查路线" },
-  { key: "driver", label: "抽查司机" },
-  { key: "total", label: "运单数量" },
-  { key: "unscanned", label: "未收数量" },
-  { key: "exceptions", label: "错扫数量" },
-  { key: "waybillStatus", label: "响应更新状态" },
-  { key: "stationTeam", label: "站点车队" },
-];
+function podRecordToAnnotationSeed(record: PodRecord): AnnotationWorkbenchSeed {
+  return {
+    date: record.date ?? "",
+    route: record.route ?? "",
+    driver: record.driver ?? "",
+    total: record.total ?? "",
+    unscanned: record.unscanned ?? "",
+    exceptions: record.exceptions ?? "",
+    waybillStatus: record.waybillStatus ?? "",
+    stationTeam: record.stationTeam ?? "",
+    totalSourceLabel: record.totalSourceLabel ?? "",
+  };
+}
 
 function buildExportRows(records: PodRecord[]) {
   return records.map((record) => [
@@ -157,15 +147,13 @@ export default function Home() {
   const [annotatingRecord, setAnnotatingRecord] = useState<PodRecord | null>(null);
   const [annotationImageSrc, setAnnotationImageSrc] = useState("");
   const [annotationImageName, setAnnotationImageName] = useState("");
-  const [annotationBoxes, setAnnotationBoxes] = useState<AnnotationBox[]>([]);
-  const [annotationNotes, setAnnotationNotes] = useState("");
-  const [annotationField, setAnnotationField] = useState<AnnotationField>("driver");
-  const [annotationStationTeam, setAnnotationStationTeam] = useState("");
-  const [drawingState, setDrawingState] = useState<DrawingState | null>(null);
-  const [isSavingTraining, setIsSavingTraining] = useState(false);
+  const [annotationDraft, setAnnotationDraft] = useState<{
+    seed: AnnotationWorkbenchSeed;
+    boxes: WorkbenchAnnotationBox[];
+    fieldAggregations: Partial<Record<AnnotationField, FieldAggregation>>;
+    notes: string;
+  } | null>(null);
   const [isDraggingFiles, setIsDraggingFiles] = useState(false);
-  const [recordPopupMode, setRecordPopupMode] = useState<RecordPopupMode>("view");
-  const [popupPosition, setPopupPosition] = useState<PopupPosition | null>(null);
   const [viewingRecord, setViewingRecord] = useState<PodRecord | null>(null);
   const [viewerImageSrc, setViewerImageSrc] = useState("");
   const [viewerImageName, setViewerImageName] = useState("");
@@ -178,10 +166,8 @@ export default function Home() {
   const [noticeMessage, setNoticeMessage] = useState("");
   const [routeFilter, setRouteFilter] = useState("");
   const [isRouteDropdownOpen, setIsRouteDropdownOpen] = useState(false);
-  const annotationCanvasRef = useRef<HTMLDivElement | null>(null);
   const filterInputRef = useRef<HTMLInputElement | null>(null);
   const filterDropdownRef = useRef<HTMLDivElement | null>(null);
-  const popupAnchorRef = useRef<HTMLElement | null>(null);
   const viewerAnchorRef = useRef<HTMLElement | null>(null);
   const uploadPanelRef = useRef<HTMLDivElement | null>(null);
 
@@ -197,36 +183,6 @@ export default function Home() {
   useEffect(() => {
     void loadTrainingStatus();
   }, []);
-
-  useEffect(() => {
-    if (!annotatingRecord || !popupAnchorRef.current) {
-      return;
-    }
-
-    const updatePopupPosition = () => {
-      if (!popupAnchorRef.current) {
-        return;
-      }
-
-      const rect = popupAnchorRef.current.getBoundingClientRect();
-      const desiredWidth = recordPopupMode === "annotate" ? 980 : 540;
-      const desiredHeight = recordPopupMode === "annotate" ? 760 : 580;
-      const rightSideAvailable = Math.max(260, window.innerWidth - rect.right - 24);
-      const popupWidth = Math.max(260, Math.min(desiredWidth, rightSideAvailable));
-      const left = Math.min(rect.right + 12, window.innerWidth - popupWidth - 16);
-      const top = Math.max(16, Math.min(rect.top, window.innerHeight - desiredHeight - 16));
-      setPopupPosition({ top, left, width: popupWidth });
-    };
-
-    updatePopupPosition();
-    window.addEventListener("resize", updatePopupPosition);
-    window.addEventListener("scroll", updatePopupPosition, true);
-
-    return () => {
-      window.removeEventListener("resize", updatePopupPosition);
-      window.removeEventListener("scroll", updatePopupPosition, true);
-    };
-  }, [annotatingRecord, recordPopupMode]);
 
   useEffect(() => {
     if (!viewingRecord) {
@@ -359,18 +315,6 @@ export default function Home() {
     }
     return Array.from(groups.entries());
   }, [filteredRecordsResult.records]);
-  const drawingPreview = useMemo(() => {
-    if (!drawingState) {
-      return null;
-    }
-
-    return {
-      x: Math.min(drawingState.startX, drawingState.currentX),
-      y: Math.min(drawingState.startY, drawingState.currentY),
-      width: Math.abs(drawingState.currentX - drawingState.startX),
-      height: Math.abs(drawingState.currentY - drawingState.startY),
-    };
-  }, [drawingState]);
   const activePopupRecordId = viewingRecord?.id || annotatingRecord?.id || null;
 
   const totalWarnings = issues.filter((issue) => issue.level === "warning").length;
@@ -414,11 +358,7 @@ export default function Home() {
     setAnnotatingRecord(null);
     setAnnotationImageName("");
     setAnnotationImageSrc("");
-    setAnnotationBoxes([]);
-    setAnnotationNotes("");
-    setAnnotationStationTeam("");
-    setPopupPosition(null);
-    popupAnchorRef.current = null;
+    setAnnotationDraft(null);
   }
 
   function closeViewerPopup() {
@@ -437,24 +377,14 @@ export default function Home() {
     return (element?.closest("tr") as HTMLElement | null) || element || null;
   }
 
-  function calculatePopupPosition(anchor: HTMLElement, mode: "viewer" | "annotate"): PopupPosition {
+  function calculatePopupPosition(anchor: HTMLElement): PopupPosition {
     const rect = anchor.getBoundingClientRect();
-    const desiredWidth = mode === "annotate" ? 980 : 420;
-    const desiredHeight = mode === "annotate" ? 760 : 620;
-    const minWidth = mode === "annotate" ? 260 : 260;
-    let width = desiredWidth;
-    let left = rect.right + 12;
-
-    if (mode === "viewer") {
-      const leftSideAvailable = Math.max(minWidth, rect.left - 24);
-      width = Math.max(minWidth, Math.min(desiredWidth, leftSideAvailable));
-      left = Math.max(16, rect.left - width - 12);
-    } else {
-      const rightSideAvailable = Math.max(minWidth, window.innerWidth - rect.right - 24);
-      width = Math.max(minWidth, Math.min(desiredWidth, rightSideAvailable));
-      left = Math.min(rect.right + 12, window.innerWidth - width - 16);
-    }
-
+    const desiredWidth = 420;
+    const desiredHeight = 620;
+    const minWidth = 260;
+    const leftSideAvailable = Math.max(minWidth, rect.left - 24);
+    const width = Math.max(minWidth, Math.min(desiredWidth, leftSideAvailable));
+    const left = Math.max(16, rect.left - width - 12);
     const top = Math.max(16, Math.min(rect.top, window.innerHeight - desiredHeight - 16));
     return { top, left, width };
   }
@@ -749,40 +679,38 @@ export default function Home() {
     return payload.dataUrl;
   }
 
-  async function openAnnotationPanel(record: PodRecord, anchorElement?: HTMLElement) {
+  async function openAnnotationPanel(record: PodRecord, _anchorElement?: HTMLElement) {
+    void _anchorElement;
     const imageName = getSourceImageNames(record)[0];
     if (!imageName) {
       setErrorMessage("找不到该条记录对应的图片名。");
       return;
     }
 
-    const anchor = resolveRowAnchor(anchorElement);
-    popupAnchorRef.current = anchor;
-    if (anchor) {
-      setPopupPosition(calculatePopupPosition(anchor, "annotate"));
-    }
-
     const matchedUpload = uploads.find((upload) => upload.file.name === imageName);
+
+    setAnnotationDraft({
+      seed: podRecordToAnnotationSeed(record),
+      boxes: [],
+      fieldAggregations: {},
+      notes: "人工标注用于训练池。",
+    });
 
     try {
       if (viewingRecord) {
         closeViewerPopup();
       }
       const imageSrc = await resolveAnnotationImage(imageName, matchedUpload?.previewUrl);
-      setRecordPopupMode("annotate");
       setAnnotatingRecord(record);
       setAnnotationImageName(imageName);
       setAnnotationImageSrc(imageSrc);
-      setAnnotationBoxes([]);
-      setAnnotationField("driver");
-      setAnnotationNotes("人工标注用于训练池。");
-      setAnnotationStationTeam(record.stationTeam || "");
       if (matchedUpload) {
         setSelectedUploadId(matchedUpload.id);
       }
       setNoticeMessage(`已打开标注工作台：${imageName}`);
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "打开标注失败。");
+      setAnnotationDraft(null);
     }
   }
 
@@ -803,7 +731,7 @@ export default function Home() {
       const anchor = resolveRowAnchor(event.currentTarget);
       viewerAnchorRef.current = anchor;
       if (anchor) {
-        setViewerPopupPosition(calculatePopupPosition(anchor, "viewer"));
+        setViewerPopupPosition(calculatePopupPosition(anchor));
       }
 
       if (annotatingRecord) {
@@ -830,7 +758,7 @@ export default function Home() {
     const anchor = resolveRowAnchor(anchorElement);
     viewerAnchorRef.current = anchor;
     if (anchor) {
-      setViewerPopupPosition(calculatePopupPosition(anchor, "viewer"));
+      setViewerPopupPosition(calculatePopupPosition(anchor));
     }
 
     if (annotatingRecord) {
@@ -934,163 +862,26 @@ export default function Home() {
     setNoticeMessage(`已删除条目：${record.route || "未命名路线"} / ${record.driver || "未命名司机"}`);
   }
 
-  function getAnnotationFieldValue(record: PodRecord | null, field: AnnotationField) {
-    if (!record) {
-      return "";
-    }
-
-    if (field === "stationTeam") {
-      return annotationStationTeam;
-    }
-
-    const value = record[field as keyof PodRecord];
-    return value === null || value === undefined || value === "" ? "" : String(value);
-  }
-
-  function getRelativePoint(event: React.MouseEvent<HTMLDivElement>) {
-    const rect = annotationCanvasRef.current?.getBoundingClientRect();
-    if (!rect) {
-      return null;
-    }
-
-    const x = (event.clientX - rect.left) / rect.width;
-    const y = (event.clientY - rect.top) / rect.height;
-
-    return {
-      x: Math.max(0, Math.min(1, x)),
-      y: Math.max(0, Math.min(1, y)),
-    };
-  }
-
-  function beginDrawing(event: React.MouseEvent<HTMLDivElement>) {
-    const point = getRelativePoint(event);
-    if (!point) {
-      return;
-    }
-
-    setDrawingState({
-      startX: point.x,
-      startY: point.y,
-      currentX: point.x,
-      currentY: point.y,
-    });
-  }
-
-  function updateDrawing(event: React.MouseEvent<HTMLDivElement>) {
-    if (!drawingState) {
-      return;
-    }
-
-    const point = getRelativePoint(event);
-    if (!point) {
-      return;
-    }
-
-    setDrawingState({
-      ...drawingState,
-      currentX: point.x,
-      currentY: point.y,
-    });
-  }
-
-  function finishDrawing() {
-    if (!drawingState || !annotatingRecord) {
-      setDrawingState(null);
-      return;
-    }
-
-    const x = Math.min(drawingState.startX, drawingState.currentX);
-    const y = Math.min(drawingState.startY, drawingState.currentY);
-    const width = Math.abs(drawingState.currentX - drawingState.startX);
-    const height = Math.abs(drawingState.currentY - drawingState.startY);
-    setDrawingState(null);
-
-    if (width < 0.01 || height < 0.01) {
-      return;
-    }
-
-    const nextBox: AnnotationBox = {
-      field: annotationField,
-      value: getAnnotationFieldValue(annotatingRecord, annotationField),
-      x,
-      y,
-      width,
-      height,
-    };
-
-    setAnnotationBoxes((current) => [...current.filter((box) => box.field !== annotationField), nextBox]);
-  }
-
-  function removeAnnotationBox(field: AnnotationField) {
-    setAnnotationBoxes((current) => current.filter((box) => box.field !== field));
-  }
-
-  async function imageSourceToDataUrl(source: string) {
-    if (source.startsWith("data:")) {
-      return source;
-    }
-
-    const response = await fetch(source);
-    const blob = await response.blob();
-    return await new Promise<string>((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onloadend = () => resolve(String(reader.result));
-      reader.onerror = () => reject(new Error("图片读取失败。"));
-      reader.readAsDataURL(blob);
-    });
-  }
-
-  async function saveAnnotationToTrainingPool() {
-    if (!annotatingRecord || !annotationImageName || !annotationImageSrc) {
-      setErrorMessage("当前没有可保存的标注。");
-      return;
-    }
-
-    if (!annotationBoxes.length) {
-      setErrorMessage("请至少标注一个字段框后再保存。");
-      return;
-    }
-
-    setIsSavingTraining(true);
-    setErrorMessage("");
-
-    try {
-      const imageDataUrl = await imageSourceToDataUrl(annotationImageSrc);
-      const response = await fetch("/api/training/save", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          imageName: annotationImageName,
-          imageDataUrl,
-          notes: annotationNotes,
-          output: {
-            date: annotatingRecord.date,
-            route: annotatingRecord.route,
-            driver: annotatingRecord.driver,
-            total: annotatingRecord.total,
-            unscanned: annotatingRecord.unscanned,
-            exceptions: annotatingRecord.exceptions,
-            stationTeam: annotationStationTeam,
-          },
-          boxes: annotationBoxes,
-        }),
-      });
-
-      const payload = (await response.json()) as { error?: string; totalExamples?: number };
-      if (!response.ok) {
-        throw new Error(payload.error || "保存训练样本失败。");
-      }
-
-      await loadTrainingStatus();
-      setNoticeMessage(`标注已存入训练池，当前训练样本总数 ${payload.totalExamples || 0}。`);
-      closeRecordPopup();
-    } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "保存训练样本失败。");
-    } finally {
-      setIsSavingTraining(false);
-    }
+  function applyAnnotationSeedToRecord(recordId: string, seed: AnnotationWorkbenchSeed) {
+    setRecords((current) =>
+      current.map((record) => {
+        if (record.id !== recordId) {
+          return record;
+        }
+        return {
+          ...record,
+          date: seed.date,
+          route: seed.route,
+          driver: seed.driver,
+          total: seed.total === "" ? "" : Number(seed.total),
+          unscanned: seed.unscanned === "" ? "" : Number(seed.unscanned),
+          exceptions: seed.exceptions === "" ? "" : Number(seed.exceptions),
+          waybillStatus: seed.waybillStatus,
+          stationTeam: seed.stationTeam,
+          totalSourceLabel: seed.totalSourceLabel,
+        };
+      }),
+    );
   }
 
   return (
@@ -1601,169 +1392,25 @@ export default function Home() {
           </div>
         ) : null}
 
-        {annotatingRecord && popupPosition ? (
-          <div
-            className="fixed z-50 max-h-[85vh] overflow-auto rounded-3xl border border-slate-200 bg-white p-5 shadow-2xl"
-            style={{
-              top: popupPosition.top,
-              left: popupPosition.left,
-              width: popupPosition.width,
+        {annotatingRecord && annotationDraft ? (
+          <TrainingAnnotationWorkbench
+            open
+            imageName={annotationImageName}
+            imageSrc={annotationImageSrc}
+            initialSeed={annotationDraft.seed}
+            initialBoxes={annotationDraft.boxes}
+            initialFieldAggregations={annotationDraft.fieldAggregations}
+            initialNotes={annotationDraft.notes}
+            onClose={closeRecordPopup}
+            onNotice={setNoticeMessage}
+            onError={setErrorMessage}
+            onSaved={async ({ totalExamples, finalSeed }) => {
+              const recordId = annotatingRecord.id;
+              await loadTrainingStatus();
+              setNoticeMessage(`标注已存入训练池，当前训练样本总数 ${totalExamples || 0}。`);
+              applyAnnotationSeedToRecord(recordId, finalSeed);
             }}
-          >
-            <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <h2 className="text-lg font-semibold">{recordPopupMode === "annotate" ? "人工标注工作台" : "图片查看"}</h2>
-                <p className="mt-1 text-sm text-slate-500">
-                  {recordPopupMode === "annotate"
-                    ? "选择字段后，在图片上拖动画框，完成后点击“存入训练池”。"
-                    : "查看当前条目对应图片，必要时切换到标注模式。"}
-                </p>
-              </div>
-              <button
-                className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-medium hover:bg-slate-50"
-                onClick={closeRecordPopup}
-              >
-                关闭窗口
-              </button>
-            </div>
-
-            <div className={`grid gap-4 ${recordPopupMode === "annotate" ? "xl:grid-cols-[minmax(0,1fr)_360px]" : "grid-cols-1"}`}>
-              <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
-                <div className="mb-3 text-sm font-medium text-slate-700">标注图片：{annotationImageName}</div>
-                <div
-                  ref={annotationCanvasRef}
-                  className="relative aspect-[3/4] overflow-hidden rounded-xl bg-black/5"
-                  onMouseDown={beginDrawing}
-                  onMouseMove={updateDrawing}
-                  onMouseUp={finishDrawing}
-                  onMouseLeave={finishDrawing}
-                >
-                  {annotationImageSrc ? (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img src={annotationImageSrc} alt={annotationImageName} className="h-full w-full object-contain" />
-                  ) : null}
-                  {annotationBoxes.map((box) => (
-                    <div
-                      key={box.field}
-                      className="pointer-events-none absolute border-2 border-rose-500 bg-rose-500/10"
-                      style={{
-                        left: `${box.x * 100}%`,
-                        top: `${box.y * 100}%`,
-                        width: `${box.width * 100}%`,
-                        height: `${box.height * 100}%`,
-                      }}
-                    >
-                      <span className="absolute left-0 top-0 -translate-y-full rounded bg-rose-500 px-1.5 py-0.5 text-[10px] text-white">
-                        {annotationFields.find((item) => item.key === box.field)?.label}
-                      </span>
-                    </div>
-                  ))}
-                  {drawingPreview ? (
-                    <div
-                      className="pointer-events-none absolute border-2 border-blue-500 bg-blue-500/10"
-                      style={{
-                        left: `${drawingPreview.x * 100}%`,
-                        top: `${drawingPreview.y * 100}%`,
-                        width: `${drawingPreview.width * 100}%`,
-                        height: `${drawingPreview.height * 100}%`,
-                      }}
-                    />
-                  ) : null}
-                </div>
-              </div>
-
-              {recordPopupMode === "annotate" ? (
-                <div className="space-y-4 rounded-2xl border border-slate-200 bg-slate-50 p-4">
-                <div>
-                  <label className="mb-2 block text-sm font-medium text-slate-700">当前要画的字段</label>
-                  <select
-                    value={annotationField}
-                    onChange={(event) => setAnnotationField(event.target.value as AnnotationField)}
-                    className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2"
-                  >
-                    {annotationFields.map((field) => (
-                      <option key={field.key} value={field.key}>
-                        {field.label}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div className="grid gap-3">
-                  {editableColumns.map((column) => (
-                    <label key={column.key} className="block">
-                      <span className="mb-1 block text-sm text-slate-700">{column.label}</span>
-                      <input
-                        type={column.type || "text"}
-                        value={annotatingRecord[column.key]}
-                        onChange={(event) => updateRecord(annotatingRecord.id, column.key, event.target.value)}
-                        className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2"
-                      />
-                    </label>
-                  ))}
-                  <label className="block">
-                    <span className="mb-1 block text-sm text-slate-700">站点车队</span>
-                    <input
-                      type="text"
-                      value={annotationStationTeam}
-                      onChange={(event) => setAnnotationStationTeam(event.target.value)}
-                      className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2"
-                    />
-                  </label>
-                  <label className="block">
-                    <span className="mb-1 block text-sm text-slate-700">训练备注</span>
-                    <textarea
-                      value={annotationNotes}
-                      onChange={(event) => setAnnotationNotes(event.target.value)}
-                      className="min-h-24 w-full rounded-xl border border-slate-300 bg-white px-3 py-2"
-                    />
-                  </label>
-                </div>
-
-                <div>
-                  <div className="mb-2 text-sm font-medium text-slate-700">已画框字段</div>
-                  <div className="space-y-2">
-                    {annotationFields.map((field) => {
-                      const box = annotationBoxes.find((item) => item.field === field.key);
-                      return (
-                        <div key={field.key} className="flex items-center justify-between rounded-xl bg-white px-3 py-2 text-sm">
-                          <span>
-                            {field.label}：{box ? "已标注" : "未标注"}
-                          </span>
-                          {box ? (
-                            <button className="text-rose-600 hover:text-rose-500" onClick={() => removeAnnotationBox(field.key)}>
-                              删除
-                            </button>
-                          ) : null}
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-
-                <button
-                  className="w-full rounded-xl bg-emerald-600 px-4 py-3 text-sm font-medium text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:bg-emerald-300"
-                  onClick={() => void saveAnnotationToTrainingPool()}
-                  disabled={isSavingTraining}
-                >
-                  {isSavingTraining ? "保存训练样本中..." : "存入训练池"}
-                </button>
-                </div>
-              ) : (
-                <div className="space-y-4 rounded-2xl border border-slate-200 bg-slate-50 p-4">
-                  <div className="text-sm text-slate-600">
-                    当前条目：`{annotatingRecord.route}` / `{annotatingRecord.driver}`
-                  </div>
-                  <button
-                    className="w-full rounded-xl border border-blue-300 bg-blue-50 px-4 py-3 text-sm font-medium text-blue-700 hover:bg-blue-100"
-                    onClick={(event) => void openAnnotationPanel(annotatingRecord, event.currentTarget)}
-                  >
-                    切换到标注模式
-                  </button>
-                </div>
-              )}
-            </div>
-          </div>
+          />
         ) : null}
       </div>
     </main>
