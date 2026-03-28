@@ -2,7 +2,7 @@
 
 import Image from "next/image";
 import Link from "next/link";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { type PodRecord } from "@/lib/pod";
 
@@ -58,12 +58,6 @@ type DrawingState = {
   currentY: number;
 };
 
-type PopupPosition = {
-  top: number;
-  left: number;
-  width: number;
-};
-
 const annotationFields: Array<{ key: AnnotationField; label: string }> = [
   { key: "date", label: "日期" },
   { key: "route", label: "抽查路线" },
@@ -96,8 +90,6 @@ export default function TrainingMode() {
 
   const [drawingState, setDrawingState] = useState<DrawingState | null>(null);
   const [isSavingTraining, setIsSavingTraining] = useState(false);
-
-  const [popupPosition, setPopupPosition] = useState<PopupPosition | null>(null);
 
   const [globalRules, setGlobalRules] = useState<{ instructions: string; documents: Array<{ name: string; content: string }> }>({ instructions: "", documents: [] });
   const [isSavingRules, setIsSavingRules] = useState(false);
@@ -190,7 +182,6 @@ export default function TrainingMode() {
   }
 
   const annotationCanvasRef = useRef<HTMLDivElement | null>(null);
-  const popupAnchorRef = useRef<HTMLElement | null>(null);
   const uploadPanelRef = useRef<HTMLDivElement | null>(null);
 
   const uploadsRef = useRef(uploads);
@@ -205,36 +196,6 @@ export default function TrainingMode() {
   useEffect(() => {
     void loadTrainingStatus();
   }, []);
-
-  useEffect(() => {
-    if (!annotatingItem || !popupAnchorRef.current) {
-      return;
-    }
-
-    const updatePopupPosition = () => {
-      if (!popupAnchorRef.current) {
-        return;
-      }
-
-      const rect = popupAnchorRef.current.getBoundingClientRect();
-      const desiredWidth = 980;
-      const desiredHeight = 760;
-      const rightSideAvailable = Math.max(260, window.innerWidth - rect.right - 24);
-      const popupWidth = Math.max(260, Math.min(desiredWidth, rightSideAvailable));
-      const left = Math.min(rect.right + 12, window.innerWidth - popupWidth - 16);
-      const top = Math.max(16, Math.min(rect.top, window.innerHeight - desiredHeight - 16));
-      setPopupPosition({ top, left, width: popupWidth });
-    };
-
-    updatePopupPosition();
-    window.addEventListener("resize", updatePopupPosition);
-    window.addEventListener("scroll", updatePopupPosition, true);
-
-    return () => {
-      window.removeEventListener("resize", updatePopupPosition);
-      window.removeEventListener("scroll", updatePopupPosition, true);
-    };
-  }, [annotatingItem]);
 
   const handleFilesRef = useRef<((fileList: FileList | File[] | null) => Promise<void>) | null>(null);
 
@@ -272,21 +233,6 @@ export default function TrainingMode() {
       document.removeEventListener("paste", handlePaste);
     };
   }, []);
-
-  function resolveRowAnchor(element?: HTMLElement) {
-    if (!element) {
-      return uploadPanelRef.current;
-    }
-    const tr = element.closest("tr");
-    if (tr) {
-      return tr;
-    }
-    const li = element.closest("li");
-    if (li) {
-      return li;
-    }
-    return uploadPanelRef.current;
-  }
 
   async function loadTrainingStatus() {
     try {
@@ -379,19 +325,16 @@ export default function TrainingMode() {
     return payload.dataUrl;
   }
 
-  function handleImageClick(upload: UploadItem, event: React.MouseEvent<HTMLElement>) {
+  function handleImageClick(upload: UploadItem) {
     setSelectedUploadId(upload.id);
-    openAnnotationPanel(upload, event.currentTarget);
+    void openAnnotationPanel(upload);
   }
 
-  function handleTrainingItemClick(item: TrainingStatusItem, event: React.MouseEvent<HTMLElement>) {
-    openAnnotationPanel(item, event.currentTarget);
+  function handleTrainingItemClick(item: TrainingStatusItem) {
+    void openAnnotationPanel(item);
   }
 
-  async function openAnnotationPanel(item: UploadItem | TrainingStatusItem, anchorElement?: HTMLElement) {
-    const anchor = resolveRowAnchor(anchorElement);
-    popupAnchorRef.current = anchor;
-    
+  async function openAnnotationPanel(item: UploadItem | TrainingStatusItem) {
     setAnnotatingItem(item);
     
     let imageName = "";
@@ -437,24 +380,35 @@ export default function TrainingMode() {
     }
   }
 
-  function closeRecordPopup() {
+  const closeRecordPopup = useCallback(() => {
     setAnnotatingItem(null);
     setDrawingState(null);
-  }
+  }, []);
+
+  useEffect(() => {
+    if (!annotatingItem) return;
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        closeRecordPopup();
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [annotatingItem, closeRecordPopup]);
 
   function getAnnotationFieldValue(field: AnnotationField) {
     const value = manualRecord[field as keyof typeof manualRecord];
     return value === null || value === undefined || value === "" ? "" : String(value);
   }
 
-  function getRelativePoint(event: React.MouseEvent<HTMLDivElement>) {
+  function getRelativePointFromClient(clientX: number, clientY: number) {
     const rect = annotationCanvasRef.current?.getBoundingClientRect();
-    if (!rect) {
+    if (!rect || rect.width <= 0 || rect.height <= 0) {
       return null;
     }
 
-    const x = (event.clientX - rect.left) / rect.width;
-    const y = (event.clientY - rect.top) / rect.height;
+    const x = (clientX - rect.left) / rect.width;
+    const y = (clientY - rect.top) / rect.height;
 
     return {
       x: Math.max(0, Math.min(1, x)),
@@ -463,7 +417,7 @@ export default function TrainingMode() {
   }
 
   function beginDrawing(event: React.MouseEvent<HTMLDivElement>) {
-    const point = getRelativePoint(event);
+    const point = getRelativePointFromClient(event.clientX, event.clientY);
     if (!point) {
       return;
     }
@@ -481,7 +435,7 @@ export default function TrainingMode() {
       return;
     }
 
-    const point = getRelativePoint(event);
+    const point = getRelativePointFromClient(event.clientX, event.clientY);
     if (!point) {
       return;
     }
@@ -493,19 +447,63 @@ export default function TrainingMode() {
     });
   }
 
-  function finishDrawing() {
+  function beginDrawingTouch(event: React.TouchEvent<HTMLDivElement>) {
+    if (event.touches.length !== 1) return;
+    const t = event.touches[0];
+    const point = getRelativePointFromClient(t.clientX, t.clientY);
+    if (!point) return;
+    event.preventDefault();
+    setDrawingState({
+      startX: point.x,
+      startY: point.y,
+      currentX: point.x,
+      currentY: point.y,
+    });
+  }
+
+  function updateDrawingTouch(event: React.TouchEvent<HTMLDivElement>) {
+    if (!drawingState || event.touches.length !== 1) return;
+    const t = event.touches[0];
+    const point = getRelativePointFromClient(t.clientX, t.clientY);
+    if (!point) return;
+    event.preventDefault();
+    setDrawingState({
+      ...drawingState,
+      currentX: point.x,
+      currentY: point.y,
+    });
+  }
+
+  function finishDrawingTouch(event: React.TouchEvent<HTMLDivElement>) {
+    event.preventDefault();
+    const t = event.changedTouches[0];
+    let endX: number | undefined;
+    let endY: number | undefined;
+    if (t) {
+      const point = getRelativePointFromClient(t.clientX, t.clientY);
+      if (point) {
+        endX = point.x;
+        endY = point.y;
+      }
+    }
+    finishDrawing(endX, endY);
+  }
+
+  function finishDrawing(endX?: number, endY?: number) {
     if (!drawingState || !annotatingItem) {
       setDrawingState(null);
       return;
     }
 
-    const x = Math.min(drawingState.startX, drawingState.currentX);
-    const y = Math.min(drawingState.startY, drawingState.currentY);
-    const width = Math.abs(drawingState.currentX - drawingState.startX);
-    const height = Math.abs(drawingState.currentY - drawingState.startY);
+    const cx = endX ?? drawingState.currentX;
+    const cy = endY ?? drawingState.currentY;
+    const x = Math.min(drawingState.startX, cx);
+    const y = Math.min(drawingState.startY, cy);
+    const width = Math.abs(cx - drawingState.startX);
+    const height = Math.abs(cy - drawingState.startY);
     setDrawingState(null);
 
-    if (width < 0.01 || height < 0.01) {
+    if (width < 0.005 || height < 0.005) {
       return;
     }
 
@@ -812,7 +810,7 @@ export default function TrainingMode() {
                               className={`flex w-full items-center gap-3 px-3 py-2 text-left text-sm transition-colors ${
                                 selectedUploadId === upload.id ? "bg-blue-50 ring-1 ring-inset ring-blue-400" : "bg-white hover:bg-slate-50"
                               }`}
-                              onClick={(e) => handleImageClick(upload, e)}
+                              onClick={() => handleImageClick(upload)}
                             >
                               <div className="relative h-12 w-12 shrink-0 overflow-hidden rounded-lg border border-slate-200 bg-slate-100">
                                 <Image src={upload.previewUrl} alt={upload.file.name} className="object-cover" fill unoptimized />
@@ -851,7 +849,7 @@ export default function TrainingMode() {
                   {trainingStatus.items.map((item) => (
                     <button
                       key={item.imageName}
-                      onClick={(e) => handleTrainingItemClick(item, e)}
+                      onClick={() => handleTrainingItemClick(item)}
                       className="group relative flex aspect-square flex-col overflow-hidden rounded-2xl border border-slate-200 bg-slate-50 text-left transition-all hover:border-blue-400 hover:shadow-md"
                     >
                       <div className="relative flex-1 bg-slate-100">
@@ -888,45 +886,63 @@ export default function TrainingMode() {
           </div>
         </section>
 
-        {annotatingItem && popupPosition ? (
+        {annotatingItem ? (
           <div
-            className="fixed z-50 max-h-[85vh] overflow-auto rounded-3xl border border-slate-200 bg-white p-5 shadow-2xl"
-            style={{
-              top: popupPosition.top,
-              left: popupPosition.left,
-              width: popupPosition.width,
-            }}
+            className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-900/50 p-4 sm:items-center"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="annotation-dialog-title"
           >
+            <div className="my-auto w-full max-w-6xl rounded-3xl border border-slate-200 bg-white p-5 shadow-2xl">
             <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
               <div>
-                <h2 className="text-lg font-semibold">人工标注工作台</h2>
+                <h2 id="annotation-dialog-title" className="text-lg font-semibold">
+                  图片框选标注
+                </h2>
                 <p className="mt-1 text-sm text-slate-500">
-                  请在右侧填写正确的值，并在左侧图片上框选对应区域，完成后点击“存入训练池”。
+                  适合 POD 屏摄：先选字段，再在图上拖出矩形框；可触摸屏操作。填好右侧数值后保存。
                 </p>
+                <ol className="mt-2 list-decimal space-y-0.5 pl-5 text-xs text-slate-600">
+                  <li>在下方列表选中要标注的字段</li>
+                  <li>在图片上按住拖动画框（框住该字段在屏幕上的区域）</li>
+                  <li>填写该字段的正确值，重复直到主要字段都有框，最后点「存入训练池」</li>
+                </ol>
               </div>
               <button
-                className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-medium hover:bg-slate-50"
+                type="button"
+                className="shrink-0 rounded-xl border border-slate-300 px-4 py-2 text-sm font-medium hover:bg-slate-50"
                 onClick={closeRecordPopup}
               >
-                关闭窗口
+                关闭（Esc）
               </button>
             </div>
 
-            <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
+            <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_min(100%,380px)]">
               <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
                 <div className="mb-3 text-sm font-medium text-slate-700">标注图片：{annotationImageName}</div>
                 <div
                   ref={annotationCanvasRef}
-                  className="relative aspect-[3/4] overflow-hidden rounded-xl bg-black/5"
+                  className="relative min-h-[min(55vh,520px)] overflow-hidden rounded-xl bg-black/5 [touch-action:none] cursor-crosshair select-none"
                   onMouseDown={beginDrawing}
                   onMouseMove={updateDrawing}
-                  onMouseUp={finishDrawing}
-                  onMouseLeave={finishDrawing}
+                  onMouseUp={() => finishDrawing()}
+                  onMouseLeave={() => finishDrawing()}
+                  onTouchStart={beginDrawingTouch}
+                  onTouchMove={updateDrawingTouch}
+                  onTouchEnd={finishDrawingTouch}
+                  onTouchCancel={() => setDrawingState(null)}
                 >
                   {annotationImageSrc ? (
                     // eslint-disable-next-line @next/next/no-img-element
-                    <img src={annotationImageSrc} alt={annotationImageName} className="h-full w-full object-contain" />
-                  ) : null}
+                    <img
+                      src={annotationImageSrc}
+                      alt={annotationImageName}
+                      draggable={false}
+                      className="pointer-events-none h-full w-full object-contain"
+                    />
+                  ) : (
+                    <div className="flex h-full min-h-[200px] items-center justify-center text-sm text-slate-400">加载图片中…</div>
+                  )}
                   {annotationBoxes.map((box) => (
                     <div
                       key={box.field}
@@ -959,7 +975,7 @@ export default function TrainingMode() {
 
               <div className="flex flex-col gap-4">
                 <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-                  <div className="mb-3 text-sm font-medium text-slate-700">1. 填写正确数值</div>
+                  <div className="mb-3 text-sm font-medium text-slate-700">填写正确数值</div>
                   <div className="space-y-3">
                     {annotationFields.map((field) => (
                       <div key={field.key}>
@@ -986,7 +1002,7 @@ export default function TrainingMode() {
                 </div>
 
                 <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-                  <div className="mb-3 text-sm font-medium text-slate-700">2. 框选图片区域</div>
+                  <div className="mb-3 text-sm font-medium text-slate-700">选择字段并画框</div>
                   <div className="space-y-2">
                     {annotationFields.map((field) => {
                       const hasBox = annotationBoxes.some((box) => box.field === field.key);
@@ -1003,7 +1019,11 @@ export default function TrainingMode() {
                             <span className={hasBox ? "text-slate-900" : "text-slate-500"}>{field.label}</span>
                           </label>
                           {hasBox ? (
-                            <button className="text-xs text-rose-500 hover:text-rose-700" onClick={() => removeAnnotationBox(field.key)}>
+                            <button
+                              type="button"
+                              className="text-xs text-rose-500 hover:text-rose-700"
+                              onClick={() => removeAnnotationBox(field.key)}
+                            >
                               清除框
                             </button>
                           ) : (
@@ -1013,11 +1033,13 @@ export default function TrainingMode() {
                       );
                     })}
                   </div>
-                  <p className="mt-3 text-xs text-slate-500">选中上方字段后，在左侧图片上拖动鼠标画框。</p>
+                  <p className="mt-3 text-xs text-slate-500">
+                    先选中字段，再在左侧图上拖动画框；画错可点「清除框」重画。小字区域可把浏览器放大（Ctrl + 滚轮）再框选。
+                  </p>
                 </div>
 
                 <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-                  <div className="mb-3 text-sm font-medium text-slate-700">3. 附加说明</div>
+                  <div className="mb-3 text-sm font-medium text-slate-700">附加说明</div>
                   <textarea
                     className="w-full resize-none rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-blue-500"
                     rows={2}
@@ -1028,6 +1050,7 @@ export default function TrainingMode() {
                 </div>
 
                 <button
+                  type="button"
                   className="mt-auto w-full rounded-xl bg-emerald-600 px-4 py-3 font-medium text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:bg-emerald-300"
                   onClick={() => void saveAnnotationToTrainingPool()}
                   disabled={isSavingTraining}
@@ -1035,6 +1058,7 @@ export default function TrainingMode() {
                   {isSavingTraining ? "保存中..." : "存入训练池"}
                 </button>
               </div>
+            </div>
             </div>
           </div>
         ) : null}
