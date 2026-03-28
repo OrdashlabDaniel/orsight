@@ -1,7 +1,15 @@
 import { NextResponse } from "next/server";
 
 import { getAuthUserOrSkip } from "@/lib/auth-server";
-import { saveTrainingImageDataUrl, type TrainingBox, type TrainingExample, upsertTrainingExample, loadTrainingExamples } from "@/lib/training";
+import {
+  saveTrainingImageDataUrl,
+  type FieldAggregation,
+  type TrainingBox,
+  type TrainingField,
+  type TrainingExample,
+  upsertTrainingExample,
+  loadTrainingExamples,
+} from "@/lib/training";
 
 type SaveTrainingPayload = {
   imageName?: unknown;
@@ -19,6 +27,7 @@ type SaveTrainingPayload = {
     stationTeam?: unknown;
   };
   boxes?: unknown;
+  fieldAggregations?: unknown;
 };
 
 function normalizeText(value: unknown) {
@@ -56,12 +65,13 @@ function normalizeBoxes(value: unknown): TrainingBox[] {
       const height = normalizeNumber(box.height);
       const field = normalizeText(box.field);
       const boxValue = normalizeText(box.value);
+      const idRaw = normalizeText(box.id);
 
       if (!field || x === null || y === null || width === null || height === null) {
         return null;
       }
 
-      return {
+      const out: TrainingBox = {
         field: field as TrainingBox["field"],
         value: boxValue,
         x,
@@ -69,8 +79,38 @@ function normalizeBoxes(value: unknown): TrainingBox[] {
         width,
         height,
       };
+      if (idRaw) {
+        out.id = idRaw.slice(0, 64);
+      }
+      return out;
     })
     .filter((box): box is TrainingBox => Boolean(box));
+}
+
+const AGGREGATION_VALUES = new Set<FieldAggregation>(["sum", "join_comma", "join_newline", "first"]);
+
+const TRAINING_FIELD_KEYS = new Set<string>([
+  "date",
+  "route",
+  "driver",
+  "total",
+  "unscanned",
+  "exceptions",
+  "waybillStatus",
+  "stationTeam",
+]);
+
+function normalizeFieldAggregations(raw: unknown): Partial<Record<TrainingField, FieldAggregation>> | undefined {
+  if (!raw || typeof raw !== "object") {
+    return undefined;
+  }
+  const out: Partial<Record<TrainingField, FieldAggregation>> = {};
+  for (const [key, val] of Object.entries(raw as Record<string, unknown>)) {
+    if (!TRAINING_FIELD_KEYS.has(key)) continue;
+    if (typeof val !== "string" || !AGGREGATION_VALUES.has(val as FieldAggregation)) continue;
+    out[key as TrainingField] = val as FieldAggregation;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 export async function POST(request: Request) {
@@ -104,6 +144,7 @@ export async function POST(request: Request) {
         stationTeam: normalizeText(output?.stationTeam) || undefined,
       },
       boxes: normalizeBoxes(payload.boxes),
+      fieldAggregations: normalizeFieldAggregations(payload.fieldAggregations),
     };
 
     if (imageDataUrl) {

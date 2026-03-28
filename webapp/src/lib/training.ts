@@ -16,7 +16,12 @@ export type TrainingField =
   | "waybillStatus"
   | "stationTeam";
 
+/** 同一字段多框时，如何合并写入表格 */
+export type FieldAggregation = "sum" | "join_comma" | "join_newline" | "first";
+
 export type TrainingBox = {
+  /** 唯一 id，支持同字段多框 */
+  id?: string;
   field: TrainingField;
   value: string;
   x: number;
@@ -40,6 +45,8 @@ export type TrainingExample = {
     stationTeam?: string;
   };
   boxes?: TrainingBox[];
+  /** 按字段指定多框合并方式；未指定的字段按默认策略推断 */
+  fieldAggregations?: Partial<Record<TrainingField, FieldAggregation>>;
 };
 
 export type GuidanceTurn = {
@@ -377,17 +384,57 @@ const TRAINING_FIELD_LABELS: Record<string, string> = {
   stationTeam: "站点车队",
 };
 
+const NUMERIC_TRAINING_FIELDS: TrainingField[] = ["total", "unscanned", "exceptions"];
+
+function inferFieldAggregation(field: TrainingField, boxCount: number): FieldAggregation {
+  if (boxCount <= 1) return "first";
+  return NUMERIC_TRAINING_FIELDS.includes(field) ? "sum" : "join_comma";
+}
+
+function describeAggregation(mode: FieldAggregation): string {
+  switch (mode) {
+    case "sum":
+      return "多个区域时，将读到的**数字相加**后再填入该字段";
+    case "join_comma":
+      return "多个区域时，将读到的文本**用英文逗号连接**后填入该字段";
+    case "join_newline":
+      return "多个区域时，将读到的文本**换行并列**写入（或按表格允许多行展示）";
+    case "first":
+      return "仅采用**第一个**框对应读数，其余同字段框可忽略";
+    default:
+      return "";
+  }
+}
+
 function formatBoxHintsForExample(example: TrainingExample): string {
   if (!example.boxes?.length) {
     return "";
   }
-  const lines = example.boxes.map((b) => {
-    const label = TRAINING_FIELD_LABELS[b.field] || b.field;
-    const x2 = b.x + b.width;
-    const y2 = b.y + b.height;
-    const valHint = b.value ? `图中可见值约「${b.value}」` : "值见下方示例输出";
-    return `  - ${label}：${valHint}；归一化矩形 x∈[${(b.x * 100).toFixed(1)}%, ${(x2 * 100).toFixed(1)}%]，y∈[${(b.y * 100).toFixed(1)}%, ${(y2 * 100).toFixed(1)}%]（原点左上，宽与高均为相对整图比例）`;
-  });
+  const byField = new Map<TrainingField, TrainingBox[]>();
+  for (const b of example.boxes) {
+    const list = byField.get(b.field) || [];
+    list.push(b);
+    byField.set(b.field, list);
+  }
+
+  const lines: string[] = [];
+  for (const [field, list] of byField) {
+    const label = TRAINING_FIELD_LABELS[field] || field;
+    const mode =
+      example.fieldAggregations?.[field] ?? inferFieldAggregation(field, list.length);
+    list.forEach((b, i) => {
+      const x2 = b.x + b.width;
+      const y2 = b.y + b.height;
+      const valHint = b.value ? `图中可见值约「${b.value}」` : "值见下方示例输出";
+      const idx = list.length > 1 ? ` 区域${i + 1}` : "";
+      lines.push(
+        `  - ${label}${idx}：${valHint}；归一化矩形 x∈[${(b.x * 100).toFixed(1)}%, ${(x2 * 100).toFixed(1)}%]，y∈[${(b.y * 100).toFixed(1)}%, ${(y2 * 100).toFixed(1)}%]（原点左上）`,
+      );
+    });
+    if (list.length > 1) {
+      lines.push(`  （${label} — 多框合并：${describeAggregation(mode)}）`);
+    }
+  }
   return `参考图「${example.imageName}」上各字段的大致区域：\n${lines.join("\n")}`;
 }
 

@@ -29,7 +29,11 @@ type UploadItem = {
 
 type AnnotationField = "date" | "route" | "driver" | "total" | "unscanned" | "exceptions" | "waybillStatus" | "stationTeam";
 
+/** 与 @/lib/training FieldAggregation 一致 */
+type FieldAggregation = "sum" | "join_comma" | "join_newline" | "first";
+
 type AnnotationBox = {
+  id: string;
   field: AnnotationField;
   value: string;
   x: number;
@@ -56,6 +60,7 @@ type TrainingStatusItem = {
       stationTeam?: string;
     };
     boxes?: AnnotationBox[];
+    fieldAggregations?: Partial<Record<AnnotationField, FieldAggregation>>;
   } | null;
 };
 
@@ -84,6 +89,17 @@ const annotationFields: Array<{ key: AnnotationField; label: string }> = [
   { key: "stationTeam", label: "站点车队" },
 ];
 
+function defaultAggregationForField(field: AnnotationField): FieldAggregation {
+  return field === "total" || field === "unscanned" || field === "exceptions" ? "sum" : "join_comma";
+}
+
+function effectiveFieldAggregation(
+  field: AnnotationField,
+  aggs: Partial<Record<AnnotationField, FieldAggregation>>,
+): FieldAggregation {
+  return aggs[field] ?? defaultAggregationForField(field);
+}
+
 export default function TrainingMode() {
   const [uploads, setUploads] = useState<UploadItem[]>([]);
   const [selectedUploadId, setSelectedUploadId] = useState<string | null>(null);
@@ -97,6 +113,7 @@ export default function TrainingMode() {
   const [annotationImageName, setAnnotationImageName] = useState("");
   const [annotationImageSrc, setAnnotationImageSrc] = useState("");
   const [annotationBoxes, setAnnotationBoxes] = useState<AnnotationBox[]>([]);
+  const [fieldAggregations, setFieldAggregations] = useState<Partial<Record<AnnotationField, FieldAggregation>>>({});
   const [annotationField, setAnnotationField] = useState<AnnotationField>("driver");
   const [annotationNotes, setAnnotationNotes] = useState("");
   
@@ -480,7 +497,14 @@ export default function TrainingMode() {
 
     setAnnotationImageName(imageName);
     setAnnotationImageSrc("");
-    setAnnotationBoxes(existingExample?.boxes || []);
+    const rawBoxes = existingExample?.boxes || [];
+    setAnnotationBoxes(
+      rawBoxes.map((b) => ({
+        ...b,
+        id: typeof (b as AnnotationBox).id === "string" && (b as AnnotationBox).id ? (b as AnnotationBox).id : crypto.randomUUID(),
+      })),
+    );
+    setFieldAggregations(existingExample?.fieldAggregations || {});
     setAnnotationField("driver");
     setAnnotationNotes(existingExample?.notes || "人工标注用于训练池。");
     
@@ -510,6 +534,7 @@ export default function TrainingMode() {
   const closeRecordPopup = useCallback(() => {
     setAnnotatingItem(null);
     setDrawingState(null);
+    setFieldAggregations({});
   }, []);
 
   useEffect(() => {
@@ -635,6 +660,7 @@ export default function TrainingMode() {
     }
 
     const nextBox: AnnotationBox = {
+      id: crypto.randomUUID(),
       field: annotationField,
       value: getAnnotationFieldValue(annotationField),
       x,
@@ -643,10 +669,14 @@ export default function TrainingMode() {
       height,
     };
 
-    setAnnotationBoxes((current) => [...current.filter((box) => box.field !== annotationField), nextBox]);
+    setAnnotationBoxes((current) => [...current, nextBox]);
   }
 
-  function removeAnnotationBox(field: AnnotationField) {
+  function removeAnnotationBoxById(boxId: string) {
+    setAnnotationBoxes((current) => current.filter((box) => box.id !== boxId));
+  }
+
+  function clearAnnotationFieldBoxes(field: AnnotationField) {
     setAnnotationBoxes((current) => current.filter((box) => box.field !== field));
   }
 
@@ -702,6 +732,7 @@ export default function TrainingMode() {
             stationTeam: manualRecord.stationTeam || "",
           },
           boxes: annotationBoxes,
+          fieldAggregations,
         }),
       });
 
@@ -1123,9 +1154,9 @@ export default function TrainingMode() {
                   适合 POD 屏摄：先选字段，再在图上拖出矩形框；可触摸屏操作。填好右侧数值后保存。
                 </p>
                 <ol className="mt-2 list-decimal space-y-0.5 pl-5 text-xs text-slate-600">
-                  <li>在下方列表选中要标注的字段</li>
-                  <li>在图片上按住拖动画框（框住该字段在屏幕上的区域）</li>
-                  <li>填写该字段的正确值，重复直到主要字段都有框，最后点「存入训练池」</li>
+                  <li>选中字段后在图上画框；同一字段可画多个框（如两条「未领取」各画一框）</li>
+                  <li>多框时在列表里选择合并方式：数字相加、逗号/换行并列，或仅取第一处</li>
+                  <li>右侧填写该字段最终应写入表格的值（如 1+0=1），最后点「存入训练池」</li>
                 </ol>
               </div>
               <button
@@ -1163,22 +1194,28 @@ export default function TrainingMode() {
                   ) : (
                     <div className="flex h-full min-h-[200px] items-center justify-center text-sm text-slate-400">加载图片中…</div>
                   )}
-                  {annotationBoxes.map((box) => (
-                    <div
-                      key={box.field}
-                      className="pointer-events-none absolute border-2 border-rose-500 bg-rose-500/10"
-                      style={{
-                        left: `${box.x * 100}%`,
-                        top: `${box.y * 100}%`,
-                        width: `${box.width * 100}%`,
-                        height: `${box.height * 100}%`,
-                      }}
-                    >
-                      <span className="absolute left-0 top-0 -translate-y-full rounded bg-rose-500 px-1.5 py-0.5 text-[10px] text-white">
-                        {annotationFields.find((f) => f.key === box.field)?.label}
-                      </span>
-                    </div>
-                  ))}
+                  {annotationBoxes.map((box) => {
+                    const sameField = annotationBoxes.filter((b) => b.field === box.field);
+                    const idx = sameField.findIndex((b) => b.id === box.id) + 1;
+                    const baseLabel = annotationFields.find((f) => f.key === box.field)?.label || box.field;
+                    const tag = sameField.length > 1 ? `${baseLabel}#${idx}` : baseLabel;
+                    return (
+                      <div
+                        key={box.id}
+                        className="pointer-events-none absolute border-2 border-rose-500 bg-rose-500/10"
+                        style={{
+                          left: `${box.x * 100}%`,
+                          top: `${box.y * 100}%`,
+                          width: `${box.width * 100}%`,
+                          height: `${box.height * 100}%`,
+                        }}
+                      >
+                        <span className="absolute left-0 top-0 max-w-[min(100%,120px)] -translate-y-full truncate rounded bg-rose-500 px-1.5 py-0.5 text-[10px] text-white">
+                          {tag}
+                        </span>
+                      </div>
+                    );
+                  })}
                   {drawingState ? (
                     <div
                       className="pointer-events-none absolute border-2 border-blue-500 bg-blue-500/20"
@@ -1223,38 +1260,81 @@ export default function TrainingMode() {
 
                 <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
                   <div className="mb-3 text-sm font-medium text-slate-700">选择字段并画框</div>
-                  <div className="space-y-2">
+                  <div className="space-y-3">
                     {annotationFields.map((field) => {
-                      const hasBox = annotationBoxes.some((box) => box.field === field.key);
+                      const boxesFor = annotationBoxes.filter((box) => box.field === field.key);
+                      const count = boxesFor.length;
+                      const hasBox = count > 0;
                       return (
-                        <div key={field.key} className="flex items-center justify-between text-sm">
-                          <label className="flex items-center gap-2">
-                            <input
-                              type="radio"
-                              name="annotationField"
-                              checked={annotationField === field.key}
-                              onChange={() => setAnnotationField(field.key)}
-                              className="text-blue-600"
-                            />
-                            <span className={hasBox ? "text-slate-900" : "text-slate-500"}>{field.label}</span>
-                          </label>
-                          {hasBox ? (
-                            <button
-                              type="button"
-                              className="text-xs text-rose-500 hover:text-rose-700"
-                              onClick={() => removeAnnotationBox(field.key)}
-                            >
-                              清除框
-                            </button>
-                          ) : (
-                            <span className="text-xs text-slate-400">未框选</span>
-                          )}
+                        <div key={field.key} className="rounded-lg border border-slate-100 bg-white/60 px-2 py-2">
+                          <div className="flex flex-wrap items-center gap-2 text-sm">
+                            <label className="flex min-w-0 flex-1 cursor-pointer items-center gap-2">
+                              <input
+                                type="radio"
+                                name="annotationField"
+                                checked={annotationField === field.key}
+                                onChange={() => setAnnotationField(field.key)}
+                                className="text-blue-600"
+                              />
+                              <span className={hasBox ? "font-medium text-slate-900" : "text-slate-500"}>{field.label}</span>
+                              {count > 0 ? (
+                                <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-600">{count} 框</span>
+                              ) : null}
+                            </label>
+                            {count >= 2 ? (
+                              <select
+                                className="max-w-[140px] rounded border border-slate-300 bg-white px-1 py-1 text-[11px] outline-none focus:border-blue-500"
+                                value={effectiveFieldAggregation(field.key, fieldAggregations)}
+                                onChange={(e) =>
+                                  setFieldAggregations((prev) => ({
+                                    ...prev,
+                                    [field.key]: e.target.value as FieldAggregation,
+                                  }))
+                                }
+                              >
+                                <option value="sum">多框：数字相加</option>
+                                <option value="join_comma">多框：逗号并列</option>
+                                <option value="join_newline">多框：换行并列</option>
+                                <option value="first">多框：仅第一处</option>
+                              </select>
+                            ) : null}
+                            {hasBox ? (
+                              <button
+                                type="button"
+                                className="text-xs text-rose-500 hover:text-rose-700"
+                                onClick={() => clearAnnotationFieldBoxes(field.key)}
+                              >
+                                清除全部
+                              </button>
+                            ) : (
+                              <span className="text-xs text-slate-400">未框选</span>
+                            )}
+                          </div>
+                          {count > 1 ? (
+                            <ul className="mt-2 space-y-1 border-t border-slate-100 pt-2 text-[11px] text-slate-600">
+                              {boxesFor.map((b, i) => (
+                                <li key={b.id} className="flex items-center justify-between gap-2">
+                                  <span>
+                                    框 {i + 1}
+                                    {b.value ? `（参考值 ${b.value}）` : ""}
+                                  </span>
+                                  <button
+                                    type="button"
+                                    className="shrink-0 text-rose-500 hover:text-rose-700"
+                                    onClick={() => removeAnnotationBoxById(b.id)}
+                                  >
+                                    删除
+                                  </button>
+                                </li>
+                              ))}
+                            </ul>
+                          ) : null}
                         </div>
                       );
                     })}
                   </div>
                   <p className="mt-3 text-xs text-slate-500">
-                    先选中字段，再在左侧图上拖动画框；画错可点「清除框」重画。小字区域可把浏览器放大（Ctrl + 滚轮）再框选。
+                    同一字段可连续画多个框；未收数量等数字字段默认「相加」。单框时无需选择合并方式。
                   </p>
                 </div>
 
