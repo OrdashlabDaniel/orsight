@@ -1,7 +1,11 @@
 import { NextResponse } from "next/server";
 
 import { getAuthUserOrSkip } from "@/lib/auth-server";
-import { loadGlobalRules } from "@/lib/training";
+import {
+  buildAgentThreadPromptSection,
+  loadGlobalRules,
+  mergeLegacyIntoAgentThreadIfEmpty,
+} from "@/lib/training";
 
 const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || "https://api.openai.com/v1";
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
@@ -42,7 +46,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "没有有效的对话内容。" }, { status: 400 });
     }
 
-    const rules = await loadGlobalRules();
+    const rules = mergeLegacyIntoAgentThreadIfEmpty(await loadGlobalRules());
     const existingInstructions = (rules.instructions || "").trim();
     const docSnippets =
       rules.documents?.length > 0
@@ -51,21 +55,19 @@ export async function POST(request: Request) {
             .join("\n\n")
         : "（尚未上传参考文档）";
 
-    const system = `你是 OrSight 的「POD / 物流截图结构化提取」配置顾问。用户会用自然语言说明业务场景、常见误判、屏幕样式等。
+    const savedContext =
+      rules.agentThread && rules.agentThread.length > 0
+        ? buildAgentThreadPromptSection(rules.agentThread).slice(0, 14000)
+        : `【旧版规则文本】\n${existingInstructions.slice(0, 6000)}\n\n【旧版文档摘录】\n${docSnippets.slice(0, 8000)}`;
+
+    const system = `你是 OrSight 的「填表 Agent」对话助理。用户像使用 Cursor 一样用自然语言、参考图（会以存储名标注）、文档摘录教你如何把 POD/表格截图填得更准。
 
 你必须返回一个 JSON 对象（不要 Markdown），且仅包含两个字符串字段：
 - assistantReply：用简短、专业的中文直接回复用户（可含 1～3 句），表示你理解其意图；不要在此重复长规则列表。
-- suggestedRules：整理成可追加到「视觉模型系统提示」的**增量**条目；每行一条，以 "- " 开头；只写可执行的提取/判读指令；不要臆造用户未提及的业务事实；若本轮无需新增规则则填 ""（空字符串）。
+- suggestedRules：整理成可写入「视觉模型提示词」的**增量**条目；每行一条，以 "- " 开头；只写可执行的提取/判读指令；不要臆造用户未提及的业务事实；若本轮无需新增规则则填 ""（空字符串）。
 
-【当前全局提取规则】（勿逐字重复，只输出增量补充）
-"""
-${existingInstructions.slice(0, 6000)}
-"""
-
-【参考文档摘录】
-"""
-${docSnippets.slice(0, 8000)}
-"""`;
+【当前已保存的填表上下文】（勿逐字重复，只输出增量 suggestedRules）
+${savedContext}`;
 
     const openaiMessages: ChatMessage[] = [
       { role: "system", content: system },

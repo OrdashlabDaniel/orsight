@@ -1,7 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
 
+import type { AgentAsset, AgentThreadTurn } from "./agent-context-types";
 import { getSupabaseAdmin, isSupabaseConfigured } from "./supabase";
+
+export type { AgentAsset, AgentThreadTurn } from "./agent-context-types";
 
 export type TrainingField =
   | "date"
@@ -53,6 +56,8 @@ export type GlobalRules = {
   }>;
   /** 训练页「与 AI 对话」历史，随全局规则一并持久化 */
   guidanceHistory?: GuidanceTurn[];
+  /** 填表 Agent：单一对话流（文字 + 附图 + 文档摘录），优先用于构建识别提示词 */
+  agentThread?: AgentThreadTurn[];
 };
 
 const GLOBAL_RULES_KEY = "__global_rules__";
@@ -80,6 +85,7 @@ export async function loadGlobalRules(): Promise<GlobalRules> {
       instructions: row.instructions ?? "",
       documents: Array.isArray(row.documents) ? row.documents : [],
       guidanceHistory: Array.isArray(row.guidanceHistory) ? row.guidanceHistory : undefined,
+      agentThread: Array.isArray(row.agentThread) ? row.agentThread : undefined,
     };
   } catch (error) {
     console.error("Exception loading global rules:", error);
@@ -427,27 +433,194 @@ export async function buildVisualReferencePack(
   return { hintText, referenceImages };
 }
 
+const MAX_DOC_EXCERPT_IN_PROMPT = 6000;
+
+/** 仅当存储里还没有 agentThread 字段时，把旧版 instructions / documents / guidanceHistory 合成时间线（避免每次 GET 重复迁入） */
+export function mergeLegacyIntoAgentThreadIfEmpty(rules: GlobalRules): GlobalRules {
+  if (rules.agentThread !== undefined) {
+    return rules;
+  }
+
+  const thread: AgentThreadTurn[] = [];
+  const baseTs = "1970-01-01T00:00:00.000Z";
+
+  if (rules.instructions?.trim()) {
+    thread.push({
+      id: `legacy-instructions`,
+      role: "user",
+      content: `【自旧版「自定义规则」迁入】\n${rules.instructions.trim()}`,
+      ts: baseTs,
+    });
+  }
+
+  for (const doc of rules.documents || []) {
+    if (!doc?.name || !doc.content?.trim()) continue;
+    thread.push({
+      id: `legacy-doc-${doc.name}`,
+      role: "user",
+      content: `【自旧版文档迁入】${doc.name}`,
+      ts: baseTs,
+      assets: [
+        {
+          kind: "document",
+          name: doc.name,
+          excerpt: doc.content.slice(0, 12000),
+        },
+      ],
+    });
+  }
+
+  for (const g of rules.guidanceHistory || []) {
+    if (!g.content?.trim()) continue;
+    thread.push({
+      id: `legacy-chat-${g.ts}`,
+      role: g.role,
+      content: g.content.trim(),
+      ts: g.ts,
+    });
+  }
+
+  return { ...rules, agentThread: thread };
+}
+
+export function buildAgentThreadPromptSection(thread: AgentThreadTurn[] | undefined | null): string {
+  if (!thread || thread.length === 0) {
+    return "";
+  }
+
+  const blocks: string[] = [];
+  for (const turn of thread) {
+    const who = turn.role === "user" ? "用户" : "助手";
+    let block = `${who}：${turn.content}`;
+    if (turn.role === "assistant" && turn.suggestedRules?.trim()) {
+      block += `\n（整理出的可执行补充规则）\n${turn.suggestedRules.trim()}`;
+    }
+    if (turn.assets?.length) {
+      for (const a of turn.assets) {
+        if (a.kind === "image") {
+          block += `\n  [附图 ${a.name}，存储名 ${a.imageName}，填表视觉阶段会附带该图作布局参考]`;
+        } else {
+          const ex = a.excerpt.length > MAX_DOC_EXCERPT_IN_PROMPT
+            ? `${a.excerpt.slice(0, MAX_DOC_EXCERPT_IN_PROMPT)}…`
+            : a.excerpt;
+          block += `\n  [文档 ${a.name} 摘录]\n${ex}`;
+        }
+      }
+    }
+    blocks.push(block);
+  }
+
+  return `\n\n【填表 Agent 对话与参考材料（用户通过自然语言、图片与文档教你的业务约定）】\n${blocks.join("\n\n---\n\n")}\n`;
+}
+
+export function normalizeAgentThread(raw: unknown): AgentThreadTurn[] {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  const out: AgentThreadTurn[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const t = item as Record<string, unknown>;
+    if (t.role !== "user" && t.role !== "assistant") continue;
+    if (typeof t.content !== "string" || typeof t.ts !== "string") continue;
+    const id = typeof t.id === "string" && t.id ? t.id : `t-${t.ts}-${out.length}`;
+    const assets = normalizeAgentAssets(t.assets);
+    const suggestedRules =
+      typeof t.suggestedRules === "string" ? t.suggestedRules.slice(0, 8000) : undefined;
+    out.push({
+      id,
+      role: t.role,
+      content: t.content.slice(0, 24000),
+      ts: t.ts,
+      ...(assets.length ? { assets } : {}),
+      ...(suggestedRules ? { suggestedRules } : {}),
+    });
+  }
+  return out;
+}
+
+function normalizeAgentAssets(raw: unknown): AgentAsset[] {
+  if (!Array.isArray(raw)) return [];
+  const out: AgentAsset[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const a = item as Record<string, unknown>;
+    if (a.kind === "image" && typeof a.name === "string" && typeof a.imageName === "string") {
+      out.push({ kind: "image", name: a.name.slice(0, 256), imageName: a.imageName.slice(0, 512) });
+    } else if (a.kind === "document" && typeof a.name === "string" && typeof a.excerpt === "string") {
+      out.push({
+        kind: "document",
+        name: a.name.slice(0, 256),
+        excerpt: a.excerpt.slice(0, 12000),
+      });
+    }
+  }
+  return out;
+}
+
+/** 从对话线程收集用户上传的参考图，供 Vision 请求附带（不计入训练池标注样本） */
+export async function buildAgentThreadReferenceImages(
+  thread: AgentThreadTurn[] | undefined | null,
+  limit?: number,
+): Promise<Array<{ imageName: string; caption: string; dataUrl: string }>> {
+  const max =
+    limit ??
+    Math.max(0, Math.min(3, Number.parseInt(process.env.AGENT_CONTEXT_REF_IMAGES || "2", 10) || 2));
+  if (!thread || max === 0) return [];
+
+  const seen = new Set<string>();
+  const order: string[] = [];
+  for (const turn of thread) {
+    if (turn.role !== "user" || !turn.assets?.length) continue;
+    for (const a of turn.assets) {
+      if (a.kind !== "image") continue;
+      if (seen.has(a.imageName)) continue;
+      seen.add(a.imageName);
+      order.push(a.imageName);
+      if (order.length >= max) break;
+    }
+    if (order.length >= max) break;
+  }
+
+  const refs: Array<{ imageName: string; caption: string; dataUrl: string }> = [];
+  for (const imageName of order) {
+    const dataUrl = await getTrainingImageDataUrl(imageName);
+    if (!dataUrl) continue;
+    refs.push({
+      imageName,
+      caption: `【用户在填表 Agent 对话中提供的参考图：${imageName}】仅作布局/样式参考，禁止把图中文字抄入最终结果；结果必须来自下方「当前待识别图片」。`,
+      dataUrl,
+    });
+  }
+  return refs;
+}
+
 export function buildTrainingPromptSection(examples: TrainingExample[], globalRules?: GlobalRules | null, limit = 8): string {
   let section = "";
 
   if (globalRules) {
-    if (globalRules.instructions) {
-      section += `\n\n【全局提取规则与用户指示】\n${globalRules.instructions}\n`;
-    }
-    if (globalRules.documents && globalRules.documents.length > 0) {
-      section += `\n\n【参考文档与知识库】\n`;
-      globalRules.documents.forEach((doc, idx) => {
-        section += `--- 文档 ${idx + 1}: ${doc.name} ---\n${doc.content}\n`;
-      });
-    }
-    if (globalRules.guidanceHistory && globalRules.guidanceHistory.length > 0) {
-      const recent = globalRules.guidanceHistory.slice(-8);
-      const lines = recent.map((t) => {
-        const who = t.role === "user" ? "用户" : "助手";
-        const text = t.content.length > 500 ? `${t.content.slice(0, 500)}…` : t.content;
-        return `${who}：${text}`;
-      });
-      section += `\n\n【与操作员的近期对话（帮助理解业务偏好；执行时须与上文规则及示例一致，冲突以规则与可见像素为准）】\n${lines.join("\n")}\n`;
+    const thread = globalRules.agentThread;
+    if (thread && thread.length > 0) {
+      section += buildAgentThreadPromptSection(thread);
+    } else {
+      if (globalRules.instructions) {
+        section += `\n\n【全局提取规则与用户指示】\n${globalRules.instructions}\n`;
+      }
+      if (globalRules.documents && globalRules.documents.length > 0) {
+        section += `\n\n【参考文档与知识库】\n`;
+        globalRules.documents.forEach((doc, idx) => {
+          section += `--- 文档 ${idx + 1}: ${doc.name} ---\n${doc.content}\n`;
+        });
+      }
+      if (globalRules.guidanceHistory && globalRules.guidanceHistory.length > 0) {
+        const recent = globalRules.guidanceHistory.slice(-8);
+        const lines = recent.map((t) => {
+          const who = t.role === "user" ? "用户" : "助手";
+          const text = t.content.length > 500 ? `${t.content.slice(0, 500)}…` : t.content;
+          return `${who}：${text}`;
+        });
+        section += `\n\n【与操作员的近期对话（帮助理解业务偏好；执行时须与上文规则及示例一致，冲突以规则与可见像素为准）】\n${lines.join("\n")}\n`;
+      }
     }
   }
 

@@ -12,6 +12,7 @@ import {
   visionPrompt,
 } from "@/lib/pod";
 import {
+  buildAgentThreadReferenceImages,
   buildTrainingPromptSection,
   buildVisualReferencePack,
   loadTrainingExamples,
@@ -90,9 +91,16 @@ async function callVisionModel(file: File, model: string): Promise<{ records: Ra
     userContent.push({ type: "text", text: ref.caption });
     userContent.push({ type: "image_url", image_url: { url: ref.dataUrl } });
   }
+
+  const agentRefs = await buildAgentThreadReferenceImages(globalRules.agentThread);
+  for (const ref of agentRefs) {
+    userContent.push({ type: "text", text: ref.caption });
+    userContent.push({ type: "image_url", image_url: { url: ref.dataUrl } });
+  }
+
   userContent.push({
     type: "text",
-    text: "\n【当前待识别图片】仅根据下面这一张图输出 JSON 中的 records；上文训练参考图与坐标说明只用于理解布局规律，不得把参考图中的文字抄进结果。\n",
+    text: "\n【当前待识别图片】仅根据下面这一张图输出 JSON 中的 records；上文训练参考图、Agent 参考图与坐标说明只用于理解布局规律，不得把参考图中的文字抄进结果。\n",
   });
   userContent.push({ type: "image_url", image_url: { url: dataUrl } });
 

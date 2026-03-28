@@ -4,7 +4,25 @@ import Image from "next/image";
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import type { AgentAsset, AgentThreadTurn } from "@/lib/agent-context-types";
 import { type PodRecord } from "@/lib/pod";
+
+function formatTurnForChatApi(turn: AgentThreadTurn): string {
+  let s = turn.content;
+  if (turn.assets?.length) {
+    for (const a of turn.assets) {
+      if (a.kind === "image") {
+        s += `\n[附图：${a.name}，存储名 ${a.imageName}]`;
+      } else {
+        s += `\n[文档：${a.name} 摘录]\n${a.excerpt.slice(0, 4000)}`;
+      }
+    }
+  }
+  if (turn.role === "assistant" && turn.suggestedRules?.trim()) {
+    s += `\n（模型整理规则）\n${turn.suggestedRules.trim()}`;
+  }
+  return s;
+}
 
 type UploadItem = {
   id: string;
@@ -95,12 +113,13 @@ export default function TrainingMode() {
     instructions: string;
     documents: Array<{ name: string; content: string }>;
     guidanceHistory?: Array<{ role: "user" | "assistant"; content: string; ts: string }>;
-  }>({ instructions: "", documents: [] });
-  const [guidanceInput, setGuidanceInput] = useState("");
-  const [guidanceLoading, setGuidanceLoading] = useState(false);
-  const [lastSuggestedRules, setLastSuggestedRules] = useState("");
+    agentThread?: AgentThreadTurn[];
+  }>({ instructions: "", documents: [], agentThread: [] });
+  const [agentInput, setAgentInput] = useState("");
+  const [pendingAgentFiles, setPendingAgentFiles] = useState<Array<{ id: string; file: File }>>([]);
+  const [agentDragActive, setAgentDragActive] = useState(false);
+  const [agentChatLoading, setAgentChatLoading] = useState(false);
   const [isSavingRules, setIsSavingRules] = useState(false);
-  const [isUploadingDoc, setIsUploadingDoc] = useState(false);
 
   useEffect(() => {
     void loadGlobalRules();
@@ -127,77 +146,94 @@ export default function TrainingMode() {
         body: JSON.stringify(globalRules),
       });
       if (!res.ok) throw new Error("保存失败");
-      setNoticeMessage("全局规则与文档已保存，将在下次 AI 填表时生效。");
+      setNoticeMessage("填表 Agent 上下文已保存，将在下次 AI 填表时生效。");
     } catch (e) {
-      setErrorMessage("保存全局规则失败。");
+      setErrorMessage("保存 Agent 上下文失败。");
     } finally {
       setIsSavingRules(false);
     }
   }
 
-  async function handleDocumentUpload(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    setIsUploadingDoc(true);
-    setErrorMessage("");
-    try {
-      const name = file.name.toLowerCase();
-      let text: string;
-
-      if (/\.(txt|csv|md)$/i.test(file.name)) {
-        text = await file.text();
-      } else if (/\.(pdf|doc|docx)$/i.test(file.name)) {
-        const fd = new FormData();
-        fd.append("file", file);
-        const res = await fetch("/api/training/parse-document", { method: "POST", body: fd });
-        const payload = (await res.json()) as { text?: string; warning?: string; error?: string };
-        if (!res.ok) {
-          throw new Error(payload.error || "服务端解析失败。");
-        }
-        text = (payload.text || "").trim();
-        if (!text) {
-          throw new Error(payload.warning || "未能从该文件中提取到文本。");
-        }
-      } else {
-        throw new Error("不支持的扩展名，请使用 PDF、Word、TXT、CSV 或 Markdown。");
-      }
-
-      if (!text.trim()) {
-        throw new Error("文档内容为空。");
-      }
-
-      setGlobalRules((prev) => ({
-        ...prev,
-        documents: [...prev.documents, { name: file.name, content: text }],
-      }));
-      setNoticeMessage(`成功解析文档：${file.name}`);
-    } catch (err) {
-      setErrorMessage(err instanceof Error ? err.message : "文档解析失败，请检查格式与大小（最大约 12MB）。");
-    } finally {
-      setIsUploadingDoc(false);
-      e.target.value = "";
-    }
-  }
-
-  function removeDocument(index: number) {
-    setGlobalRules(prev => {
-      const nextDocs = [...prev.documents];
-      nextDocs.splice(index, 1);
-      return { ...prev, documents: nextDocs };
+  function addPendingAgentFiles(files: File[]) {
+    const allowed = files.filter((f) => {
+      const n = f.name.toLowerCase();
+      return f.type.startsWith("image/") || /\.(txt|csv|md|pdf|doc|docx)$/i.test(n);
     });
+    if (allowed.length < files.length) {
+      setErrorMessage("部分文件已忽略：仅支持图片与 PDF / Word / TXT / CSV / Markdown。");
+    }
+    if (allowed.length === 0) return;
+    setPendingAgentFiles((p) => [...p, ...allowed.map((file) => ({ id: crypto.randomUUID(), file }))]);
   }
 
-  async function sendGuidanceChat() {
-    const text = guidanceInput.trim();
-    if (!text || guidanceLoading) return;
-    setGuidanceLoading(true);
+  async function processFileToAgentAsset(file: File): Promise<AgentAsset | null> {
+    const maxBytes = 12 * 1024 * 1024;
+    if (file.size > maxBytes) {
+      throw new Error(`「${file.name}」超过 12MB。`);
+    }
+    if (file.type.startsWith("image/")) {
+      const fd = new FormData();
+      fd.append("file", file);
+      const res = await fetch("/api/training/context-asset", { method: "POST", body: fd });
+      const payload = (await res.json()) as { error?: string; imageName?: string; originalName?: string };
+      if (!res.ok) {
+        throw new Error(payload.error || "图片上传失败");
+      }
+      if (!payload.imageName) {
+        throw new Error("图片上传未返回文件名");
+      }
+      return {
+        kind: "image",
+        name: file.name || payload.originalName || "image",
+        imageName: payload.imageName,
+      };
+    }
+    if (/\.(txt|csv|md)$/i.test(file.name)) {
+      const excerpt = (await file.text()).slice(0, 12000);
+      if (!excerpt.trim()) return null;
+      return { kind: "document", name: file.name, excerpt };
+    }
+    if (/\.(pdf|doc|docx)$/i.test(file.name)) {
+      const fd = new FormData();
+      fd.append("file", file);
+      const res = await fetch("/api/training/parse-document", { method: "POST", body: fd });
+      const payload = (await res.json()) as { text?: string; error?: string; warning?: string };
+      if (!res.ok) {
+        throw new Error(payload.error || "文档解析失败");
+      }
+      const excerpt = (payload.text || "").trim().slice(0, 12000);
+      if (!excerpt) {
+        throw new Error(payload.warning || "文档中未提取到文字");
+      }
+      return { kind: "document", name: file.name, excerpt };
+    }
+    return null;
+  }
+
+  async function sendAgentMessage() {
+    const text = agentInput.trim();
+    if ((!text && pendingAgentFiles.length === 0) || agentChatLoading) return;
+    setAgentChatLoading(true);
     setErrorMessage("");
     try {
-      const userTurn = { role: "user" as const, content: text, ts: new Date().toISOString() };
-      const prevHistory = globalRules.guidanceHistory || [];
-      const nextHistory = [...prevHistory, userTurn];
-      const forApi = nextHistory.slice(-20).map(({ role, content }) => ({ role, content }));
+      const assets: AgentAsset[] = [];
+      for (const { file } of pendingAgentFiles) {
+        const a = await processFileToAgentAsset(file);
+        if (a) assets.push(a);
+      }
+      setPendingAgentFiles([]);
+
+      const userTurn: AgentThreadTurn = {
+        id: crypto.randomUUID(),
+        role: "user",
+        content: text || "（仅附件）",
+        ts: new Date().toISOString(),
+        ...(assets.length > 0 ? { assets } : {}),
+      };
+
+      const thread = [...(globalRules.agentThread || []), userTurn];
+      const forApi = thread.map((t) => ({ role: t.role, content: formatTurnForChatApi(t) }));
+
       const res = await fetch("/api/training/guidance-chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -205,43 +241,42 @@ export default function TrainingMode() {
       });
       const data = (await res.json()) as { error?: string; assistantReply?: string; suggestedRules?: string };
       if (!res.ok) {
-        throw new Error(data.error || "对话失败");
+        throw new Error(data.error || "发送失败");
       }
-      const assistantTurn = {
-        role: "assistant" as const,
+
+      const assistantTurn: AgentThreadTurn = {
+        id: crypto.randomUUID(),
+        role: "assistant",
         content: data.assistantReply || "",
         ts: new Date().toISOString(),
+        ...(data.suggestedRules?.trim() ? { suggestedRules: data.suggestedRules.trim() } : {}),
       };
-      setGlobalRules((prevR) => ({
-        ...prevR,
-        guidanceHistory: [...(prevR.guidanceHistory || []), userTurn, assistantTurn],
+
+      setGlobalRules((prev) => ({
+        ...prev,
+        agentThread: [...(prev.agentThread || []), userTurn, assistantTurn],
       }));
-      setGuidanceInput("");
-      if (data.suggestedRules?.trim()) {
-        setLastSuggestedRules(data.suggestedRules.trim());
-      }
-      setNoticeMessage("已收到 AI 回复。若有「建议规则」，可合并到上方自定义规则后点击保存。");
+      setAgentInput("");
+      setNoticeMessage("已回复。点击「保存 Agent 上下文」后，填表识别会使用本对话与附件。");
     } catch (err) {
-      setErrorMessage(err instanceof Error ? err.message : "对话失败");
+      setErrorMessage(err instanceof Error ? err.message : "发送失败");
     } finally {
-      setGuidanceLoading(false);
+      setAgentChatLoading(false);
     }
   }
 
-  function mergeSuggestedRulesIntoInstructions() {
-    if (!lastSuggestedRules.trim()) return;
-    setGlobalRules((prev) => ({
-      ...prev,
-      instructions: `${(prev.instructions || "").trim()}\n\n【对话整理 — 提取补充】\n${lastSuggestedRules.trim()}`.trim(),
-    }));
-    setLastSuggestedRules("");
-    setNoticeMessage("已写入「自定义提取规则」文本框，请点击「保存全局规则」后在填表识别中生效。");
+  function clearAgentThread() {
+    setGlobalRules((p) => ({ ...p, agentThread: [] }));
+    setPendingAgentFiles([]);
+    setNoticeMessage("已清空对话；保存后将同步到云端。");
   }
 
-  function clearGuidanceHistory() {
-    setGlobalRules((p) => ({ ...p, guidanceHistory: [] }));
-    setLastSuggestedRules("");
-    setNoticeMessage("已清空本地对话记录；保存全局规则后将同步到云端。");
+  function handleAgentComposerPaste(event: React.ClipboardEvent<HTMLTextAreaElement>) {
+    const files = Array.from(event.clipboardData?.files || []).filter((f) => f.type.startsWith("image/"));
+    if (files.length > 0) {
+      event.preventDefault();
+      addPendingAgentFiles(files);
+    }
   }
 
   const annotationCanvasRef = useRef<HTMLDivElement | null>(null);
@@ -689,124 +724,139 @@ export default function TrainingMode() {
           <div className="flex flex-col gap-4">
             <div className="flex min-h-0 flex-col rounded-3xl border border-slate-200 bg-white shadow-sm">
               <div className="border-b border-slate-200 px-5 py-4">
-                <h2 className="text-lg font-semibold">全局规则与知识库</h2>
+                <h2 className="text-lg font-semibold">填表 Agent</h2>
                 <p className="mt-1 text-sm text-slate-500">
-                  上传 PDF、Word（.doc/.docx）、TXT/CSV 等参考文档，或输入自定义提取规则；AI 填表时会一并参考（扫描版 PDF 可能无法提取文字）。
+                  像 Cursor 一样：在下面输入文字，或把图片 / PDF / Word / 文本拖进来（也可在输入框内粘贴截图）。发消息后 AI
+                  会回复；保存后，整段对话与附件会参与填表识别。
                 </p>
               </div>
-              <div className="flex flex-col gap-4 p-5">
-                <div>
-                  <label className="mb-2 block text-sm font-medium text-slate-700">自定义提取规则</label>
-                  <textarea
-                    className="w-full resize-none rounded-xl border border-slate-300 px-3 py-2 text-sm outline-none focus:border-blue-500"
-                    rows={4}
-                    placeholder="例如：如果路线包含 'M'，则认为是早班..."
-                    value={globalRules.instructions}
-                    onChange={(e) => setGlobalRules({ ...globalRules, instructions: e.target.value })}
-                  />
-                </div>
-
-                <div className="rounded-xl border border-slate-200 bg-slate-50/80 p-4">
-                  <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-                    <label className="text-sm font-medium text-slate-800">与 AI 对话（教它怎么认得更准）</label>
-                    <button
-                      type="button"
-                      className="text-xs text-slate-500 hover:text-rose-600"
-                      onClick={clearGuidanceHistory}
-                    >
-                      清空对话记录
+              <div className="flex min-h-0 flex-1 flex-col gap-3 p-5">
+                <div className="flex min-h-[200px] max-h-72 flex-1 flex-col overflow-hidden rounded-xl border border-slate-200 bg-slate-50">
+                  <div className="flex items-center justify-between border-b border-slate-200 px-3 py-2">
+                    <span className="text-xs font-medium text-slate-600">对话</span>
+                    <button type="button" className="text-xs text-slate-500 hover:text-rose-600" onClick={clearAgentThread}>
+                      清空
                     </button>
                   </div>
-                  <p className="mb-3 text-xs text-slate-500">
-                    用自然语言描述误判案例、屏幕样式、字段别名等；模型会回复并整理成可写入规则的条目。上传的参考文档也会作为对话上下文。
-                    填表识别时：自定义规则、文档摘录、近期对话、训练池示例与框选位置会一并进入视觉模型提示词。
-                  </p>
-                  <div className="mb-3 max-h-40 overflow-y-auto rounded-lg border border-slate-200 bg-white p-2 text-xs text-slate-700">
-                    {(globalRules.guidanceHistory?.length ?? 0) === 0 ? (
-                      <span className="text-slate-400">尚无对话，在下方输入后发送。</span>
+                  <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3 text-sm">
+                    {(globalRules.agentThread?.length ?? 0) === 0 ? (
+                      <p className="text-xs text-slate-400">还没有消息。直接说明你的业务规则、常见错判，或丢入现场截图 / 说明文档。</p>
                     ) : (
-                      <ul className="space-y-2">
-                        {(globalRules.guidanceHistory || []).map((turn, i) => (
-                          <li key={`${turn.ts}-${i}`} className={turn.role === "user" ? "text-slate-800" : "text-slate-600"}>
-                            <span className="font-medium text-slate-500">{turn.role === "user" ? "你" : "AI"}：</span>
-                            {turn.content}
-                          </li>
-                        ))}
-                      </ul>
+                      (globalRules.agentThread || []).map((turn) => (
+                        <div
+                          key={turn.id}
+                          className={`rounded-lg px-3 py-2 ${
+                            turn.role === "user" ? "ml-2 bg-blue-50 text-slate-800" : "mr-2 bg-white text-slate-700 shadow-sm"
+                          }`}
+                        >
+                          <div className="mb-1 text-[10px] font-medium uppercase tracking-wide text-slate-400">
+                            {turn.role === "user" ? "你" : "Agent"}
+                          </div>
+                          {turn.assets?.map((a) => (
+                            <div
+                              key={`${turn.id}-${a.kind}-${a.name}`}
+                              className="mb-1 rounded border border-slate-200 bg-white/80 px-2 py-1 text-xs text-slate-600"
+                            >
+                              {a.kind === "image" ? `图片：${a.name}` : `文档：${a.name}（已提取文字）`}
+                            </div>
+                          ))}
+                          <p className="whitespace-pre-wrap break-words">{turn.content}</p>
+                          {turn.suggestedRules?.trim() ? (
+                            <pre className="mt-2 max-h-28 overflow-auto rounded border border-amber-100 bg-amber-50/80 p-2 text-xs text-amber-950 whitespace-pre-wrap">
+                              {turn.suggestedRules}
+                            </pre>
+                          ) : null}
+                        </div>
+                      ))
                     )}
                   </div>
-                  <div className="flex flex-col gap-2 sm:flex-row">
-                    <input
-                      type="text"
-                      className="min-w-0 flex-1 rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-blue-500"
-                      placeholder="例如：我们现场照片里「应领件数」在第二屏，要向下滚才看得到…"
-                      value={guidanceInput}
-                      onChange={(e) => setGuidanceInput(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter" && !e.shiftKey) {
-                          e.preventDefault();
-                          void sendGuidanceChat();
-                        }
-                      }}
-                      disabled={guidanceLoading}
-                    />
-                    <button
-                      type="button"
-                      className="rounded-lg bg-slate-800 px-4 py-2 text-sm font-medium text-white hover:bg-slate-700 disabled:bg-slate-400"
-                      onClick={() => void sendGuidanceChat()}
-                      disabled={guidanceLoading || !guidanceInput.trim()}
-                    >
-                      {guidanceLoading ? "思考中…" : "发送"}
-                    </button>
-                  </div>
-                  {lastSuggestedRules ? (
-                    <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3">
-                      <div className="mb-1 text-xs font-medium text-amber-900">本轮建议写入规则的条目</div>
-                      <pre className="mb-2 max-h-32 overflow-auto whitespace-pre-wrap break-words text-xs text-amber-950">
-                        {lastSuggestedRules}
-                      </pre>
-                      <button
-                        type="button"
-                        className="rounded-lg bg-amber-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-amber-600"
-                        onClick={mergeSuggestedRulesIntoInstructions}
-                      >
-                        合并到「自定义提取规则」
-                      </button>
-                    </div>
-                  ) : null}
                 </div>
 
-                <div>
-                  <label className="mb-2 block text-sm font-medium text-slate-700">
-                    参考文档（PDF / Word / TXT / CSV / MD）
-                  </label>
-                  <label className="inline-flex cursor-pointer items-center justify-center rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50">
-                    {isUploadingDoc ? "解析中..." : "上传文档"}
-                    <input
-                      type="file"
-                      accept=".txt,.csv,.md,.pdf,.doc,.docx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                      className="hidden"
-                      onChange={(e) => void handleDocumentUpload(e)}
-                      disabled={isUploadingDoc}
-                    />
-                  </label>
-                  {globalRules.documents.length > 0 && (
-                    <ul className="mt-3 space-y-2">
-                      {globalRules.documents.map((doc, idx) => (
-                        <li key={idx} className="flex items-center justify-between rounded-lg bg-slate-50 px-3 py-2 text-sm">
-                          <span className="truncate text-slate-700" title={doc.name}>{doc.name}</span>
-                          <button className="text-rose-500 hover:text-rose-700" onClick={() => removeDocument(idx)}>删除</button>
+                <div
+                  className={`rounded-xl border-2 border-dashed p-3 transition-colors ${
+                    agentDragActive ? "border-blue-400 bg-blue-50/50" : "border-slate-200 bg-white"
+                  }`}
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setAgentDragActive(true);
+                  }}
+                  onDragLeave={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setAgentDragActive(false);
+                  }}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setAgentDragActive(false);
+                    addPendingAgentFiles(Array.from(e.dataTransfer.files || []));
+                  }}
+                >
+                  {pendingAgentFiles.length > 0 ? (
+                    <ul className="mb-2 flex flex-wrap gap-2">
+                      {pendingAgentFiles.map(({ id, file }) => (
+                        <li
+                          key={id}
+                          className="flex items-center gap-1 rounded-full bg-slate-100 px-2 py-1 text-xs text-slate-700"
+                        >
+                          <span className="max-w-[140px] truncate">{file.name}</span>
+                          <button
+                            type="button"
+                            className="text-rose-500 hover:text-rose-700"
+                            onClick={() => setPendingAgentFiles((p) => p.filter((x) => x.id !== id))}
+                          >
+                            ×
+                          </button>
                         </li>
                       ))}
                     </ul>
+                  ) : (
+                    <p className="mb-2 text-center text-xs text-slate-400">拖文件到此处，或使用下方按钮选择</p>
                   )}
+                  <textarea
+                    className="mb-2 min-h-[88px] w-full resize-y rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-blue-500"
+                    placeholder="例如：我们 POD 屏上「应领件数」在第二屏中间，反光严重时优先看左上角小字…"
+                    value={agentInput}
+                    onChange={(e) => setAgentInput(e.target.value)}
+                    onPaste={handleAgentComposerPaste}
+                    disabled={agentChatLoading}
+                  />
+                  <div className="flex flex-wrap items-center gap-2">
+                    <label className="cursor-pointer rounded-lg border border-slate-300 bg-slate-50 px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-100">
+                      添加文件
+                      <input
+                        type="file"
+                        multiple
+                        className="hidden"
+                        accept="image/*,.txt,.csv,.md,.pdf,.doc,.docx"
+                        onChange={(e) => {
+                          const list = e.target.files;
+                          if (list?.length) addPendingAgentFiles(Array.from(list));
+                          e.target.value = "";
+                        }}
+                      />
+                    </label>
+                    <button
+                      type="button"
+                      className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:bg-slate-400"
+                      onClick={() => void sendAgentMessage()}
+                      disabled={
+                        agentChatLoading || (!agentInput.trim() && pendingAgentFiles.length === 0)
+                      }
+                    >
+                      {agentChatLoading ? "发送中…" : "发送"}
+                    </button>
+                  </div>
                 </div>
+
                 <button
+                  type="button"
                   className="rounded-xl bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-blue-300"
                   onClick={() => void saveGlobalRules()}
                   disabled={isSavingRules}
                 >
-                  {isSavingRules ? "保存中..." : "保存全局规则"}
+                  {isSavingRules ? "保存中…" : "保存 Agent 上下文"}
                 </button>
               </div>
             </div>

@@ -1,7 +1,14 @@
 import { NextResponse } from "next/server";
 
 import { getAuthUserOrSkip } from "@/lib/auth-server";
-import { loadGlobalRules, saveGlobalRules, type GlobalRules, type GuidanceTurn } from "@/lib/training";
+import {
+  loadGlobalRules,
+  mergeLegacyIntoAgentThreadIfEmpty,
+  normalizeAgentThread,
+  saveGlobalRules,
+  type GlobalRules,
+  type GuidanceTurn,
+} from "@/lib/training";
 
 export async function GET() {
   try {
@@ -10,7 +17,7 @@ export async function GET() {
       return NextResponse.json({ error: "请先登录。" }, { status: 401 });
     }
 
-    const rules = await loadGlobalRules();
+    const rules = mergeLegacyIntoAgentThreadIfEmpty(await loadGlobalRules());
     return NextResponse.json(rules);
   } catch (error) {
     return NextResponse.json(
@@ -55,6 +62,10 @@ export async function POST(request: Request) {
       ? normalizeGuidance(payload.guidanceHistory)
       : current.guidanceHistory;
 
+    const nextAgentThread = Object.prototype.hasOwnProperty.call(payload, "agentThread")
+      ? normalizeAgentThread(payload.agentThread)
+      : current.agentThread;
+
     const rulesToSave: GlobalRules = {
       instructions: typeof payload.instructions === "string" ? payload.instructions : current.instructions,
       documents: Array.isArray(payload.documents)
@@ -67,6 +78,10 @@ export async function POST(request: Request) {
 
     if (nextGuidance !== undefined) {
       rulesToSave.guidanceHistory = nextGuidance;
+    }
+
+    if (nextAgentThread !== undefined) {
+      rulesToSave.agentThread = nextAgentThread;
     }
 
     await saveGlobalRules(rulesToSave);
