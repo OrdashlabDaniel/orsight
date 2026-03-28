@@ -39,12 +39,20 @@ export type TrainingExample = {
   boxes?: TrainingBox[];
 };
 
+export type GuidanceTurn = {
+  role: "user" | "assistant";
+  content: string;
+  ts: string;
+};
+
 export type GlobalRules = {
   instructions: string;
   documents: Array<{
     name: string;
     content: string;
   }>;
+  /** 训练页「与 AI 对话」历史，随全局规则一并持久化 */
+  guidanceHistory?: GuidanceTurn[];
 };
 
 const GLOBAL_RULES_KEY = "__global_rules__";
@@ -67,7 +75,12 @@ export async function loadGlobalRules(): Promise<GlobalRules> {
       return { instructions: "", documents: [] };
     }
 
-    return data.data as GlobalRules;
+    const row = data.data as GlobalRules;
+    return {
+      instructions: row.instructions ?? "",
+      documents: Array.isArray(row.documents) ? row.documents : [],
+      guidanceHistory: Array.isArray(row.guidanceHistory) ? row.guidanceHistory : undefined,
+    };
   } catch (error) {
     console.error("Exception loading global rules:", error);
     return { instructions: "", documents: [] };
@@ -342,6 +355,78 @@ function saveLocalTrainingImageDataUrl(imageName: string, dataUrl: string) {
   fs.writeFileSync(path.join(dirPath, imageName), buffer);
 }
 
+const TRAINING_FIELD_LABELS: Record<string, string> = {
+  date: "日期",
+  route: "抽查路线",
+  driver: "抽查司机",
+  total: "运单数量",
+  unscanned: "未收数量",
+  exceptions: "错扫数量",
+  waybillStatus: "响应更新状态",
+  stationTeam: "站点车队",
+};
+
+function formatBoxHintsForExample(example: TrainingExample): string {
+  if (!example.boxes?.length) {
+    return "";
+  }
+  const lines = example.boxes.map((b) => {
+    const label = TRAINING_FIELD_LABELS[b.field] || b.field;
+    const x2 = b.x + b.width;
+    const y2 = b.y + b.height;
+    const valHint = b.value ? `图中可见值约「${b.value}」` : "值见下方示例输出";
+    return `  - ${label}：${valHint}；归一化矩形 x∈[${(b.x * 100).toFixed(1)}%, ${(x2 * 100).toFixed(1)}%]，y∈[${(b.y * 100).toFixed(1)}%, ${(y2 * 100).toFixed(1)}%]（原点左上，宽与高均为相对整图比例）`;
+  });
+  return `参考图「${example.imageName}」上各字段的大致区域：\n${lines.join("\n")}`;
+}
+
+/**
+ * 将训练样本中的框选 + 可选参考图拼进 Vision 请求，便于模型对齐布局规律。
+ * 参考图数量默认 1，可用环境变量 TRAINING_VISUAL_REF_IMAGES=0 关闭附图（仍保留文字区域说明）。
+ */
+export async function buildVisualReferencePack(
+  examples: TrainingExample[],
+  options?: { maxImages?: number; maxBoxHintExamples?: number },
+): Promise<{
+  hintText: string;
+  referenceImages: Array<{ imageName: string; caption: string; dataUrl: string }>;
+}> {
+  const maxImagesRaw = process.env.TRAINING_VISUAL_REF_IMAGES;
+  const maxImages =
+    maxImagesRaw === "0" || maxImagesRaw === "false"
+      ? 0
+      : Math.max(0, Number.parseInt(maxImagesRaw || "1", 10) || 1);
+  const maxBoxHintExamples = options?.maxBoxHintExamples ?? 5;
+  const effectiveMaxImages = options?.maxImages ?? maxImages;
+
+  const withBoxes = examples.filter((e) => e.boxes && e.boxes.length > 0);
+  const sorted = [...withBoxes].sort((a, b) => (b.boxes?.length || 0) - (a.boxes?.length || 0));
+
+  const hintParts: string[] = [];
+  for (const ex of sorted.slice(0, maxBoxHintExamples)) {
+    const block = formatBoxHintsForExample(ex);
+    if (block) hintParts.push(block);
+  }
+
+  let hintText = "";
+  if (hintParts.length > 0) {
+    hintText = `\n\n【训练池：人工框选给出的相对位置（用于推断同类截图中字段在画面中的大致区域，禁止机械套用坐标到布局差异过大的图片）】\n${hintParts.join("\n\n")}\n`;
+  }
+
+  const referenceImages: Array<{ imageName: string; caption: string; dataUrl: string }> = [];
+  if (effectiveMaxImages > 0) {
+    for (const ex of sorted) {
+      if (referenceImages.length >= effectiveMaxImages) break;
+      const dataUrl = await getTrainingImageDataUrl(ex.imageName);
+      if (!dataUrl) continue;
+      const caption = `【训练参考截图：${ex.imageName}】与上文「相对位置」描述对应；请归纳同类设备的布局规律，但最终识别结果必须只来自最后一张「当前待识别图片」。`;
+      referenceImages.push({ imageName: ex.imageName, caption, dataUrl });
+    }
+  }
+
+  return { hintText, referenceImages };
+}
+
 export function buildTrainingPromptSection(examples: TrainingExample[], globalRules?: GlobalRules | null, limit = 8): string {
   let section = "";
 
@@ -354,6 +439,15 @@ export function buildTrainingPromptSection(examples: TrainingExample[], globalRu
       globalRules.documents.forEach((doc, idx) => {
         section += `--- 文档 ${idx + 1}: ${doc.name} ---\n${doc.content}\n`;
       });
+    }
+    if (globalRules.guidanceHistory && globalRules.guidanceHistory.length > 0) {
+      const recent = globalRules.guidanceHistory.slice(-8);
+      const lines = recent.map((t) => {
+        const who = t.role === "user" ? "用户" : "助手";
+        const text = t.content.length > 500 ? `${t.content.slice(0, 500)}…` : t.content;
+        return `${who}：${text}`;
+      });
+      section += `\n\n【与操作员的近期对话（帮助理解业务偏好；执行时须与上文规则及示例一致，冲突以规则与可见像素为准）】\n${lines.join("\n")}\n`;
     }
   }
 

@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { getAuthUserOrSkip } from "@/lib/auth-server";
-import { loadGlobalRules, saveGlobalRules, type GlobalRules } from "@/lib/training";
+import { loadGlobalRules, saveGlobalRules, type GlobalRules, type GuidanceTurn } from "@/lib/training";
 
 export async function GET() {
   try {
@@ -27,18 +27,47 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "请先登录。" }, { status: 401 });
     }
 
-    const payload = (await request.json()) as GlobalRules;
-    
-    // Basic validation
+    const payload = (await request.json()) as GlobalRules & { guidanceHistory?: unknown };
+    const current = await loadGlobalRules();
+
+    function normalizeGuidance(raw: unknown): GuidanceTurn[] {
+      if (!Array.isArray(raw)) {
+        return [];
+      }
+      return raw
+        .filter((t): t is GuidanceTurn => {
+          if (!t || typeof t !== "object") return false;
+          const g = t as Record<string, unknown>;
+          return (
+            (g.role === "user" || g.role === "assistant") &&
+            typeof g.content === "string" &&
+            typeof g.ts === "string"
+          );
+        })
+        .map((t) => ({
+          role: t.role,
+          content: t.content.slice(0, 16000),
+          ts: t.ts,
+        }));
+    }
+
+    const nextGuidance = Object.prototype.hasOwnProperty.call(payload, "guidanceHistory")
+      ? normalizeGuidance(payload.guidanceHistory)
+      : current.guidanceHistory;
+
     const rulesToSave: GlobalRules = {
-      instructions: typeof payload.instructions === "string" ? payload.instructions : "",
-      documents: Array.isArray(payload.documents) 
-        ? payload.documents.map(doc => ({
+      instructions: typeof payload.instructions === "string" ? payload.instructions : current.instructions,
+      documents: Array.isArray(payload.documents)
+        ? payload.documents.map((doc) => ({
             name: typeof doc.name === "string" ? doc.name : "Unnamed Document",
-            content: typeof doc.content === "string" ? doc.content : ""
+            content: typeof doc.content === "string" ? doc.content : "",
           }))
-        : []
+        : current.documents,
     };
+
+    if (nextGuidance !== undefined) {
+      rulesToSave.guidanceHistory = nextGuidance;
+    }
 
     await saveGlobalRules(rulesToSave);
 

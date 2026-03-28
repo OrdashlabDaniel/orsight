@@ -91,7 +91,14 @@ export default function TrainingMode() {
   const [drawingState, setDrawingState] = useState<DrawingState | null>(null);
   const [isSavingTraining, setIsSavingTraining] = useState(false);
 
-  const [globalRules, setGlobalRules] = useState<{ instructions: string; documents: Array<{ name: string; content: string }> }>({ instructions: "", documents: [] });
+  const [globalRules, setGlobalRules] = useState<{
+    instructions: string;
+    documents: Array<{ name: string; content: string }>;
+    guidanceHistory?: Array<{ role: "user" | "assistant"; content: string; ts: string }>;
+  }>({ instructions: "", documents: [] });
+  const [guidanceInput, setGuidanceInput] = useState("");
+  const [guidanceLoading, setGuidanceLoading] = useState(false);
+  const [lastSuggestedRules, setLastSuggestedRules] = useState("");
   const [isSavingRules, setIsSavingRules] = useState(false);
   const [isUploadingDoc, setIsUploadingDoc] = useState(false);
 
@@ -179,6 +186,62 @@ export default function TrainingMode() {
       nextDocs.splice(index, 1);
       return { ...prev, documents: nextDocs };
     });
+  }
+
+  async function sendGuidanceChat() {
+    const text = guidanceInput.trim();
+    if (!text || guidanceLoading) return;
+    setGuidanceLoading(true);
+    setErrorMessage("");
+    try {
+      const userTurn = { role: "user" as const, content: text, ts: new Date().toISOString() };
+      const prevHistory = globalRules.guidanceHistory || [];
+      const nextHistory = [...prevHistory, userTurn];
+      const forApi = nextHistory.slice(-20).map(({ role, content }) => ({ role, content }));
+      const res = await fetch("/api/training/guidance-chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ messages: forApi }),
+      });
+      const data = (await res.json()) as { error?: string; assistantReply?: string; suggestedRules?: string };
+      if (!res.ok) {
+        throw new Error(data.error || "对话失败");
+      }
+      const assistantTurn = {
+        role: "assistant" as const,
+        content: data.assistantReply || "",
+        ts: new Date().toISOString(),
+      };
+      setGlobalRules((prevR) => ({
+        ...prevR,
+        guidanceHistory: [...(prevR.guidanceHistory || []), userTurn, assistantTurn],
+      }));
+      setGuidanceInput("");
+      if (data.suggestedRules?.trim()) {
+        setLastSuggestedRules(data.suggestedRules.trim());
+      }
+      setNoticeMessage("已收到 AI 回复。若有「建议规则」，可合并到上方自定义规则后点击保存。");
+    } catch (err) {
+      setErrorMessage(err instanceof Error ? err.message : "对话失败");
+    } finally {
+      setGuidanceLoading(false);
+    }
+  }
+
+  function mergeSuggestedRulesIntoInstructions() {
+    if (!lastSuggestedRules.trim()) return;
+    setGlobalRules((prev) => ({
+      ...prev,
+      instructions: `${(prev.instructions || "").trim()}\n\n【对话整理 — 提取补充】\n${lastSuggestedRules.trim()}`.trim(),
+    }));
+    setLastSuggestedRules("");
+    setNoticeMessage("已写入「自定义提取规则」文本框，请点击「保存全局规则」后在填表识别中生效。");
+  }
+
+  function clearGuidanceHistory() {
+    setGlobalRules((p) => ({ ...p, guidanceHistory: [] }));
+    setLastSuggestedRules("");
+    setNoticeMessage("已清空本地对话记录；保存全局规则后将同步到云端。");
   }
 
   const annotationCanvasRef = useRef<HTMLDivElement | null>(null);
@@ -642,6 +705,77 @@ export default function TrainingMode() {
                     onChange={(e) => setGlobalRules({ ...globalRules, instructions: e.target.value })}
                   />
                 </div>
+
+                <div className="rounded-xl border border-slate-200 bg-slate-50/80 p-4">
+                  <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                    <label className="text-sm font-medium text-slate-800">与 AI 对话（教它怎么认得更准）</label>
+                    <button
+                      type="button"
+                      className="text-xs text-slate-500 hover:text-rose-600"
+                      onClick={clearGuidanceHistory}
+                    >
+                      清空对话记录
+                    </button>
+                  </div>
+                  <p className="mb-3 text-xs text-slate-500">
+                    用自然语言描述误判案例、屏幕样式、字段别名等；模型会回复并整理成可写入规则的条目。上传的参考文档也会作为对话上下文。
+                    填表识别时：自定义规则、文档摘录、近期对话、训练池示例与框选位置会一并进入视觉模型提示词。
+                  </p>
+                  <div className="mb-3 max-h-40 overflow-y-auto rounded-lg border border-slate-200 bg-white p-2 text-xs text-slate-700">
+                    {(globalRules.guidanceHistory?.length ?? 0) === 0 ? (
+                      <span className="text-slate-400">尚无对话，在下方输入后发送。</span>
+                    ) : (
+                      <ul className="space-y-2">
+                        {(globalRules.guidanceHistory || []).map((turn, i) => (
+                          <li key={`${turn.ts}-${i}`} className={turn.role === "user" ? "text-slate-800" : "text-slate-600"}>
+                            <span className="font-medium text-slate-500">{turn.role === "user" ? "你" : "AI"}：</span>
+                            {turn.content}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                  <div className="flex flex-col gap-2 sm:flex-row">
+                    <input
+                      type="text"
+                      className="min-w-0 flex-1 rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-blue-500"
+                      placeholder="例如：我们现场照片里「应领件数」在第二屏，要向下滚才看得到…"
+                      value={guidanceInput}
+                      onChange={(e) => setGuidanceInput(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && !e.shiftKey) {
+                          e.preventDefault();
+                          void sendGuidanceChat();
+                        }
+                      }}
+                      disabled={guidanceLoading}
+                    />
+                    <button
+                      type="button"
+                      className="rounded-lg bg-slate-800 px-4 py-2 text-sm font-medium text-white hover:bg-slate-700 disabled:bg-slate-400"
+                      onClick={() => void sendGuidanceChat()}
+                      disabled={guidanceLoading || !guidanceInput.trim()}
+                    >
+                      {guidanceLoading ? "思考中…" : "发送"}
+                    </button>
+                  </div>
+                  {lastSuggestedRules ? (
+                    <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3">
+                      <div className="mb-1 text-xs font-medium text-amber-900">本轮建议写入规则的条目</div>
+                      <pre className="mb-2 max-h-32 overflow-auto whitespace-pre-wrap break-words text-xs text-amber-950">
+                        {lastSuggestedRules}
+                      </pre>
+                      <button
+                        type="button"
+                        className="rounded-lg bg-amber-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-amber-600"
+                        onClick={mergeSuggestedRulesIntoInstructions}
+                      >
+                        合并到「自定义提取规则」
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
+
                 <div>
                   <label className="mb-2 block text-sm font-medium text-slate-700">
                     参考文档（PDF / Word / TXT / CSV / MD）

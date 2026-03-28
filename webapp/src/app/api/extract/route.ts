@@ -11,7 +11,12 @@ import {
   validateRecord,
   visionPrompt,
 } from "@/lib/pod";
-import { buildTrainingPromptSection, loadTrainingExamples, loadGlobalRules } from "@/lib/training";
+import {
+  buildTrainingPromptSection,
+  buildVisualReferencePack,
+  loadTrainingExamples,
+  loadGlobalRules,
+} from "@/lib/training";
 
 const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || "https://api.openai.com/v1";
 const OPENAI_PRIMARY_MODEL = process.env.OPENAI_PRIMARY_MODEL || process.env.OPENAI_MODEL || "gpt-5-mini";
@@ -74,8 +79,22 @@ async function callVisionModel(file: File, model: string): Promise<{ records: Ra
 
   const examples = await loadTrainingExamples();
   const globalRules = await loadGlobalRules();
+  const visualPack = await buildVisualReferencePack(examples);
   const bytes = Buffer.from(await file.arrayBuffer());
   const dataUrl = `data:${file.type || "image/jpeg"};base64,${bytes.toString("base64")}`;
+
+  const baseText = `${visionPrompt}${buildTrainingPromptSection(examples, globalRules)}${visualPack.hintText}`;
+
+  const userContent: OpenAIMessageContent[] = [{ type: "text", text: baseText }];
+  for (const ref of visualPack.referenceImages) {
+    userContent.push({ type: "text", text: ref.caption });
+    userContent.push({ type: "image_url", image_url: { url: ref.dataUrl } });
+  }
+  userContent.push({
+    type: "text",
+    text: "\n【当前待识别图片】仅根据下面这一张图输出 JSON 中的 records；上文训练参考图与坐标说明只用于理解布局规律，不得把参考图中的文字抄进结果。\n",
+  });
+  userContent.push({ type: "image_url", image_url: { url: dataUrl } });
 
   const body = {
     model,
@@ -84,10 +103,7 @@ async function callVisionModel(file: File, model: string): Promise<{ records: Ra
     messages: [
       {
         role: "user",
-        content: [
-          { type: "text", text: `${visionPrompt}${buildTrainingPromptSection(examples, globalRules)}` },
-          { type: "image_url", image_url: { url: dataUrl } },
-        ] as OpenAIMessageContent[],
+        content: userContent,
       },
     ],
   };
