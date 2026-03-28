@@ -25,11 +25,17 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "未配置 OPENAI_API_KEY。" }, { status: 503 });
     }
 
-    const body = (await request.json()) as { messages?: unknown };
+    const body = (await request.json()) as {
+      messages?: unknown;
+      currentWorkingRules?: unknown;
+    };
     const raw = body.messages;
     if (!Array.isArray(raw) || raw.length === 0) {
       return NextResponse.json({ error: "缺少 messages。" }, { status: 400 });
     }
+
+    const currentWorkingRules =
+      typeof body.currentWorkingRules === "string" ? body.currentWorkingRules.trim().slice(0, 20000) : "";
 
     const messages: ChatMessage[] = [];
     for (const item of raw) {
@@ -47,27 +53,38 @@ export async function POST(request: Request) {
     }
 
     const rules = mergeLegacyIntoAgentThreadIfEmpty(await loadGlobalRules());
-    const existingInstructions = (rules.instructions || "").trim();
     const docSnippets =
       rules.documents?.length > 0
         ? rules.documents
-            .map((d) => `《${d.name}》前 600 字：\n${(d.content || "").slice(0, 600)}`)
+            .map((d) => `《${d.name}》前 500 字：\n${(d.content || "").slice(0, 500)}`)
             .join("\n\n")
-        : "（尚未上传参考文档）";
+        : "（无）";
 
-    const savedContext =
+    const serverWorking = (rules.workingRules || "").trim().slice(0, 12000);
+    const fallbackContext =
       rules.agentThread && rules.agentThread.length > 0
-        ? buildAgentThreadPromptSection(rules.agentThread).slice(0, 14000)
-        : `【旧版规则文本】\n${existingInstructions.slice(0, 6000)}\n\n【旧版文档摘录】\n${docSnippets.slice(0, 8000)}`;
+        ? buildAgentThreadPromptSection(rules.agentThread).slice(0, 8000)
+        : `【旧版自定义规则】\n${(rules.instructions || "").slice(0, 4000)}\n\n【旧版文档摘录】\n${docSnippets.slice(0, 4000)}`;
 
-    const system = `你是 OrSight 的「填表 Agent」对话助理。用户像使用 Cursor 一样用自然语言、参考图（会以存储名标注）、文档摘录教你如何把 POD/表格截图填得更准。
+    const system = `你是 OrSight「填表 Agent」的规则工程师。用户通过多轮对话和附件说明业务，你要维护一份**完整的填表工作规则**正文：这份正文会直接注入视觉识别模型，决定如何从截图里填表——不是保存聊天记录，而是**内化、升级**可执行规则。
 
-你必须返回一个 JSON 对象（不要 Markdown），且仅包含两个字符串字段：
-- assistantReply：用简短、专业的中文直接回复用户（可含 1～3 句），表示你理解其意图；不要在此重复长规则列表。
-- suggestedRules：整理成可写入「视觉模型提示词」的**增量**条目；每行一条，以 "- " 开头；只写可执行的提取/判读指令；不要臆造用户未提及的业务事实；若本轮无需新增规则则填 ""（空字符串）。
+你必须返回 JSON（不要 Markdown），仅包含两个字符串字段：
+- assistantReply：1～4 句中文，简要说明你如何理解用户本轮诉求、规则上会做哪些调整。
+- revisedWorkingRules：**完整**的填表工作规则正文（中文）。要求：
+  - 用分条或分段写清：各字段含义、在 POD 屏摄 / 网页表上的典型位置或标签、易错点（如应领/实领/反光）、与用户附图或文档相关的约定等。
+  - 以【客户端传入的当前工作规则】为基底合并：纳入用户本轮新要求，删除与之矛盾或过时的旧条；不要臆造用户未提及的业务事实。
+  - 若用户只是问候或没有实质新需求，revisedWorkingRules 可与当前稿基本一致，仅可微调措辞。
+  - 若当前稿为空，则根据对话与附件从零写一版可用的初稿。
 
-【当前已保存的填表上下文】（勿逐字重复，只输出增量 suggestedRules）
-${savedContext}`;
+【客户端传入的当前工作规则】（用户界面上正在编辑的版本，优先作为修订基底）
+"""
+${currentWorkingRules || "（空）"}
+"""
+
+【服务端存档参考】（可能与客户端略有出入，供补充上下文）
+${serverWorking ? `工作规则存档摘录：\n${serverWorking.slice(0, 6000)}` : "（无工作规则存档）"}
+
+${fallbackContext ? `其它存档上下文：\n${fallbackContext}` : ""}`;
 
     const openaiMessages: ChatMessage[] = [
       { role: "system", content: system },
@@ -104,9 +121,13 @@ ${savedContext}`;
       return NextResponse.json({ error: "模型未返回内容。" }, { status: 502 });
     }
 
-    let parsed: { assistantReply?: string; suggestedRules?: string };
+    let parsed: { assistantReply?: string; revisedWorkingRules?: string; suggestedRules?: string };
     try {
-      parsed = JSON.parse(content) as { assistantReply?: string; suggestedRules?: string };
+      parsed = JSON.parse(content) as {
+        assistantReply?: string;
+        revisedWorkingRules?: string;
+        suggestedRules?: string;
+      };
     } catch {
       return NextResponse.json({ error: "模型返回不是合法 JSON。" }, { status: 502 });
     }
@@ -114,11 +135,20 @@ ${savedContext}`;
     const assistantReply =
       typeof parsed.assistantReply === "string" && parsed.assistantReply.trim()
         ? parsed.assistantReply.trim()
-        : "已收到，我会在你保存规则后参与后续识别提示。";
-    const suggestedRules =
-      typeof parsed.suggestedRules === "string" ? parsed.suggestedRules.trim() : "";
+        : "已根据你的说明更新填表工作规则。";
 
-    return NextResponse.json({ assistantReply, suggestedRules });
+    let revisedWorkingRules =
+      typeof parsed.revisedWorkingRules === "string" ? parsed.revisedWorkingRules.trim() : "";
+    if (!revisedWorkingRules && typeof parsed.suggestedRules === "string" && parsed.suggestedRules.trim()) {
+      revisedWorkingRules = `${currentWorkingRules}\n\n【本轮补充】\n${parsed.suggestedRules.trim()}`.trim();
+    }
+    if (!revisedWorkingRules) {
+      revisedWorkingRules = currentWorkingRules;
+    }
+
+    revisedWorkingRules = revisedWorkingRules.slice(0, 50000);
+
+    return NextResponse.json({ assistantReply, revisedWorkingRules });
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Guidance chat failed." },

@@ -18,9 +18,6 @@ function formatTurnForChatApi(turn: AgentThreadTurn): string {
       }
     }
   }
-  if (turn.role === "assistant" && turn.suggestedRules?.trim()) {
-    s += `\n（模型整理规则）\n${turn.suggestedRules.trim()}`;
-  }
   return s;
 }
 
@@ -114,7 +111,8 @@ export default function TrainingMode() {
     documents: Array<{ name: string; content: string }>;
     guidanceHistory?: Array<{ role: "user" | "assistant"; content: string; ts: string }>;
     agentThread?: AgentThreadTurn[];
-  }>({ instructions: "", documents: [], agentThread: [] });
+    workingRules?: string;
+  }>({ instructions: "", documents: [], agentThread: [], workingRules: "" });
   const [agentInput, setAgentInput] = useState("");
   const [pendingAgentFiles, setPendingAgentFiles] = useState<Array<{ id: string; file: File }>>([]);
   const [agentDragActive, setAgentDragActive] = useState(false);
@@ -146,9 +144,9 @@ export default function TrainingMode() {
         body: JSON.stringify(globalRules),
       });
       if (!res.ok) throw new Error("保存失败");
-      setNoticeMessage("填表 Agent 上下文已保存，将在下次 AI 填表时生效。");
+      setNoticeMessage("填表工作规则已保存，将在下次识别时生效。");
     } catch (e) {
-      setErrorMessage("保存 Agent 上下文失败。");
+      setErrorMessage("保存工作规则失败。");
     } finally {
       setIsSavingRules(false);
     }
@@ -237,11 +235,27 @@ export default function TrainingMode() {
       const res = await fetch("/api/training/guidance-chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: forApi }),
+        body: JSON.stringify({
+          messages: forApi,
+          currentWorkingRules: globalRules.workingRules ?? "",
+        }),
       });
-      const data = (await res.json()) as { error?: string; assistantReply?: string; suggestedRules?: string };
+      const data = (await res.json()) as {
+        error?: string;
+        assistantReply?: string;
+        revisedWorkingRules?: string;
+        suggestedRules?: string;
+      };
       if (!res.ok) {
         throw new Error(data.error || "发送失败");
+      }
+
+      let nextWorking = (data.revisedWorkingRules ?? "").trim();
+      if (!nextWorking && typeof data.suggestedRules === "string" && data.suggestedRules.trim()) {
+        nextWorking = `${globalRules.workingRules || ""}\n\n【本轮补充】\n${data.suggestedRules.trim()}`.trim();
+      }
+      if (!nextWorking) {
+        nextWorking = (globalRules.workingRules || "").trim();
       }
 
       const assistantTurn: AgentThreadTurn = {
@@ -249,15 +263,30 @@ export default function TrainingMode() {
         role: "assistant",
         content: data.assistantReply || "",
         ts: new Date().toISOString(),
-        ...(data.suggestedRules?.trim() ? { suggestedRules: data.suggestedRules.trim() } : {}),
       };
 
-      setGlobalRules((prev) => ({
-        ...prev,
-        agentThread: [...(prev.agentThread || []), userTurn, assistantTurn],
-      }));
+      const updated = {
+        ...globalRules,
+        workingRules: nextWorking,
+        agentThread: [...(globalRules.agentThread || []), userTurn, assistantTurn],
+      };
+      setGlobalRules(updated);
       setAgentInput("");
-      setNoticeMessage("已回复。点击「保存 Agent 上下文」后，填表识别会使用本对话与附件。");
+
+      setIsSavingRules(true);
+      try {
+        const saveRes = await fetch("/api/training/rules", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(updated),
+        });
+        if (!saveRes.ok) throw new Error("自动保存失败");
+        setNoticeMessage("工作规则已按本轮对话升级并写入填表流程；效果不好可继续在这里说明，Agent 会再优化。");
+      } catch {
+        setErrorMessage("规则已更新到界面，但自动保存失败，请点击「保存工作规则」。");
+      } finally {
+        setIsSavingRules(false);
+      }
     } catch (err) {
       setErrorMessage(err instanceof Error ? err.message : "发送失败");
     } finally {
@@ -268,7 +297,7 @@ export default function TrainingMode() {
   function clearAgentThread() {
     setGlobalRules((p) => ({ ...p, agentThread: [] }));
     setPendingAgentFiles([]);
-    setNoticeMessage("已清空对话；保存后将同步到云端。");
+    setNoticeMessage("已清空对话记录（工作规则未清空）。若也要重置规则，请手动删除上方规则正文后保存。");
   }
 
   function handleAgentComposerPaste(event: React.ClipboardEvent<HTMLTextAreaElement>) {
@@ -726,11 +755,23 @@ export default function TrainingMode() {
               <div className="border-b border-slate-200 px-5 py-4">
                 <h2 className="text-lg font-semibold">填表 Agent</h2>
                 <p className="mt-1 text-sm text-slate-500">
-                  像 Cursor 一样：在下面输入文字，或把图片 / PDF / Word / 文本拖进来（也可在输入框内粘贴截图）。发消息后 AI
-                  会回复；保存后，整段对话与附件会参与填表识别。
+                  像 Cursor 一样对话：说明你的业务、错判案例或丢入截图/文档。Agent 会<strong>生成并升级「填表工作规则」</strong>并
+                  <strong>自动写入识别流程</strong>——不是存聊天记录。效果不好就再来聊，规则会持续迭代。
                 </p>
               </div>
               <div className="flex min-h-0 flex-1 flex-col gap-3 p-5">
+                <div>
+                  <label className="mb-1 block text-xs font-medium text-slate-700">当前填表工作规则（已内化到填表识别）</label>
+                  <textarea
+                    className="min-h-[120px] w-full resize-y rounded-xl border border-slate-300 px-3 py-2 text-xs leading-relaxed outline-none focus:border-blue-500"
+                    placeholder="对话后 Agent 会在这里写入完整规则；你也可以直接手改。"
+                    value={globalRules.workingRules ?? ""}
+                    onChange={(e) => setGlobalRules({ ...globalRules, workingRules: e.target.value })}
+                    disabled={agentChatLoading}
+                  />
+                  <p className="mt-1 text-[11px] text-slate-400">识别时优先使用本段正文；附件仍会作为参考图进入视觉模型。</p>
+                </div>
+
                 <div className="flex min-h-[200px] max-h-72 flex-1 flex-col overflow-hidden rounded-xl border border-slate-200 bg-slate-50">
                   <div className="flex items-center justify-between border-b border-slate-200 px-3 py-2">
                     <span className="text-xs font-medium text-slate-600">对话</span>
@@ -761,11 +802,6 @@ export default function TrainingMode() {
                             </div>
                           ))}
                           <p className="whitespace-pre-wrap break-words">{turn.content}</p>
-                          {turn.suggestedRules?.trim() ? (
-                            <pre className="mt-2 max-h-28 overflow-auto rounded border border-amber-100 bg-amber-50/80 p-2 text-xs text-amber-950 whitespace-pre-wrap">
-                              {turn.suggestedRules}
-                            </pre>
-                          ) : null}
                         </div>
                       ))
                     )}
@@ -854,9 +890,9 @@ export default function TrainingMode() {
                   type="button"
                   className="rounded-xl bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-blue-300"
                   onClick={() => void saveGlobalRules()}
-                  disabled={isSavingRules}
+                  disabled={isSavingRules || agentChatLoading}
                 >
-                  {isSavingRules ? "保存中…" : "保存 Agent 上下文"}
+                  {isSavingRules ? "保存中…" : "保存工作规则"}
                 </button>
               </div>
             </div>

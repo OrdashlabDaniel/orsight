@@ -56,8 +56,12 @@ export type GlobalRules = {
   }>;
   /** 训练页「与 AI 对话」历史，随全局规则一并持久化 */
   guidanceHistory?: GuidanceTurn[];
-  /** 填表 Agent：单一对话流（文字 + 附图 + 文档摘录），优先用于构建识别提示词 */
+  /** 填表 Agent：单一对话流（文字 + 附图 + 文档摘录），用于继续优化规则 */
   agentThread?: AgentThreadTurn[];
+  /**
+   * 由 Agent 迭代生成的「填表工作规则」全文，直接注入 Vision 提示词（内化到工作流，非聊天记录）
+   */
+  workingRules?: string;
 };
 
 const GLOBAL_RULES_KEY = "__global_rules__";
@@ -86,6 +90,7 @@ export async function loadGlobalRules(): Promise<GlobalRules> {
       documents: Array.isArray(row.documents) ? row.documents : [],
       guidanceHistory: Array.isArray(row.guidanceHistory) ? row.guidanceHistory : undefined,
       agentThread: Array.isArray(row.agentThread) ? row.agentThread : undefined,
+      workingRules: typeof row.workingRules === "string" ? row.workingRules : undefined,
     };
   } catch (error) {
     console.error("Exception loading global rules:", error);
@@ -483,6 +488,15 @@ export function mergeLegacyIntoAgentThreadIfEmpty(rules: GlobalRules): GlobalRul
   return { ...rules, agentThread: thread };
 }
 
+/** 首次加载：若尚无 workingRules，用旧版自定义规则文本作为初始工作规则 */
+export function seedWorkingRulesFromLegacy(rules: GlobalRules): GlobalRules {
+  if (rules.workingRules !== undefined) {
+    return rules;
+  }
+  const w = rules.instructions?.trim() ? rules.instructions.trim() : "";
+  return { ...rules, workingRules: w };
+}
+
 export function buildAgentThreadPromptSection(thread: AgentThreadTurn[] | undefined | null): string {
   if (!thread || thread.length === 0) {
     return "";
@@ -599,27 +613,32 @@ export function buildTrainingPromptSection(examples: TrainingExample[], globalRu
   let section = "";
 
   if (globalRules) {
-    const thread = globalRules.agentThread;
-    if (thread && thread.length > 0) {
-      section += buildAgentThreadPromptSection(thread);
+    const wr = globalRules.workingRules?.trim();
+    if (wr) {
+      section += `\n\n【填表工作规则（已由 Agent 内化，填表时优先遵守；与像素冲突时以当前截图为准）】\n${wr}\n`;
     } else {
-      if (globalRules.instructions) {
-        section += `\n\n【全局提取规则与用户指示】\n${globalRules.instructions}\n`;
-      }
-      if (globalRules.documents && globalRules.documents.length > 0) {
-        section += `\n\n【参考文档与知识库】\n`;
-        globalRules.documents.forEach((doc, idx) => {
-          section += `--- 文档 ${idx + 1}: ${doc.name} ---\n${doc.content}\n`;
-        });
-      }
-      if (globalRules.guidanceHistory && globalRules.guidanceHistory.length > 0) {
-        const recent = globalRules.guidanceHistory.slice(-8);
-        const lines = recent.map((t) => {
-          const who = t.role === "user" ? "用户" : "助手";
-          const text = t.content.length > 500 ? `${t.content.slice(0, 500)}…` : t.content;
-          return `${who}：${text}`;
-        });
-        section += `\n\n【与操作员的近期对话（帮助理解业务偏好；执行时须与上文规则及示例一致，冲突以规则与可见像素为准）】\n${lines.join("\n")}\n`;
+      const thread = globalRules.agentThread;
+      if (thread && thread.length > 0) {
+        section += buildAgentThreadPromptSection(thread);
+      } else {
+        if (globalRules.instructions) {
+          section += `\n\n【全局提取规则与用户指示】\n${globalRules.instructions}\n`;
+        }
+        if (globalRules.documents && globalRules.documents.length > 0) {
+          section += `\n\n【参考文档与知识库】\n`;
+          globalRules.documents.forEach((doc, idx) => {
+            section += `--- 文档 ${idx + 1}: ${doc.name} ---\n${doc.content}\n`;
+          });
+        }
+        if (globalRules.guidanceHistory && globalRules.guidanceHistory.length > 0) {
+          const recent = globalRules.guidanceHistory.slice(-8);
+          const lines = recent.map((t) => {
+            const who = t.role === "user" ? "用户" : "助手";
+            const text = t.content.length > 500 ? `${t.content.slice(0, 500)}…` : t.content;
+            return `${who}：${text}`;
+          });
+          section += `\n\n【与操作员的近期对话（帮助理解业务偏好；执行时须与上文规则及示例一致，冲突以规则与可见像素为准）】\n${lines.join("\n")}\n`;
+        }
       }
     }
   }

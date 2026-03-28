@@ -6,6 +6,7 @@ import {
   mergeLegacyIntoAgentThreadIfEmpty,
   normalizeAgentThread,
   saveGlobalRules,
+  seedWorkingRulesFromLegacy,
   type GlobalRules,
   type GuidanceTurn,
 } from "@/lib/training";
@@ -17,7 +18,7 @@ export async function GET() {
       return NextResponse.json({ error: "请先登录。" }, { status: 401 });
     }
 
-    const rules = mergeLegacyIntoAgentThreadIfEmpty(await loadGlobalRules());
+    const rules = seedWorkingRulesFromLegacy(mergeLegacyIntoAgentThreadIfEmpty(await loadGlobalRules()));
     return NextResponse.json(rules);
   } catch (error) {
     return NextResponse.json(
@@ -82,6 +83,13 @@ export async function POST(request: Request) {
 
     if (nextAgentThread !== undefined) {
       rulesToSave.agentThread = nextAgentThread;
+    }
+
+    if (Object.prototype.hasOwnProperty.call(payload, "workingRules")) {
+      rulesToSave.workingRules =
+        typeof payload.workingRules === "string" ? payload.workingRules.slice(0, 50000) : "";
+    } else if (current.workingRules !== undefined) {
+      rulesToSave.workingRules = current.workingRules;
     }
 
     await saveGlobalRules(rulesToSave);
