@@ -432,8 +432,14 @@ function formatBoxHintsForExample(example: TrainingExample): string {
       const y2 = b.y + b.height;
       const valHint = b.value ? `图中可见值约「${b.value}」` : "值见下方示例输出";
       const idx = list.length > 1 ? ` 区域${i + 1}` : "";
+      const coordNote =
+        b.coordSpace === "image"
+          ? "位图归一化"
+          : b.coordSpace === "container"
+            ? "旧版容器坐标（仅供参考）"
+            : "坐标（旧数据可能为容器比例）";
       lines.push(
-        `  - ${label}${idx}：${valHint}；归一化矩形 x∈[${(b.x * 100).toFixed(1)}%, ${(x2 * 100).toFixed(1)}%]，y∈[${(b.y * 100).toFixed(1)}%, ${(y2 * 100).toFixed(1)}%]（原点左上）`,
+        `  - ${label}${idx}：${valHint}；${coordNote} 矩形 x∈[${(b.x * 100).toFixed(1)}%, ${(x2 * 100).toFixed(1)}%]，y∈[${(b.y * 100).toFixed(1)}%, ${(y2 * 100).toFixed(1)}%]（原点左上）`,
       );
     });
     if (list.length > 1) {
@@ -441,6 +447,39 @@ function formatBoxHintsForExample(example: TrainingExample): string {
     }
   }
   return `参考图「${example.imageName}」上各字段的大致区域：\n${lines.join("\n")}`;
+}
+
+/** 优先把含框选多、信息完整的样本排在前面，便于作为识别指导注入提示词。 */
+export function sortTrainingExamplesForGuidance(examples: TrainingExample[]): TrainingExample[] {
+  return [...examples].sort((a, b) => {
+    const ba = a.boxes?.length ?? 0;
+    const bb = b.boxes?.length ?? 0;
+    if (bb !== ba) return bb - ba;
+    const na = a.notes?.trim() ? 1 : 0;
+    const nb = b.notes?.trim() ? 1 : 0;
+    if (nb !== na) return nb - na;
+    return (a.imageName || "").localeCompare(b.imageName || "", "en");
+  });
+}
+
+function resolveTrainingPromptExampleLimit(explicit?: number): number {
+  if (typeof explicit === "number" && Number.isFinite(explicit)) {
+    return Math.max(1, Math.min(48, Math.floor(explicit)));
+  }
+  const raw = process.env.TRAINING_PROMPT_EXAMPLES;
+  const n = raw ? Number.parseInt(raw, 10) : NaN;
+  if (Number.isFinite(n)) return Math.max(1, Math.min(48, n));
+  return 12;
+}
+
+function resolveTrainingBoxHintLimit(options?: { maxBoxHintExamples?: number }): number {
+  if (options?.maxBoxHintExamples != null) {
+    return Math.max(1, Math.min(24, options.maxBoxHintExamples));
+  }
+  const raw = process.env.TRAINING_BOX_HINT_EXAMPLES;
+  const n = raw ? Number.parseInt(raw, 10) : NaN;
+  if (Number.isFinite(n)) return Math.max(1, Math.min(24, n));
+  return 8;
 }
 
 /**
@@ -458,12 +497,12 @@ export async function buildVisualReferencePack(
   const maxImages =
     maxImagesRaw === "0" || maxImagesRaw === "false"
       ? 0
-      : Math.max(0, Number.parseInt(maxImagesRaw || "1", 10) || 1);
-  const maxBoxHintExamples = options?.maxBoxHintExamples ?? 5;
+      : Math.max(0, Number.parseInt(maxImagesRaw || "2", 10) || 2);
+  const maxBoxHintExamples = resolveTrainingBoxHintLimit(options);
   const effectiveMaxImages = options?.maxImages ?? maxImages;
 
   const withBoxes = examples.filter((e) => e.boxes && e.boxes.length > 0);
-  const sorted = [...withBoxes].sort((a, b) => (b.boxes?.length || 0) - (a.boxes?.length || 0));
+  const sorted = sortTrainingExamplesForGuidance(withBoxes);
 
   const hintParts: string[] = [];
   for (const ex of sorted.slice(0, maxBoxHintExamples)) {
@@ -473,7 +512,7 @@ export async function buildVisualReferencePack(
 
   let hintText = "";
   if (hintParts.length > 0) {
-    hintText = `\n\n【训练池：人工框选给出的相对位置（用于推断同类截图中字段在画面中的大致区域，禁止机械套用坐标到布局差异过大的图片）】\n${hintParts.join("\n\n")}\n`;
+    hintText = `\n\n【训练池 · 字段区域指导（操作员标注，与下文「训练参考截图」一致）】\n以下矩形表示在**同类界面**上各字段的语义位置与读数习惯。你必须按相同语义去当前待识别图中找对应区域取值；坐标百分比随设备/分辨率会偏移，禁止把数字机械映射到完全不同的版式上。若版式与参考差异过大，以当前图像素为准并设 reviewRequired。\n\n${hintParts.join("\n\n")}\n`;
   }
 
   const referenceImages: Array<{ imageName: string; caption: string; dataUrl: string }> = [];
@@ -482,7 +521,7 @@ export async function buildVisualReferencePack(
       if (referenceImages.length >= effectiveMaxImages) break;
       const dataUrl = await getTrainingImageDataUrl(ex.imageName);
       if (!dataUrl) continue;
-      const caption = `【训练参考截图：${ex.imageName}】与上文「相对位置」描述对应；请归纳同类设备的布局规律，但最终识别结果必须只来自最后一张「当前待识别图片」。`;
+      const caption = `【训练参考截图：${ex.imageName}】与上文训练池区域指导对应；用于归纳同类设备的字段布局与标签习惯。禁止抄写本图上的文字/数字到输出；最终每条字段只能来自最后一张「当前待识别图片」的可见像素。`;
       referenceImages.push({ imageName: ex.imageName, caption, dataUrl });
     }
   }
@@ -661,8 +700,17 @@ export async function buildAgentThreadReferenceImages(
   return refs;
 }
 
-export function buildTrainingPromptSection(examples: TrainingExample[], globalRules?: GlobalRules | null, limit = 8): string {
+export function buildTrainingPromptSection(
+  examples: TrainingExample[],
+  globalRules?: GlobalRules | null,
+  limitOrOptions?: number | { limit?: number },
+): string {
   let section = "";
+  const limitOpt =
+    typeof limitOrOptions === "number"
+      ? limitOrOptions
+      : limitOrOptions?.limit;
+  const exampleLimit = resolveTrainingPromptExampleLimit(limitOpt);
 
   if (globalRules) {
     const wr = globalRules.workingRules?.trim();
@@ -696,18 +744,24 @@ export function buildTrainingPromptSection(examples: TrainingExample[], globalRu
   }
 
   if (examples.length > 0) {
-    const chosen = examples.slice(0, limit);
+    const ordered = sortTrainingExamplesForGuidance(examples);
+    const chosen = ordered.slice(0, exampleLimit);
     const lines = chosen.map((example, index) => {
-      const prefix = `示例 ${index + 1}`;
+      const prefix = `指导样本 ${index + 1}`;
+      const boxTag =
+        example.boxes && example.boxes.length > 0
+          ? `含${example.boxes.length}处人工框选（区域说明见上文/附图）`
+          : "无框选（仅以下输出作形态参考）";
       const meta = [
         example.imageName ? `图片名=${example.imageName}` : "",
         example.notes ? `备注=${example.notes}` : "",
+        boxTag,
       ]
         .filter(Boolean)
         .join("；");
 
       return [
-        `${prefix}${meta ? `（${meta}）` : ""}`,
+        `${prefix}（${meta}）`,
         `date=${example.output.date}`,
         `route=${example.output.route}`,
         `driver=${example.output.driver}`,
@@ -722,7 +776,8 @@ export function buildTrainingPromptSection(examples: TrainingExample[], globalRu
         .join(" | ");
     });
 
-    section += `\n\n下面是历史正确样本，请优先遵循这些字段映射方式，不要编造未展示信息：\n${lines.join("\n")}`;
+    section += `\n\n【训练池 · 标准输出指导】\n下列条目均来自人工确认的训练池。你必须将其视为**字段含义与输出形态**的权威参考：书写格式、路线编码样式、totalSourceLabel 习惯、stationTeam 与 route 的分工等应与之一致；除非当前截图像素明确矛盾，否则不要改用与样本不一致的字段理解。禁止编造当前图中不可见的数值或标签。\n\n${lines.join("\n")}`;
+    section += `\n\n【字段约束提醒】抽查路线 (route) 在样本中多为「IAH + 两位数字 + 横线 + 编号…」（如 IAH01-030-C）。形如「IAH-BAA」仅三字母且中间无两位数字的，通常是站点车队/司机侧代码，**不得**作为 route；站点车队应写入 stationTeam。\n`;
   }
 
   return section;

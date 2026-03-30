@@ -6,6 +6,8 @@ import { getSupabaseAdmin } from "@/lib/supabase";
 import {
   type ExtractionIssue,
   type PodRecord,
+  isRouteFormatValid,
+  isStationTeamCodeNotCourierRoute,
   normalizeNumber,
   normalizeText,
   validateRecord,
@@ -17,6 +19,7 @@ import {
   buildVisualReferencePack,
   loadTrainingExamples,
   loadGlobalRules,
+  type TrainingExample,
 } from "@/lib/training";
 
 const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || "https://api.openai.com/v1";
@@ -71,6 +74,151 @@ const COUNTER_CROP_REGIONS: Record<"expected" | "actual" | "pickedUp", CropRegio
 function appendReviewReason(currentReason: string | null | undefined, nextReason: string): string {
   const parts = [currentReason, nextReason].filter(Boolean);
   return Array.from(new Set(parts)).join(" | ");
+}
+
+function medianOf(nums: number[]): number {
+  if (nums.length === 0) return 0;
+  const s = [...nums].sort((a, b) => a - b);
+  return s[Math.floor(s.length / 2)]!;
+}
+
+/** Median bitmap-normalized box for field `route` across training examples (for Sharp crop). */
+function medianRouteImageBox(examples: TrainingExample[]): CropRegion | null {
+  const boxes = examples.flatMap((ex) =>
+    (ex.boxes || []).filter((b) => b.field === "route" && b.coordSpace === "image"),
+  );
+  if (boxes.length === 0) return null;
+  return {
+    x: medianOf(boxes.map((b) => b.x)),
+    y: medianOf(boxes.map((b) => b.y)),
+    width: medianOf(boxes.map((b) => b.width)),
+    height: medianOf(boxes.map((b) => b.height)),
+  };
+}
+
+function repairRouteVersusStationTeamRecord(record: PodRecord): PodRecord {
+  const r = record.route.trim();
+  if (!r || isRouteFormatValid(r)) return record;
+  if (!isStationTeamCodeNotCourierRoute(r)) return record;
+  const st = record.stationTeam?.trim() || "";
+  return {
+    ...record,
+    stationTeam: st || r,
+    route: "",
+    reviewRequired: true,
+    reviewReason: appendReviewReason(
+      record.reviewReason,
+      st && st !== r
+        ? "抽查路线字段内容为站点车队样式，已清空路线；请根据画面确认站点车队与快递员路线。"
+        : "站点车队代码曾被填在抽查路线中，已移入站点车队并清空路线，请根据画面补全快递员路线。",
+    ),
+  };
+}
+
+async function refinePODRouteFromTrainingCrop(
+  file: File,
+  examples: TrainingExample[],
+  records: PodRecord[],
+  model: string,
+): Promise<{ records: PodRecord[]; usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } }> {
+  if (!OPENAI_API_KEY || records.length !== 1) return { records };
+  const box = medianRouteImageBox(examples);
+  if (!box) return { records };
+
+  const bytes = Buffer.from(await file.arrayBuffer());
+  const meta = await sharp(bytes).metadata();
+  const iw = meta.width ?? 0;
+  const ih = meta.height ?? 0;
+  if (!iw || !ih) return { records };
+
+  const pad = 0.02;
+  const x0 = Math.max(0, box.x - pad);
+  const y0 = Math.max(0, box.y - pad);
+  const x1 = Math.min(1, box.x + box.width + pad);
+  const y1 = Math.min(1, box.y + box.height + pad);
+  const w = Math.max(0.01, x1 - x0);
+  const h = Math.max(0.01, y1 - y0);
+  const left = Math.floor(x0 * iw);
+  const top = Math.floor(y0 * ih);
+  const width = Math.max(1, Math.floor(w * iw));
+  const height = Math.max(1, Math.floor(h * ih));
+
+  let cropBuf: Buffer;
+  try {
+    cropBuf = await sharp(bytes).extract({ left, top, width, height }).png().toBuffer();
+  } catch {
+    return { records };
+  }
+  const dataUrl = `data:image/png;base64,${cropBuf.toString("base64")}`;
+
+  const prompt = `图中仅为签退/POD 类屏幕的一小块裁剪，对应「快递员路线 / 抽查路线」文本区域。请只 OCR 图中可见的路线编码（典型形如 IAH01-030-C，含 IAH 后两位区域数字）。
+不要输出站点车队样式（如单独的 IAH-BAA、IAH-FGI 等三字母段）。若图中没有此类路线编码，输出 {"route":null}。
+只输出一个 JSON 对象，不要其它文字。`;
+
+  const body = {
+    model,
+    reasoning_effort: OPENAI_REASONING_EFFORT,
+    response_format: { type: "json_object" },
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: prompt },
+          { type: "image_url", image_url: { url: dataUrl } },
+        ] as OpenAIMessageContent[],
+      },
+    ],
+  };
+
+  const response = await fetch(`${OPENAI_BASE_URL}/chat/completions`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${OPENAI_API_KEY}`,
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    return { records };
+  }
+
+  const payload = (await response.json()) as {
+    choices?: Array<{ message?: { content?: string } }>;
+    usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+  };
+
+  const content = payload.choices?.[0]?.message?.content;
+  if (!content) return { records };
+
+  let parsed: { route?: unknown };
+  try {
+    parsed = JSON.parse(content) as { route?: unknown };
+  } catch {
+    return { records };
+  }
+
+  const routeRaw = parsed?.route;
+  if (routeRaw === null || routeRaw === undefined) return { records, usage: payload.usage };
+  const route = normalizeText(String(routeRaw));
+  if (!route || route.toLowerCase() === "null") return { records, usage: payload.usage };
+  if (!isRouteFormatValid(route)) return { records, usage: payload.usage };
+
+  const [rec] = records;
+  const hadBadRoute = Boolean(rec.route.trim()) && !isRouteFormatValid(rec.route);
+  return {
+    records: [
+      {
+        ...rec,
+        route,
+        reviewRequired: hadBadRoute || rec.reviewRequired,
+        reviewReason: hadBadRoute
+          ? appendReviewReason(rec.reviewReason, "抽查路线已按训练池标注区域二次裁剪识别覆盖。")
+          : rec.reviewReason,
+      },
+    ],
+    usage: payload.usage,
+  };
 }
 
 async function callVisionModel(file: File, model: string): Promise<{ records: RawModelRecord[], imageType: string, usage?: any }> {
@@ -523,8 +671,23 @@ export async function POST(request: Request) {
 
     for (const file of files) {
       const consistencyResult = await runConsistencyCheck(file, model);
-      const sourceCheckedRecords = markSourceMismatchForReview(consistencyResult.records, validLabels);
-      
+      let workingRecords = consistencyResult.records;
+
+      if (consistencyResult.imageType === "POD" && examples.length > 0) {
+        const refined = await refinePODRouteFromTrainingCrop(file, examples, workingRecords, model);
+        workingRecords = refined.records;
+        if (refined.usage) {
+          consistencyResult.usage = {
+            prompt_tokens: (consistencyResult.usage?.prompt_tokens || 0) + (refined.usage.prompt_tokens || 0),
+            completion_tokens: (consistencyResult.usage?.completion_tokens || 0) + (refined.usage.completion_tokens || 0),
+            total_tokens: (consistencyResult.usage?.total_tokens || 0) + (refined.usage.total_tokens || 0),
+          };
+        }
+      }
+
+      workingRecords = workingRecords.map(repairRouteVersusStationTeamRecord);
+      const sourceCheckedRecords = markSourceMismatchForReview(workingRecords, validLabels);
+
       let checkedRecords = sourceCheckedRecords;
       let counterIssues: ExtractionIssue[] = [];
 
@@ -590,7 +753,7 @@ export async function POST(request: Request) {
       issues,
       modelUsed: model,
       mode,
-      trainingExamplesLoaded: (await loadTrainingExamples()).length,
+      trainingExamplesLoaded: examples.length,
     });
   } catch (error) {
     return NextResponse.json(
