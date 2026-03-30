@@ -26,6 +26,8 @@ export type WorkbenchAnnotationBox = {
   y: number;
   width: number;
   height: number;
+  /** 未设置：历史样本，坐标相对标注容器（含 object-contain 留白）。新框均为 image。 */
+  coordSpace?: "image" | "container";
 };
 
 export type AnnotationWorkbenchSeed = Pick<
@@ -40,7 +42,23 @@ type DrawingState = {
   startY: number;
   currentX: number;
   currentY: number;
+  space: "image" | "container";
 };
+
+type ImageLayout = {
+  cw: number;
+  ch: number;
+  nw: number;
+  nh: number;
+  dispW: number;
+  dispH: number;
+  offX: number;
+  offY: number;
+};
+
+function clamp01(n: number) {
+  return Math.max(0, Math.min(1, n));
+}
 
 const annotationFields: Array<{ key: AnnotationField; label: string }> = [
   { key: "date", label: "日期" },
@@ -121,9 +139,146 @@ export function TrainingAnnotationWorkbench({
   const [drawingState, setDrawingState] = useState<DrawingState | null>(null);
   const [isSavingTraining, setIsSavingTraining] = useState(false);
   const [isPreviewFillLoading, setIsPreviewFillLoading] = useState(false);
+  const [layoutTick, setLayoutTick] = useState(0);
+  const bumpLayout = useCallback(() => setLayoutTick((t) => t + 1), []);
 
   const annotationCanvasRef = useRef<HTMLDivElement | null>(null);
+  const imageRef = useRef<HTMLImageElement | null>(null);
   const seedJsonRef = useRef<string>("");
+
+  function getImageLayout(): ImageLayout | null {
+    const container = annotationCanvasRef.current;
+    const img = imageRef.current;
+    if (!container || !img?.naturalWidth || !img.naturalHeight) {
+      return null;
+    }
+    const cw = container.clientWidth;
+    const ch = container.clientHeight;
+    if (cw <= 0 || ch <= 0) {
+      return null;
+    }
+    const nw = img.naturalWidth;
+    const nh = img.naturalHeight;
+    const scale = Math.min(cw / nw, ch / nh);
+    const dispW = nw * scale;
+    const dispH = nh * scale;
+    const offX = (cw - dispW) / 2;
+    const offY = (ch - dispH) / 2;
+    return { cw, ch, nw, nh, dispW, dispH, offX, offY };
+  }
+
+  function clientToImageNorm(clientX: number, clientY: number): { x: number; y: number } | null {
+    const rect = annotationCanvasRef.current?.getBoundingClientRect();
+    const layout = getImageLayout();
+    if (!rect || !layout) {
+      return null;
+    }
+    const px = clientX - rect.left;
+    const py = clientY - rect.top;
+    const ix = (px - layout.offX) / layout.dispW;
+    const iy = (py - layout.offY) / layout.dispH;
+    return { x: clamp01(ix), y: clamp01(iy) };
+  }
+
+  function containerNormPoint(clientX: number, clientY: number) {
+    const rect = annotationCanvasRef.current?.getBoundingClientRect();
+    if (!rect || rect.width <= 0 || rect.height <= 0) {
+      return null;
+    }
+    const x = (clientX - rect.left) / rect.width;
+    const y = (clientY - rect.top) / rect.height;
+    return { x: clamp01(x), y: clamp01(y) };
+  }
+
+  function getPointerNorm(clientX: number, clientY: number): { x: number; y: number; space: "image" | "container" } {
+    const imgPt = clientToImageNorm(clientX, clientY);
+    if (imgPt) {
+      return { ...imgPt, space: "image" };
+    }
+    const c = containerNormPoint(clientX, clientY);
+    if (!c) {
+      return { x: 0, y: 0, space: "container" };
+    }
+    return { ...c, space: "container" };
+  }
+
+  function containerNormBoxToImageBox(
+    box: { x: number; y: number; width: number; height: number },
+    layout: ImageLayout,
+  ) {
+    const { cw, ch, dispW, dispH, offX, offY } = layout;
+    const x1 = box.x * cw;
+    const y1 = box.y * ch;
+    const x2 = (box.x + box.width) * cw;
+    const y2 = (box.y + box.height) * ch;
+    let ix = (x1 - offX) / dispW;
+    let iy = (y1 - offY) / dispH;
+    let iw = (x2 - x1) / dispW;
+    let ih = (y2 - y1) / dispH;
+    ix = clamp01(ix);
+    iy = clamp01(iy);
+    iw = Math.max(0, Math.min(1 - ix, iw));
+    ih = Math.max(0, Math.min(1 - iy, ih));
+    return { x: ix, y: iy, width: iw, height: ih };
+  }
+
+  function boxesForVisionApi(boxes: WorkbenchAnnotationBox[]) {
+    const layout = getImageLayout();
+    return boxes.map((b) => {
+      if (b.coordSpace === "image") {
+        return { field: b.field, x: b.x, y: b.y, width: b.width, height: b.height };
+      }
+      if (layout) {
+        const r = containerNormBoxToImageBox(b, layout);
+        return { field: b.field, x: r.x, y: r.y, width: r.width, height: r.height };
+      }
+      return { field: b.field, x: b.x, y: b.y, width: b.width, height: b.height };
+    });
+  }
+
+  function boxToContainerStyle(box: WorkbenchAnnotationBox) {
+    if (box.coordSpace === "image") {
+      const layout = getImageLayout();
+      if (!layout) {
+        return {
+          left: `${box.x * 100}%`,
+          top: `${box.y * 100}%`,
+          width: `${box.width * 100}%`,
+          height: `${box.height * 100}%`,
+        };
+      }
+      const { cw, ch, dispW, dispH, offX, offY } = layout;
+      const left = (offX + box.x * dispW) / cw;
+      const top = (offY + box.y * dispH) / ch;
+      const width = (box.width * dispW) / cw;
+      const height = (box.height * dispH) / ch;
+      return {
+        left: `${left * 100}%`,
+        top: `${top * 100}%`,
+        width: `${width * 100}%`,
+        height: `${height * 100}%`,
+      };
+    }
+    return {
+      left: `${box.x * 100}%`,
+      top: `${box.y * 100}%`,
+      width: `${box.width * 100}%`,
+      height: `${box.height * 100}%`,
+    };
+  }
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+    const el = annotationCanvasRef.current;
+    if (!el) {
+      return;
+    }
+    const ro = new ResizeObserver(() => bumpLayout());
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [open, bumpLayout]);
 
   useEffect(() => {
     if (!open) {
@@ -171,32 +326,14 @@ export function TrainingAnnotationWorkbench({
     return value === null || value === undefined || value === "" ? "" : String(value);
   }
 
-  function getRelativePointFromClient(clientX: number, clientY: number) {
-    const rect = annotationCanvasRef.current?.getBoundingClientRect();
-    if (!rect || rect.width <= 0 || rect.height <= 0) {
-      return null;
-    }
-
-    const x = (clientX - rect.left) / rect.width;
-    const y = (clientY - rect.top) / rect.height;
-
-    return {
-      x: Math.max(0, Math.min(1, x)),
-      y: Math.max(0, Math.min(1, y)),
-    };
-  }
-
   function beginDrawing(event: React.MouseEvent<HTMLDivElement>) {
-    const point = getRelativePointFromClient(event.clientX, event.clientY);
-    if (!point) {
-      return;
-    }
-
+    const point = getPointerNorm(event.clientX, event.clientY);
     setDrawingState({
       startX: point.x,
       startY: point.y,
       currentX: point.x,
       currentY: point.y,
+      space: point.space,
     });
   }
 
@@ -205,8 +342,8 @@ export function TrainingAnnotationWorkbench({
       return;
     }
 
-    const point = getRelativePointFromClient(event.clientX, event.clientY);
-    if (!point) {
+    const point = getPointerNorm(event.clientX, event.clientY);
+    if (point.space !== drawingState.space) {
       return;
     }
 
@@ -220,22 +357,24 @@ export function TrainingAnnotationWorkbench({
   function beginDrawingTouch(event: React.TouchEvent<HTMLDivElement>) {
     if (event.touches.length !== 1) return;
     const t = event.touches[0];
-    const point = getRelativePointFromClient(t.clientX, t.clientY);
-    if (!point) return;
+    const point = getPointerNorm(t.clientX, t.clientY);
     event.preventDefault();
     setDrawingState({
       startX: point.x,
       startY: point.y,
       currentX: point.x,
       currentY: point.y,
+      space: point.space,
     });
   }
 
   function updateDrawingTouch(event: React.TouchEvent<HTMLDivElement>) {
     if (!drawingState || event.touches.length !== 1) return;
     const t = event.touches[0];
-    const point = getRelativePointFromClient(t.clientX, t.clientY);
-    if (!point) return;
+    const point = getPointerNorm(t.clientX, t.clientY);
+    if (point.space !== drawingState.space) {
+      return;
+    }
     event.preventDefault();
     setDrawingState({
       ...drawingState,
@@ -249,9 +388,9 @@ export function TrainingAnnotationWorkbench({
     const t = event.changedTouches[0];
     let endX: number | undefined;
     let endY: number | undefined;
-    if (t) {
-      const point = getRelativePointFromClient(t.clientX, t.clientY);
-      if (point) {
+    if (t && drawingState) {
+      const point = getPointerNorm(t.clientX, t.clientY);
+      if (point.space === drawingState.space) {
         endX = point.x;
         endY = point.y;
       }
@@ -285,6 +424,7 @@ export function TrainingAnnotationWorkbench({
       y,
       width,
       height,
+      coordSpace: drawingState.space === "image" ? "image" : "container",
     };
 
     setAnnotationBoxes((current) => [...current, nextBox]);
@@ -345,7 +485,7 @@ export function TrainingAnnotationWorkbench({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           imageDataUrl,
-          boxes: annotationBoxes,
+          boxes: boxesForVisionApi(annotationBoxes),
           fieldAggregations,
         }),
       });
@@ -366,22 +506,43 @@ export function TrainingAnnotationWorkbench({
         const n = typeof v === "number" ? v : Number(v);
         return Number.isFinite(n) ? n : "";
       };
-      setManualRecord((prev) => ({
-        ...prev,
-        ...(typeof r.date === "string" ? { date: r.date } : {}),
-        ...(typeof r.route === "string" ? { route: r.route } : {}),
-        ...(typeof r.driver === "string" ? { driver: r.driver } : {}),
-        ...(typeof r.totalSourceLabel === "string" ? { totalSourceLabel: r.totalSourceLabel } : {}),
-        ...(typeof r.waybillStatus === "string" ? { waybillStatus: r.waybillStatus } : {}),
-        ...(typeof r.stationTeam === "string" ? { stationTeam: r.stationTeam } : {}),
-        ...(r.total !== undefined ? { total: numOrEmpty(r.total) } : {}),
-        ...(r.unscanned !== undefined ? { unscanned: numOrEmpty(r.unscanned) } : {}),
-        ...(r.exceptions !== undefined ? { exceptions: numOrEmpty(r.exceptions) } : {}),
-      }));
+      const boxed = new Set(annotationBoxes.map((b) => b.field));
+      setManualRecord((prev) => {
+        const next = { ...prev };
+        const strFromModel = (v: unknown) => (typeof v === "string" ? v : "");
+        if (boxed.has("date")) {
+          next.date = strFromModel(r.date);
+        }
+        if (boxed.has("route")) {
+          next.route = strFromModel(r.route);
+        }
+        if (boxed.has("driver")) {
+          next.driver = strFromModel(r.driver);
+        }
+        if (boxed.has("waybillStatus")) {
+          next.waybillStatus = strFromModel(r.waybillStatus);
+        }
+        if (boxed.has("stationTeam")) {
+          next.stationTeam = strFromModel(r.stationTeam);
+        }
+        if (boxed.has("total")) {
+          next.total = numOrEmpty(r.total);
+          if (typeof r.totalSourceLabel === "string") {
+            next.totalSourceLabel = r.totalSourceLabel;
+          }
+        }
+        if (boxed.has("unscanned")) {
+          next.unscanned = numOrEmpty(r.unscanned);
+        }
+        if (boxed.has("exceptions")) {
+          next.exceptions = numOrEmpty(r.exceptions);
+        }
+        return next;
+      });
       onNotice?.(
         data.previewNote
-          ? `AI 试填完成。说明：${data.previewNote} 请核对后再存入训练池。`
-          : "AI 试填完成，请核对右侧数值；可多框相加等规则已按你的合并方式参与识别。",
+          ? `AI 试填完成（已按标注框裁剪成小图再识别）。说明：${data.previewNote} 请核对后再存入训练池。`
+          : "AI 试填完成：服务端已按每个框裁剪成小图后送模型识别，请核对右侧数值。",
       );
     } catch (err) {
       onError?.(err instanceof Error ? err.message : "试填失败");
@@ -469,6 +630,10 @@ export function TrainingAnnotationWorkbench({
               <li>选中字段后在图上画框；同一字段可画多个框（如两条「未领取」各画一框）</li>
               <li>多框时在列表里选择合并方式：数字相加、逗号/换行并列，或仅取第一处</li>
               <li>右侧填写该字段最终应写入表格的值（如 1+0=1），最后点「存入训练池」</li>
+              <li>
+                画框坐标会按<strong>原图像素</strong>对齐后再参与「AI 试填」（避免适应容器时的留白导致模型读到框外文字，例如抽查路线框到
+                IAH01-050-R 却填成 IAH-MEL）。
+              </li>
             </ol>
           </div>
           <button
@@ -486,6 +651,7 @@ export function TrainingAnnotationWorkbench({
             <div
               ref={annotationCanvasRef}
               className="relative min-h-[min(55vh,520px)] cursor-crosshair select-none overflow-hidden rounded-xl bg-black/5 [touch-action:none]"
+              data-layout-tick={layoutTick}
               onMouseDown={beginDrawing}
               onMouseMove={updateDrawing}
               onMouseUp={() => finishDrawing()}
@@ -498,9 +664,11 @@ export function TrainingAnnotationWorkbench({
               {imageSrc ? (
                 // eslint-disable-next-line @next/next/no-img-element
                 <img
+                  ref={imageRef}
                   src={imageSrc}
                   alt={imageName}
                   draggable={false}
+                  onLoad={bumpLayout}
                   className="pointer-events-none h-full w-full object-contain"
                 />
               ) : (
@@ -515,12 +683,7 @@ export function TrainingAnnotationWorkbench({
                   <div
                     key={box.id}
                     className="pointer-events-none absolute border-2 border-rose-500 bg-rose-500/10"
-                    style={{
-                      left: `${box.x * 100}%`,
-                      top: `${box.y * 100}%`,
-                      width: `${box.width * 100}%`,
-                      height: `${box.height * 100}%`,
-                    }}
+                    style={boxToContainerStyle(box)}
                   >
                     <span className="absolute left-0 top-0 max-w-[min(100%,120px)] -translate-y-full truncate rounded bg-rose-500 px-1.5 py-0.5 text-[10px] text-white">
                       {tag}
@@ -531,12 +694,16 @@ export function TrainingAnnotationWorkbench({
               {drawingState ? (
                 <div
                   className="pointer-events-none absolute border-2 border-blue-500 bg-blue-500/20"
-                  style={{
-                    left: `${Math.min(drawingState.startX, drawingState.currentX) * 100}%`,
-                    top: `${Math.min(drawingState.startY, drawingState.currentY) * 100}%`,
-                    width: `${Math.abs(drawingState.currentX - drawingState.startX) * 100}%`,
-                    height: `${Math.abs(drawingState.currentY - drawingState.startY) * 100}%`,
-                  }}
+                  style={boxToContainerStyle({
+                    id: "draft",
+                    field: "driver",
+                    value: "",
+                    x: Math.min(drawingState.startX, drawingState.currentX),
+                    y: Math.min(drawingState.startY, drawingState.currentY),
+                    width: Math.abs(drawingState.currentX - drawingState.startX),
+                    height: Math.abs(drawingState.currentY - drawingState.startY),
+                    coordSpace: drawingState.space === "image" ? "image" : undefined,
+                  })}
                 />
               ) : null}
             </div>

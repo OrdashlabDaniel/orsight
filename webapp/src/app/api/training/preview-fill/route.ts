@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import sharp from "sharp";
 
 import { getAuthUserOrSkip } from "@/lib/auth-server";
 import type { FieldAggregation, TrainingField } from "@/lib/training";
@@ -106,7 +107,52 @@ function describeAgg(mode: FieldAggregation): string {
   }
 }
 
-function buildBoxSpec(
+function parseDataUrlToBuffer(dataUrl: string): Buffer | null {
+  const t = dataUrl.trim();
+  const i = t.indexOf("base64,");
+  if (i < 0) {
+    return null;
+  }
+  try {
+    return Buffer.from(t.slice(i + "base64,".length), "base64");
+  } catch {
+    return null;
+  }
+}
+
+/** 按位图 0~1 坐标裁剪；返回与 boxes 同序的 PNG data URL（仅含框内像素，不再附整图）。 */
+async function cropsToPngDataUrls(
+  imageBuffer: Buffer,
+  boxes: Array<{ field: TrainingField; x: number; y: number; width: number; height: number }>,
+): Promise<string[]> {
+  const meta = await sharp(imageBuffer).metadata();
+  const iw = meta.width ?? 0;
+  const ih = meta.height ?? 0;
+  if (!iw || !ih) {
+    throw new Error("无法读取图片宽高");
+  }
+
+  const out: string[] = [];
+  for (const b of boxes) {
+    let left = Math.floor(b.x * iw);
+    let top = Math.floor(b.y * ih);
+    let width = Math.ceil(b.width * iw);
+    let height = Math.ceil(b.height * ih);
+    left = Math.max(0, Math.min(iw - 1, left));
+    top = Math.max(0, Math.min(ih - 1, top));
+    width = Math.max(1, Math.min(iw - left, width));
+    height = Math.max(1, Math.min(ih - top, height));
+
+    const cropBuf = await sharp(imageBuffer)
+      .extract({ left, top, width, height })
+      .png()
+      .toBuffer();
+    out.push(`data:image/png;base64,${cropBuf.toString("base64")}`);
+  }
+  return out;
+}
+
+function buildCropInstructionText(
   boxes: Array<{ field: TrainingField; x: number; y: number; width: number; height: number }>,
   aggs: Partial<Record<TrainingField, FieldAggregation>>,
 ): string {
@@ -116,20 +162,42 @@ function buildBoxSpec(
     list.push(b);
     byField.set(b.field, list);
   }
-  const lines: string[] = [];
+
+  const lines: string[] = [
+    `下面会附上 ${boxes.length} 张**裁剪小图**（PNG），顺序固定：第 1 张对应第 1 个框，以此类推。`,
+    `每张图里**只有**原截图上该矩形区域内的像素，图外没有任何内容；你必须只根据这些小图做 OCR，禁止臆造框外文字（例如其它位置的司机编号、站点车队）。`,
+    "",
+    "字段与图片对应关系：",
+  ];
+
+  boxes.forEach((b, i) => {
+    lines.push(`图${i + 1} → 【${FIELD_CN[b.field]}】（JSON 键名 ${b.field}）`);
+  });
+
+  lines.push("", "同字段多张小图时的合并规则：");
   for (const [field, list] of byField) {
+    if (list.length <= 1) {
+      continue;
+    }
+    const indices: number[] = [];
+    boxes.forEach((b, idx) => {
+      if (b.field === field) {
+        indices.push(idx + 1);
+      }
+    });
     const mode = aggs[field] ?? inferAgg(field, list.length);
     lines.push(
-      `【${FIELD_CN[field]}】字段键=${field}；合并方式：${describeAgg(mode)}`,
+      `- ${field}（${FIELD_CN[field]}）：对应 图${indices.join("、图")}；${describeAgg(mode)}`,
     );
-    list.forEach((b, i) => {
-      const x2 = b.x + b.width;
-      const y2 = b.y + b.height;
-      lines.push(
-        `  子区域 ${i + 1}：归一化矩形 x∈[${(b.x * 100).toFixed(2)}%, ${(x2 * 100).toFixed(2)}%]，y∈[${(b.y * 100).toFixed(2)}%, ${(y2 * 100).toFixed(2)}%]`,
-      );
-    });
   }
+
+  lines.push(
+    "",
+    "请输出一个 JSON 对象，键包括（无对应小图的键可省略或 null）：",
+    "date, route, driver, total, totalSourceLabel, unscanned, exceptions, waybillStatus, stationTeam, previewNote",
+    "数字字段用整数或 null；文本用字符串。previewNote 可说明读数不确定之处。",
+  );
+
   return lines.join("\n");
 }
 
@@ -171,17 +239,36 @@ export async function POST(request: Request) {
     }
 
     const fieldAggregations = normalizeAggregations(body.fieldAggregations);
-    const spec = buildBoxSpec(boxes, fieldAggregations);
 
-    const systemText = `你是 OrSight 训练标注预览助手。用户在同一张截图上为业务字段画了矩形框（坐标为相对整图 0～1 的归一化值，原点左上）。
-你必须只根据下方附带图片里、各框对应区域内的可见内容读取，禁止用框外数字顶替。
-对「数字相加」类字段：每个子区域单独读数后再按规则合并。
-输出必须是合法 JSON 对象，字段如下（数字字段用整数或 null，文本用字符串）：
-date, route, driver, total, totalSourceLabel, unscanned, exceptions, waybillStatus, stationTeam, previewNote（previewNote 为可选字符串，说明不确定之处）。
+    const imageBuffer = parseDataUrlToBuffer(imageDataUrl);
+    if (!imageBuffer || imageBuffer.length === 0) {
+      return NextResponse.json({ error: "无法解析图片数据。" }, { status: 400 });
+    }
 
-若某字段没有任何框选，对应键可省略或填 null/空字符串。`;
+    let cropUrls: string[];
+    try {
+      cropUrls = await cropsToPngDataUrls(imageBuffer, boxes);
+    } catch (e) {
+      return NextResponse.json(
+        { error: e instanceof Error ? e.message : "裁剪标注区域失败。" },
+        { status: 400 },
+      );
+    }
 
-    const userText = `请根据框选说明读取并合并：\n\n${spec}\n\n然后输出 JSON。`;
+    const userText = buildCropInstructionText(boxes, fieldAggregations);
+
+    const systemText = `你是 OrSight 训练标注预览助手。用户只会发来多张**已经裁剪好**的小图（每图仅含一个矩形框内的像素）和文字说明。
+你必须只根据这些小图里的可见像素做 OCR 并按要求合并；**绝对禁止**引用未出现在这些小图里的任何文字（例如整屏其它位置的司机编号、站点代码）。
+抽查路线 (route)：只输出**该小图内**可见的路线文本（如 IAH01-030-C），不要用记忆中或其它字段的常见格式替换。
+输出合法 JSON。`;
+
+    const userContent: Array<
+      | { type: "text"; text: string }
+      | { type: "image_url"; image_url: { url: string } }
+    > = [{ type: "text", text: userText }];
+    for (const url of cropUrls) {
+      userContent.push({ type: "image_url", image_url: { url } });
+    }
 
     const res = await fetch(`${OPENAI_BASE_URL}/chat/completions`, {
       method: "POST",
@@ -197,10 +284,7 @@ date, route, driver, total, totalSourceLabel, unscanned, exceptions, waybillStat
           { role: "system", content: systemText },
           {
             role: "user",
-            content: [
-              { type: "text", text: userText },
-              { type: "image_url", image_url: { url: imageDataUrl } },
-            ],
+            content: userContent,
           },
         ],
       }),

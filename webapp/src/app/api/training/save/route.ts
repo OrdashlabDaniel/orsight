@@ -66,6 +66,8 @@ function normalizeBoxes(value: unknown): TrainingBox[] {
       const field = normalizeText(box.field);
       const boxValue = normalizeText(box.value);
       const idRaw = normalizeText(box.id);
+      const cs = normalizeText(box.coordSpace);
+      const coordSpace = cs === "image" || cs === "container" ? (cs as TrainingBox["coordSpace"]) : undefined;
 
       if (!field || x === null || y === null || width === null || height === null) {
         return null;
@@ -79,6 +81,9 @@ function normalizeBoxes(value: unknown): TrainingBox[] {
         width,
         height,
       };
+      if (coordSpace) {
+        out.coordSpace = coordSpace;
+      }
       if (idRaw) {
         out.id = idRaw.slice(0, 64);
       }

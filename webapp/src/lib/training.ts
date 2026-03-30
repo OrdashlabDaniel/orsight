@@ -28,6 +28,11 @@ export type TrainingBox = {
   y: number;
   width: number;
   height: number;
+  /**
+   * 框坐标含义。未设置视为历史数据：相对标注容器（含 object-contain 留白），与位图不完全一致。
+   * 新标注应使用 `image`：相对原始图片宽高的 0~1，与发给模型的说明一致。
+   */
+  coordSpace?: "image" | "container";
 };
 
 export type TrainingExample = {

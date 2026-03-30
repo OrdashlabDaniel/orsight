@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { Image as ImageIcon, Zap, DollarSign, Users, Database } from "lucide-react";
 
+import { VizIdentityBadges } from "@/components/VizIdentityBadges";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   aggregateUsageLogs,
@@ -11,7 +12,7 @@ import {
 import { createServiceRoleClient } from "@/lib/supabase/service";
 
 import { VizCharts } from "./VizCharts";
-import { deleteUserAction } from "./actions";
+import { VizUserEditDrawer } from "./VizUserEditDrawer";
 
 export const metadata = {
   title: "用量可视化 · OrSight",
@@ -35,45 +36,6 @@ type RegisteredUserLite = {
   created_at: string | null;
   pod_username?: string | null;
 };
-
-/** 同一账号可同时具备：注册用户（auth.users）+ 后台管理员（public.admin_users） */
-function VizIdentityBadges({
-  isRegisteredUser,
-  isAdmin,
-}: {
-  isRegisteredUser: boolean;
-  isAdmin: boolean;
-}) {
-  return (
-    <div className="flex flex-col gap-1.5">
-      <div className="flex flex-wrap gap-1.5">
-        <span
-          className={
-            isRegisteredUser
-              ? "rounded-md bg-slate-800 px-2 py-0.5 text-xs font-medium text-white"
-              : "rounded-md bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-400 line-through"
-          }
-          title="auth.users 中的注册账号"
-        >
-          注册用户
-        </span>
-        <span
-          className={
-            isAdmin
-              ? "rounded-md bg-blue-600 px-2 py-0.5 text-xs font-medium text-white"
-              : "rounded-md border border-dashed border-slate-300 bg-white px-2 py-0.5 text-xs text-slate-400"
-          }
-          title="public.admin_users 中有记录，可进后台"
-        >
-          后台管理员
-        </span>
-      </div>
-      {isRegisteredUser && isAdmin ? (
-        <p className="text-[11px] leading-snug text-slate-500">该账号同时具备以上两种身份</p>
-      ) : null}
-    </div>
-  );
-}
 
 async function loadAllAdminUsers() {
   const sb = createServiceRoleClient();
@@ -166,9 +128,11 @@ export default async function VizPage(props: { searchParams?: Promise<SearchPara
   const registeredRows = registeredUsers
     .map((u) => {
       const display = (u.pod_username && u.pod_username.trim()) || u.email || "unknown";
+      const authEmail = (u.email && u.email.trim()) || display;
       return {
         id: u.id,
         email: display,
+        authEmail,
         created_at: u.created_at,
         isRegisteredUser: true,
         isAdmin: adminIdSet.has(u.id),
@@ -180,13 +144,17 @@ export default async function VizPage(props: { searchParams?: Promise<SearchPara
   const adminOnlyRows = adminRows.map((u) => ({
     id: u.id,
     email: u.email || "unknown",
+    authEmail: u.email || "unknown",
     created_at: u.created_at,
     isRegisteredUser: true,
     isAdmin: true,
     usage: u.usage,
   }));
 
+  const soleAdmin = adminRows.length === 1;
+
   const okLabel = typeof searchParams.ok === "string" ? searchParams.ok : null;
+  const noticeMsg = typeof searchParams.notice === "string" ? searchParams.notice : null;
   const errMsg = typeof searchParams.err === "string" ? searchParams.err : null;
   const viewParam = typeof searchParams.view === "string" ? searchParams.view : "users";
   const activeView: "users" | "admins" = viewParam === "admins" ? "admins" : "users";
@@ -207,7 +175,7 @@ export default async function VizPage(props: { searchParams?: Promise<SearchPara
           <div className="flex flex-wrap gap-2">
             <Link
               href="/account"
-              className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
+              className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 shadow-sm transition-all duration-150 hover:-translate-y-px hover:border-slate-400 hover:bg-slate-50 hover:shadow-md active:translate-y-0 active:scale-[0.98]"
             >
               管理员信息
             </Link>
@@ -219,6 +187,11 @@ export default async function VizPage(props: { searchParams?: Promise<SearchPara
         {okLabel ? (
           <div className="mb-4 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-900">
             已删除用户：<strong>{okLabel}</strong>
+          </div>
+        ) : null}
+        {noticeMsg ? (
+          <div className="mb-4 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-900">
+            {noticeMsg}
           </div>
         ) : null}
         {errMsg ? (
@@ -311,20 +284,20 @@ export default async function VizPage(props: { searchParams?: Promise<SearchPara
                 <div className="inline-flex rounded-lg border border-slate-200 p-1 text-sm">
                   <Link
                     href="/viz?view=users"
-                    className={`rounded-md px-3 py-1.5 ${
+                    className={`rounded-md px-3 py-1.5 transition-all duration-150 active:scale-[0.98] ${
                       activeView === "users"
-                        ? "bg-slate-900 text-white"
-                        : "text-slate-600 hover:bg-slate-50"
+                        ? "bg-slate-900 text-white shadow-inner hover:bg-slate-800"
+                        : "text-slate-600 hover:bg-slate-100 hover:text-slate-900"
                     }`}
                   >
                     用户 ({registeredRows.length})
                   </Link>
                   <Link
                     href="/viz?view=admins"
-                    className={`rounded-md px-3 py-1.5 ${
+                    className={`rounded-md px-3 py-1.5 transition-all duration-150 active:scale-[0.98] ${
                       activeView === "admins"
-                        ? "bg-slate-900 text-white"
-                        : "text-slate-600 hover:bg-slate-50"
+                        ? "bg-slate-900 text-white shadow-inner hover:bg-slate-800"
+                        : "text-slate-600 hover:bg-slate-100 hover:text-slate-900"
                     }`}
                   >
                     管理员 ({adminRows.length})
@@ -341,8 +314,11 @@ export default async function VizPage(props: { searchParams?: Promise<SearchPara
                   {registeredUsersLoadWarn}
                 </div>
               ) : null}
-              <div className="mb-3 flex items-center justify-between">
-                <p className="text-xs text-rose-700">删除会移除 auth.users + admin_users + usage_logs</p>
+              <div className="mb-3 flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                <p className="text-xs text-slate-600">
+                  点击「编辑」可修改管理员权限或删除用户；权限变更仅影响 <code className="rounded bg-slate-100 px-1">admin_users</code>。
+                </p>
+                <p className="text-xs text-rose-700">删除用户会移除 auth.users + admin_users + usage_logs</p>
               </div>
               <div className="overflow-x-auto">
                 <table className="min-w-full text-sm">
@@ -361,8 +337,18 @@ export default async function VizPage(props: { searchParams?: Promise<SearchPara
                     {(activeView === "admins" ? adminOnlyRows : registeredRows).map((u) => (
                       <tr key={u.id} className="border-t border-slate-100">
                         <td className="px-3 py-2">
-                          <div className="font-medium text-slate-900">{u.email}</div>
-                          <div className="max-w-[320px] truncate text-xs text-slate-500">{u.id}</div>
+                          <Link
+                            href={`/viz/users/${encodeURIComponent(u.id)}`}
+                            className="group block max-w-[360px] rounded-lg px-2 py-1 transition-colors hover:bg-slate-100"
+                            title="查看用户详情"
+                          >
+                            <div className="font-medium text-slate-900 transition-colors group-hover:text-slate-950">
+                              {u.email}
+                            </div>
+                            <div className="max-w-[340px] truncate font-mono text-[11px] text-slate-500 transition-colors group-hover:text-slate-700">
+                              {u.id}
+                            </div>
+                          </Link>
                         </td>
                         <td className="px-3 py-2 align-top">
                           <VizIdentityBadges
@@ -375,16 +361,15 @@ export default async function VizPage(props: { searchParams?: Promise<SearchPara
                         <td className="px-3 py-2 text-right text-slate-700">{u.usage.tokens.toLocaleString()}</td>
                         <td className="px-3 py-2 text-right text-slate-900">${u.usage.cost.toFixed(4)}</td>
                         <td className="px-3 py-2 text-right">
-                          <form action={deleteUserAction}>
-                            <input type="hidden" name="userId" value={u.id} />
-                            <input type="hidden" name="label" value={u.email || u.id} />
-                            <button
-                              type="submit"
-                              className="rounded-lg border border-rose-300 bg-rose-50 px-3 py-1.5 text-xs font-medium text-rose-700 hover:bg-rose-100"
-                            >
-                              删除
-                            </button>
-                          </form>
+                          <VizUserEditDrawer
+                            userId={u.id}
+                            displayLabel={u.email}
+                            authEmail={u.authEmail}
+                            isRegisteredUser={u.isRegisteredUser}
+                            isAdmin={u.isAdmin}
+                            canRevokeAdmin={!(soleAdmin && u.isAdmin)}
+                            returnView={activeView}
+                          />
                         </td>
                       </tr>
                     ))}
