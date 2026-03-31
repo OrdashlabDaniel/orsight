@@ -155,8 +155,9 @@ export default function Home() {
   } | null>(null);
   const [isDraggingFiles, setIsDraggingFiles] = useState(false);
   const [viewingRecord, setViewingRecord] = useState<PodRecord | null>(null);
-  const [viewerImageSrc, setViewerImageSrc] = useState("");
-  const [viewerImageName, setViewerImageName] = useState("");
+  /** 查看图片弹窗：支持跨图合并等多张源图 */
+  const [viewerGallery, setViewerGallery] = useState<Array<{ name: string; src: string }>>([]);
+  const [viewerGalleryLoading, setViewerGalleryLoading] = useState(false);
   const [viewerPopupPosition, setViewerPopupPosition] = useState<PopupPosition | null>(null);
   const [viewerScale, setViewerScale] = useState(1);
   const [viewerPan, setViewerPan] = useState<ViewerPan>({ x: 0, y: 0 });
@@ -383,8 +384,8 @@ export default function Home() {
 
   function closeViewerPopup() {
     setViewingRecord(null);
-    setViewerImageSrc("");
-    setViewerImageName("");
+    setViewerGallery([]);
+    setViewerGalleryLoading(false);
     setViewerPopupPosition(null);
     setViewerScale(1);
     setViewerPan({ x: 0, y: 0 });
@@ -759,8 +760,8 @@ export default function Home() {
       }
 
       setViewingRecord(null);
-      setViewerImageName(upload.file.name);
-      setViewerImageSrc(upload.previewUrl);
+      setViewerGallery([{ name: upload.file.name, src: upload.previewUrl }]);
+      setViewerGalleryLoading(false);
       setViewerLoadError("");
       setViewerScale(1);
       setViewerPan({ x: 0, y: 0 });
@@ -769,8 +770,8 @@ export default function Home() {
   }
 
   function openRecordImage(record: PodRecord, anchorElement?: HTMLElement) {
-    const imageName = getSourceImageNames(record)[0];
-    if (!imageName) {
+    const imageNames = getSourceImageNames(record);
+    if (!imageNames.length) {
       setErrorMessage("找不到该条记录对应的图片名。");
       return;
     }
@@ -786,26 +787,64 @@ export default function Home() {
     }
 
     setViewingRecord(record);
-    setViewerImageName(imageName);
-    setViewerImageSrc("");
+    setViewerGallery([]);
     setViewerLoadError("");
     setViewerScale(1);
     setViewerPan({ x: 0, y: 0 });
-    setNoticeMessage(`正在打开图片：${imageName}`);
+    setViewerGalleryLoading(true);
+    setNoticeMessage(
+      imageNames.length > 1
+        ? `正在打开 ${imageNames.length} 张源图…`
+        : `正在打开图片：${imageNames[0]}`,
+    );
 
-    const matchedUpload = uploads.find((upload) => upload.file.name === imageName);
-    if (matchedUpload) {
-      setSelectedUploadId(matchedUpload.id);
+    const firstUpload = uploads.find((upload) => upload.file.name === imageNames[0]);
+    if (firstUpload) {
+      setSelectedUploadId(firstUpload.id);
     }
 
-    void resolveAnnotationImage(imageName, matchedUpload?.previewUrl)
-      .then((imageSrc) => {
-        setViewerImageSrc(imageSrc);
-        setNoticeMessage(`已打开图片：${imageName}`);
+    void Promise.allSettled(
+      imageNames.map(async (name) => {
+        const matchedUpload = uploads.find((upload) => upload.file.name === name);
+        const src = await resolveAnnotationImage(name, matchedUpload?.previewUrl);
+        return { name, src };
+      }),
+    )
+      .then((results) => {
+        const gallery: Array<{ name: string; src: string }> = [];
+        const failures: string[] = [];
+        for (let i = 0; i < results.length; i++) {
+          const r = results[i]!;
+          const name = imageNames[i]!;
+          if (r.status === "fulfilled") {
+            gallery.push(r.value);
+          } else {
+            const reason = r.reason instanceof Error ? r.reason.message : String(r.reason);
+            failures.push(`${name}：${reason}`);
+          }
+        }
+        setViewerGallery(gallery);
+        if (failures.length) {
+          setViewerLoadError(failures.join("；"));
+          if (gallery.length === 0) {
+            setErrorMessage(failures.join("；"));
+          }
+        }
+        setNoticeMessage(
+          gallery.length > 1
+            ? `已打开 ${gallery.length} 张源图`
+            : gallery.length === 1
+              ? `已打开图片：${gallery[0]!.name}`
+              : "图片加载失败",
+        );
       })
       .catch((error) => {
-        setViewerLoadError(error instanceof Error ? error.message : "打开图片失败。");
-        setErrorMessage(error instanceof Error ? error.message : "打开图片失败。");
+        const msg = error instanceof Error ? error.message : "打开图片失败。";
+        setViewerLoadError(msg);
+        setErrorMessage(msg);
+      })
+      .finally(() => {
+        setViewerGalleryLoading(false);
       });
   }
 
@@ -1335,7 +1374,7 @@ export default function Home() {
           </div>
         </section>
 
-        {viewerImageName && viewerPopupPosition ? (
+        {viewerPopupPosition && (viewerGallery.length > 0 || viewerLoadError || viewerGalleryLoading) ? (
           <div
             className="fixed z-50 max-h-[85vh] overflow-hidden rounded-3xl border border-slate-200 bg-white p-5 shadow-2xl"
             style={{
@@ -1347,7 +1386,11 @@ export default function Home() {
             <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
               <div>
                 <h2 className="text-lg font-semibold">图片查看</h2>
-                <p className="mt-1 text-sm text-slate-500">查看当前条目对应图片，可放大并拖动图片位置，辅助人工修改表格。</p>
+                <p className="mt-1 text-sm text-slate-500">
+                  {viewerGallery.length > 1
+                    ? `本条目由 ${viewerGallery.length} 张源图合并，可滚动查看每张图；可放大并拖动辅助人工核对。`
+                    : "查看当前条目对应图片，可放大并拖动图片位置，辅助人工修改表格。"}
+                </p>
               </div>
               <button
                 className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-medium hover:bg-slate-50"
@@ -1395,32 +1438,56 @@ export default function Home() {
               )}
             </div>
 
+            {viewerLoadError && viewerGallery.length > 0 ? (
+              <div className="mb-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                部分源图未加载：{viewerLoadError}
+              </div>
+            ) : null}
+
             <div
-              className="relative h-[520px] overflow-hidden rounded-2xl border border-slate-200 bg-slate-50"
+              className="relative h-[520px] overflow-auto rounded-2xl border border-slate-200 bg-slate-50"
               onMouseDown={beginViewerDrag}
               onMouseMove={updateViewerDrag}
               onMouseUp={endViewerDrag}
               onMouseLeave={endViewerDrag}
             >
-              {viewerImageSrc ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  src={viewerImageSrc}
-                  alt={viewerImageName}
-                  className="h-full w-full object-contain select-none"
-                  draggable={false}
+              {viewerGalleryLoading && viewerGallery.length === 0 && !viewerLoadError ? (
+                <div className="flex h-full items-center justify-center text-sm text-slate-500">图片加载中…</div>
+              ) : viewerGallery.length > 0 ? (
+                <div
+                  className="inline-block min-w-full space-y-4 p-3"
                   style={{
                     transform: `translate(${viewerPan.x}px, ${viewerPan.y}px) scale(${viewerScale})`,
-                    transformOrigin: "center center",
+                    transformOrigin: "top center",
                     cursor: viewerScale > 1 ? (viewerDragState ? "grabbing" : "grab") : "default",
                   }}
-                />
+                >
+                  {viewerGallery.map((item) => (
+                    <div
+                      key={item.name}
+                      className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm"
+                    >
+                      <div className="border-b border-slate-100 bg-slate-50 px-3 py-1.5 text-xs font-medium text-slate-600">
+                        {item.name}
+                      </div>
+                      <div className="flex justify-center bg-slate-100/50 p-2">
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img
+                          src={item.src}
+                          alt={item.name}
+                          className="max-h-[min(480px,70vh)] w-auto max-w-full object-contain select-none"
+                          draggable={false}
+                        />
+                      </div>
+                    </div>
+                  ))}
+                </div>
               ) : viewerLoadError ? (
                 <div className="flex h-full items-center justify-center px-6 text-center text-sm text-rose-600">
                   {viewerLoadError}
                 </div>
               ) : (
-                <div className="flex h-full items-center justify-center text-sm text-slate-500">图片加载中...</div>
+                <div className="flex h-full items-center justify-center text-sm text-slate-500">图片加载中…</div>
               )}
             </div>
           </div>
