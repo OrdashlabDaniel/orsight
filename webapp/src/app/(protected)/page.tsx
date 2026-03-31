@@ -326,6 +326,18 @@ export default function Home() {
       .filter(Boolean);
   }
 
+  /** 业务键相同的多张图被合并为一条时，用于高亮该行（兼容仅有 imageName 拼接的旧数据） */
+  function isCrossImageMergedRow(record: PodRecord) {
+    if (record.mergedSourceCount != null && record.mergedSourceCount > 1) return true;
+    return getSourceImageNames(record).length > 1;
+  }
+
+  function mergedSourceImageCount(record: PodRecord) {
+    if (record.mergedSourceCount != null && record.mergedSourceCount > 1) return record.mergedSourceCount;
+    const n = getSourceImageNames(record).length;
+    return n > 1 ? n : 0;
+  }
+
   function getRecordIssues(record: PodRecord) {
     const sourceImageNames = getSourceImageNames(record);
     return issues.filter(
@@ -578,7 +590,7 @@ export default function Home() {
           ? `，已合并 ${organized.duplicateCount} 条跨图重复（不同截图中日期、路线、司机与收取数据完全一致）`
           : "";
       setNoticeMessage(
-        `AI 已完成识别，共生成 ${organized.records.length} 条记录${dedupeMessage}。批量识别已启用并发加速，默认使用 ${payload.modelUsed || primaryModelName}。`,
+        `AI 已完成识别，共生成 ${organized.records.length} 条记录${dedupeMessage}。批量识别已并发加速；每张图内训练池裁剪为并行、训练数据每请求只加载一次。默认模型 ${payload.modelUsed || primaryModelName}。`,
       );
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "识别失败。");
@@ -1227,8 +1239,12 @@ export default function Home() {
                           <tr
                             key={record.id}
                             id={`record-row-${record.id}`}
-                            className={`odd:bg-white even:bg-slate-50 ${
-                              needsManualAnnotation(record) ? "bg-rose-50/70" : ""
+                            className={`${
+                              needsManualAnnotation(record)
+                                ? "bg-rose-50/70"
+                                : isCrossImageMergedRow(record)
+                                  ? "bg-violet-50/60 odd:bg-violet-50/50 even:bg-violet-50/60"
+                                  : "odd:bg-white even:bg-slate-50"
                             } ${
                               activePopupRecordId === record.id
                                 ? "relative ring-2 ring-blue-400 ring-inset bg-blue-50/80"
@@ -1237,6 +1253,16 @@ export default function Home() {
                           >
                             <td className="border-b border-slate-200 px-3 py-2 align-top text-slate-600">
                               <div className="max-w-56 whitespace-pre-wrap break-words">{record.imageName}</div>
+                              {isCrossImageMergedRow(record) ? (
+                                <div className="mt-1 inline-flex max-w-full flex-wrap items-center gap-1">
+                                  <span className="inline-flex rounded-full bg-violet-100 px-2 py-0.5 text-xs font-medium text-violet-800">
+                                    跨图合并
+                                  </span>
+                                  <span className="text-xs text-violet-700">
+                                    {mergedSourceImageCount(record)} 张源图合并为一条
+                                  </span>
+                                </div>
+                              ) : null}
                               {recordNeedsReviewBadge(record) ? (
                                 <div className="mt-1 inline-flex rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-700">待复核</div>
                               ) : null}

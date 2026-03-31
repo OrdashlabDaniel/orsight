@@ -19,6 +19,7 @@ import {
   buildVisualReferencePack,
   loadTrainingExamples,
   loadGlobalRules,
+  type GlobalRules,
   type TrainingExample,
   type TrainingField,
 } from "@/lib/training";
@@ -28,6 +29,44 @@ const OPENAI_PRIMARY_MODEL = process.env.OPENAI_PRIMARY_MODEL || process.env.OPE
 const OPENAI_REVIEW_MODEL = process.env.OPENAI_REVIEW_MODEL || "gpt-5";
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_REASONING_EFFORT = process.env.OPENAI_REASONING_EFFORT || "minimal";
+
+/** 四次一致性识别次数；设为 3 可略提速，2 更快但更易不一致。默认 4。 */
+function getConsistencyAttemptCount(): number {
+  const raw = process.env.EXTRACT_CONSISTENCY_ATTEMPTS;
+  const n = raw ? Number.parseInt(raw, 10) : NaN;
+  if (Number.isFinite(n)) return Math.min(8, Math.max(2, n));
+  return 4;
+}
+
+type ExtractVisionContext = {
+  examples: TrainingExample[];
+  globalRules: GlobalRules;
+  visualPack: Awaited<ReturnType<typeof buildVisualReferencePack>>;
+  agentRefs: Awaited<ReturnType<typeof buildAgentThreadReferenceImages>>;
+};
+
+async function buildExtractVisionContext(): Promise<ExtractVisionContext> {
+  const examples = await loadTrainingExamples();
+  const globalRules = await loadGlobalRules();
+  const [visualPack, agentRefs] = await Promise.all([
+    buildVisualReferencePack(examples),
+    buildAgentThreadReferenceImages(globalRules.agentThread),
+  ]);
+  return { examples, globalRules, visualPack, agentRefs };
+}
+
+function mergeParallelRefineReasons(base: PodRecord, ...refined: PodRecord[]): string | null {
+  const parts = new Set<string>();
+  for (const s of (base.reviewReason || "").split("|").map((x) => x.trim()).filter(Boolean)) {
+    parts.add(s);
+  }
+  for (const r of refined) {
+    for (const s of (r.reviewReason || "").split("|").map((x) => x.trim()).filter(Boolean)) {
+      parts.add(s);
+    }
+  }
+  return parts.size ? Array.from(parts).join(" | ") : null;
+}
 
 // We'll load this asynchronously now per request
 // const TRAINING_EXAMPLES = loadTrainingExamples();
@@ -421,14 +460,153 @@ async function refinePODUnscannedFromTrainingCrop(
   };
 }
 
-async function callVisionModel(file: File, model: string): Promise<{ records: RawModelRecord[], imageType: string, usage?: any }> {
+async function refinePODExceptionsFromTrainingCrop(
+  file: File,
+  examples: TrainingExample[],
+  records: PodRecord[],
+  model: string,
+): Promise<{ records: PodRecord[]; usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } }> {
+  if (!OPENAI_API_KEY || records.length !== 1) return { records };
+  const box = medianFieldImageBox(examples, "exceptions");
+  if (!box) return { records };
+
+  const bytes = Buffer.from(await file.arrayBuffer());
+  const dataUrl = await cropRegionToDataUrl(bytes, box);
+  if (!dataUrl) return { records };
+
+  const prompt = `图中仅为签退/POD 屏幕上一小块裁剪，对应「错扫」「错分」「误扫」等异常件数（不是未领取、不是角标装饰）。
+只输出 JSON：{"exceptions": <非负整数>} 或 {"exceptions":null}。若无此类列或读不出，输出 null。`;
+
+  const body = {
+    model,
+    reasoning_effort: OPENAI_REASONING_EFFORT,
+    response_format: { type: "json_object" },
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: prompt },
+          { type: "image_url", image_url: { url: dataUrl } },
+        ] as OpenAIMessageContent[],
+      },
+    ],
+  };
+
+  const response = await fetch(`${OPENAI_BASE_URL}/chat/completions`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${OPENAI_API_KEY}`,
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) return { records };
+
+  const payload = (await response.json()) as {
+    choices?: Array<{ message?: { content?: string } }>;
+    usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+  };
+
+  const content = payload.choices?.[0]?.message?.content;
+  if (!content) return { records };
+
+  let parsed: { exceptions?: unknown };
+  try {
+    parsed = JSON.parse(content) as { exceptions?: unknown };
+  } catch {
+    return { records };
+  }
+
+  const rawEx = parsed?.exceptions;
+  if (rawEx === null || rawEx === undefined) return { records, usage: payload.usage };
+  const ex = normalizeNumber(rawEx);
+  if (ex === "" || typeof ex !== "number") return { records, usage: payload.usage };
+
+  const [rec] = records;
+  const hadEmpty = rec.exceptions === "";
+  const hadMismatch = rec.exceptions !== "" && rec.exceptions !== ex;
+  return {
+    records: [
+      {
+        ...rec,
+        exceptions: ex,
+        reviewRequired: hadMismatch || rec.reviewRequired,
+        reviewReason: hadMismatch
+          ? appendReviewReason(rec.reviewReason, "错扫数量已按训练池标注区域二次裁剪识别覆盖。")
+          : hadEmpty
+            ? appendReviewReason(rec.reviewReason, "错扫数量由训练池标注区域裁剪识别补全。")
+            : rec.reviewReason,
+      },
+    ],
+    usage: payload.usage,
+  };
+}
+
+async function runPODTrainingRefinesParallel(
+  file: File,
+  examples: TrainingExample[],
+  records: PodRecord[],
+  model: string,
+): Promise<{ records: PodRecord[]; usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } }> {
+  if (!OPENAI_API_KEY || records.length !== 1) return { records };
+  const base = records[0]!;
+
+  const emptyUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+
+  const [rRoute, rTotal, rUnscanned, rExceptions] = await Promise.all([
+    refinePODRouteFromTrainingCrop(file, examples, records, model),
+    refinePODTotalFromTrainingCrop(file, examples, records, model),
+    refinePODUnscannedFromTrainingCrop(file, examples, records, model),
+    refinePODExceptionsFromTrainingCrop(file, examples, records, model),
+  ]);
+
+  let u = mergeRefineUsage(emptyUsage, rRoute.usage);
+  u = mergeRefineUsage(u, rTotal.usage);
+  u = mergeRefineUsage(u, rUnscanned.usage);
+  u = mergeRefineUsage(u, rExceptions.usage);
+
+  const routeR = rRoute.records[0] ?? base;
+  const totalR = rTotal.records[0] ?? base;
+  const unscannedR = rUnscanned.records[0] ?? base;
+  const exceptionsR = rExceptions.records[0] ?? base;
+
+  const reviewRequired =
+    Boolean(base.reviewRequired) ||
+    Boolean(routeR.reviewRequired) ||
+    Boolean(totalR.reviewRequired) ||
+    Boolean(unscannedR.reviewRequired) ||
+    Boolean(exceptionsR.reviewRequired);
+
+  const reviewReason = mergeParallelRefineReasons(base, routeR, totalR, unscannedR, exceptionsR);
+
+  return {
+    records: [
+      {
+        ...base,
+        route: routeR.route,
+        total: totalR.total,
+        totalSourceLabel: totalR.totalSourceLabel,
+        unscanned: unscannedR.unscanned,
+        exceptions: exceptionsR.exceptions,
+        reviewRequired,
+        reviewReason,
+      },
+    ],
+    usage: u,
+  };
+}
+
+async function callVisionModel(
+  file: File,
+  model: string,
+  ctx: ExtractVisionContext,
+): Promise<{ records: RawModelRecord[]; imageType: string; usage?: any }> {
   if (!OPENAI_API_KEY) {
     throw new Error("Missing OPENAI_API_KEY. Please configure the AI model first.");
   }
 
-  const examples = await loadTrainingExamples();
-  const globalRules = await loadGlobalRules();
-  const visualPack = await buildVisualReferencePack(examples);
+  const { examples, globalRules, visualPack, agentRefs } = ctx;
   const bytes = Buffer.from(await file.arrayBuffer());
   const dataUrl = `data:${file.type || "image/jpeg"};base64,${bytes.toString("base64")}`;
 
@@ -440,7 +618,6 @@ async function callVisionModel(file: File, model: string): Promise<{ records: Ra
     userContent.push({ type: "image_url", image_url: { url: ref.dataUrl } });
   }
 
-  const agentRefs = await buildAgentThreadReferenceImages(globalRules.agentThread);
   for (const ref of agentRefs) {
     userContent.push({ type: "text", text: ref.caption });
     userContent.push({ type: "image_url", image_url: { url: ref.dataUrl } });
@@ -786,10 +963,10 @@ function applyCounterVerification(
   };
 }
 
-async function runConsistencyCheck(file: File, model: string) {
-  const attemptCount = 4;
+async function runConsistencyCheck(file: File, model: string, ctx: ExtractVisionContext) {
+  const attemptCount = getConsistencyAttemptCount();
   const attempts = await Promise.all(
-    Array.from({ length: attemptCount }, () => callVisionModel(file, model)),
+    Array.from({ length: attemptCount }, () => callVisionModel(file, model, ctx)),
   );
 
   // We assume the imageType is consistent across attempts, take the first one
@@ -879,7 +1056,8 @@ export async function POST(request: Request) {
     const records: PodRecord[] = [];
     const issues: ExtractionIssue[] = [];
 
-    const examples = await loadTrainingExamples();
+    const visionCtx = await buildExtractVisionContext();
+    const examples = visionCtx.examples;
     const validLabels = new Set<string>();
     for (const ex of examples) {
       if (ex.output.totalSourceLabel) {
@@ -892,24 +1070,22 @@ export async function POST(request: Request) {
     validLabels.add("运单数量");
 
     for (const file of files) {
-      const consistencyResult = await runConsistencyCheck(file, model);
+      const consistencyResult = await runConsistencyCheck(file, model, visionCtx);
       let workingRecords = consistencyResult.records;
 
       if (consistencyResult.imageType === "POD" && examples.length > 0) {
-        let u = consistencyResult.usage!;
-        const refinedRoute = await refinePODRouteFromTrainingCrop(file, examples, workingRecords, model);
-        workingRecords = refinedRoute.records;
-        u = mergeRefineUsage(u, refinedRoute.usage);
-
-        const refinedTotal = await refinePODTotalFromTrainingCrop(file, examples, workingRecords, model);
-        workingRecords = refinedTotal.records;
-        u = mergeRefineUsage(u, refinedTotal.usage);
-
-        const refinedUnscanned = await refinePODUnscannedFromTrainingCrop(file, examples, workingRecords, model);
-        workingRecords = refinedUnscanned.records;
-        u = mergeRefineUsage(u, refinedUnscanned.usage);
-
-        consistencyResult.usage = u;
+        const refined = await runPODTrainingRefinesParallel(file, examples, workingRecords, model);
+        workingRecords = refined.records;
+        if (refined.usage) {
+          consistencyResult.usage = mergeRefineUsage(
+            {
+              prompt_tokens: consistencyResult.usage?.prompt_tokens || 0,
+              completion_tokens: consistencyResult.usage?.completion_tokens || 0,
+              total_tokens: consistencyResult.usage?.total_tokens || 0,
+            },
+            refined.usage,
+          );
+        }
       }
 
       workingRecords = workingRecords.map(repairRouteVersusStationTeamRecord);
