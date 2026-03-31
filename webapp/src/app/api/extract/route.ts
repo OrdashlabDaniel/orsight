@@ -20,6 +20,7 @@ import {
   loadTrainingExamples,
   loadGlobalRules,
   type TrainingExample,
+  type TrainingField,
 } from "@/lib/training";
 
 const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || "https://api.openai.com/v1";
@@ -82,10 +83,10 @@ function medianOf(nums: number[]): number {
   return s[Math.floor(s.length / 2)]!;
 }
 
-/** Median bitmap-normalized box for field `route` across training examples (for Sharp crop). */
-function medianRouteImageBox(examples: TrainingExample[]): CropRegion | null {
+/** Median bitmap-normalized box for a field across training examples (for Sharp crop). */
+function medianFieldImageBox(examples: TrainingExample[], field: TrainingField): CropRegion | null {
   const boxes = examples.flatMap((ex) =>
-    (ex.boxes || []).filter((b) => b.field === "route" && b.coordSpace === "image"),
+    (ex.boxes || []).filter((b) => b.field === field && b.coordSpace === "image"),
   );
   if (boxes.length === 0) return null;
   return {
@@ -93,6 +94,58 @@ function medianRouteImageBox(examples: TrainingExample[]): CropRegion | null {
     y: medianOf(boxes.map((b) => b.y)),
     width: medianOf(boxes.map((b) => b.width)),
     height: medianOf(boxes.map((b) => b.height)),
+  };
+}
+
+function mostCommonTotalSourceLabel(examples: TrainingExample[]): string {
+  const counts = new Map<string, number>();
+  for (const ex of examples) {
+    const l = ex.output.totalSourceLabel?.trim();
+    if (l) counts.set(l, (counts.get(l) || 0) + 1);
+  }
+  let best = "应领件数";
+  let n = 0;
+  for (const [k, v] of counts) {
+    if (v > n) {
+      n = v;
+      best = k;
+    }
+  }
+  return best;
+}
+
+async function cropRegionToDataUrl(bytes: Buffer, box: CropRegion, pad = 0.02): Promise<string | null> {
+  const meta = await sharp(bytes).metadata();
+  const iw = meta.width ?? 0;
+  const ih = meta.height ?? 0;
+  if (!iw || !ih) return null;
+  const x0 = Math.max(0, box.x - pad);
+  const y0 = Math.max(0, box.y - pad);
+  const x1 = Math.min(1, box.x + box.width + pad);
+  const y1 = Math.min(1, box.y + box.height + pad);
+  const w = Math.max(0.01, x1 - x0);
+  const h = Math.max(0.01, y1 - y0);
+  const left = Math.floor(x0 * iw);
+  const top = Math.floor(y0 * ih);
+  const width = Math.max(1, Math.floor(w * iw));
+  const height = Math.max(1, Math.floor(h * ih));
+  try {
+    const cropBuf = await sharp(bytes).extract({ left, top, width, height }).png().toBuffer();
+    return `data:image/png;base64,${cropBuf.toString("base64")}`;
+  } catch {
+    return null;
+  }
+}
+
+function mergeRefineUsage(
+  base: { prompt_tokens: number; completion_tokens: number; total_tokens: number },
+  add?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number },
+) {
+  if (!add) return base;
+  return {
+    prompt_tokens: base.prompt_tokens + (add.prompt_tokens || 0),
+    completion_tokens: base.completion_tokens + (add.completion_tokens || 0),
+    total_tokens: base.total_tokens + (add.total_tokens || 0),
   };
 }
 
@@ -122,34 +175,12 @@ async function refinePODRouteFromTrainingCrop(
   model: string,
 ): Promise<{ records: PodRecord[]; usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } }> {
   if (!OPENAI_API_KEY || records.length !== 1) return { records };
-  const box = medianRouteImageBox(examples);
+  const box = medianFieldImageBox(examples, "route");
   if (!box) return { records };
 
   const bytes = Buffer.from(await file.arrayBuffer());
-  const meta = await sharp(bytes).metadata();
-  const iw = meta.width ?? 0;
-  const ih = meta.height ?? 0;
-  if (!iw || !ih) return { records };
-
-  const pad = 0.02;
-  const x0 = Math.max(0, box.x - pad);
-  const y0 = Math.max(0, box.y - pad);
-  const x1 = Math.min(1, box.x + box.width + pad);
-  const y1 = Math.min(1, box.y + box.height + pad);
-  const w = Math.max(0.01, x1 - x0);
-  const h = Math.max(0.01, y1 - y0);
-  const left = Math.floor(x0 * iw);
-  const top = Math.floor(y0 * ih);
-  const width = Math.max(1, Math.floor(w * iw));
-  const height = Math.max(1, Math.floor(h * ih));
-
-  let cropBuf: Buffer;
-  try {
-    cropBuf = await sharp(bytes).extract({ left, top, width, height }).png().toBuffer();
-  } catch {
-    return { records };
-  }
-  const dataUrl = `data:image/png;base64,${cropBuf.toString("base64")}`;
+  const dataUrl = await cropRegionToDataUrl(bytes, box);
+  if (!dataUrl) return { records };
 
   const prompt = `图中仅为签退/POD 类屏幕的一小块裁剪，对应「快递员路线 / 抽查路线」文本区域。请只 OCR 图中可见的路线编码（典型形如 IAH01-030-C，含 IAH 后两位区域数字）。
 不要输出站点车队样式（如单独的 IAH-BAA、IAH-FGI 等三字母段）。若图中没有此类路线编码，输出 {"route":null}。
@@ -215,6 +246,175 @@ async function refinePODRouteFromTrainingCrop(
         reviewReason: hadBadRoute
           ? appendReviewReason(rec.reviewReason, "抽查路线已按训练池标注区域二次裁剪识别覆盖。")
           : rec.reviewReason,
+      },
+    ],
+    usage: payload.usage,
+  };
+}
+
+async function refinePODTotalFromTrainingCrop(
+  file: File,
+  examples: TrainingExample[],
+  records: PodRecord[],
+  model: string,
+): Promise<{ records: PodRecord[]; usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } }> {
+  if (!OPENAI_API_KEY || records.length !== 1) return { records };
+  const box = medianFieldImageBox(examples, "total");
+  if (!box) return { records };
+
+  const bytes = Buffer.from(await file.arrayBuffer());
+  const dataUrl = await cropRegionToDataUrl(bytes, box);
+  if (!dataUrl) return { records };
+
+  const fallbackLabel = mostCommonTotalSourceLabel(examples);
+  const prompt = `图中仅为签退/POD 屏幕上一小块裁剪，对应训练池中标注的「运单数量」相关区域（常见标签：应领件数、应收件数、运单数量等）。
+请只根据图中**可见像素**读取与上述标签直接对应的**一个非负整数**；若图中有标签文字，请一并读出（尽量与图中文字一致）。
+若无法读出整数，输出 {"total":null,"totalSourceLabel":null}。
+只输出一个 JSON 对象，键为 total（整数或 null）、totalSourceLabel（字符串或 null）。不要输出其它文字。`;
+
+  const body = {
+    model,
+    reasoning_effort: OPENAI_REASONING_EFFORT,
+    response_format: { type: "json_object" },
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: prompt },
+          { type: "image_url", image_url: { url: dataUrl } },
+        ] as OpenAIMessageContent[],
+      },
+    ],
+  };
+
+  const response = await fetch(`${OPENAI_BASE_URL}/chat/completions`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${OPENAI_API_KEY}`,
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) return { records };
+
+  const payload = (await response.json()) as {
+    choices?: Array<{ message?: { content?: string } }>;
+    usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+  };
+
+  const content = payload.choices?.[0]?.message?.content;
+  if (!content) return { records };
+
+  let parsed: { total?: unknown; totalSourceLabel?: unknown };
+  try {
+    parsed = JSON.parse(content) as { total?: unknown; totalSourceLabel?: unknown };
+  } catch {
+    return { records };
+  }
+
+  const total = normalizeNumber(parsed?.total);
+  if (total === "" || typeof total !== "number") return { records, usage: payload.usage };
+
+  let label = normalizeText(parsed?.totalSourceLabel);
+  if (!label) label = fallbackLabel;
+
+  const [rec] = records;
+  const hadEmpty = rec.total === "";
+  const hadMismatch = rec.total !== "" && rec.total !== total;
+  return {
+    records: [
+      {
+        ...rec,
+        total,
+        totalSourceLabel: label,
+        reviewRequired: hadMismatch || rec.reviewRequired,
+        reviewReason: hadMismatch
+          ? appendReviewReason(rec.reviewReason, "运单数量已按训练池标注区域二次裁剪识别覆盖。")
+          : hadEmpty
+            ? appendReviewReason(rec.reviewReason, "运单数量由训练池标注区域裁剪识别补全。")
+            : rec.reviewReason,
+      },
+    ],
+    usage: payload.usage,
+  };
+}
+
+async function refinePODUnscannedFromTrainingCrop(
+  file: File,
+  examples: TrainingExample[],
+  records: PodRecord[],
+  model: string,
+): Promise<{ records: PodRecord[]; usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } }> {
+  if (!OPENAI_API_KEY || records.length !== 1) return { records };
+  const box = medianFieldImageBox(examples, "unscanned");
+  if (!box) return { records };
+
+  const bytes = Buffer.from(await file.arrayBuffer());
+  const dataUrl = await cropRegionToDataUrl(bytes, box);
+  if (!dataUrl) return { records };
+
+  const prompt = `图中仅为签退/POD 屏幕上一小块裁剪，对应「未领取」「未收」或未收数量相关数字。
+只输出 JSON：{"unscanned": <非负整数>} 或 {"unscanned":null}。不要猜测图中没有的数字。`;
+
+  const body = {
+    model,
+    reasoning_effort: OPENAI_REASONING_EFFORT,
+    response_format: { type: "json_object" },
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: prompt },
+          { type: "image_url", image_url: { url: dataUrl } },
+        ] as OpenAIMessageContent[],
+      },
+    ],
+  };
+
+  const response = await fetch(`${OPENAI_BASE_URL}/chat/completions`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${OPENAI_API_KEY}`,
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) return { records };
+
+  const payload = (await response.json()) as {
+    choices?: Array<{ message?: { content?: string } }>;
+    usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+  };
+
+  const content = payload.choices?.[0]?.message?.content;
+  if (!content) return { records };
+
+  let parsed: { unscanned?: unknown };
+  try {
+    parsed = JSON.parse(content) as { unscanned?: unknown };
+  } catch {
+    return { records };
+  }
+
+  const unscanned = normalizeNumber(parsed?.unscanned);
+  if (unscanned === "" || typeof unscanned !== "number") return { records, usage: payload.usage };
+
+  const [rec] = records;
+  const hadEmpty = rec.unscanned === "";
+  const hadMismatch = rec.unscanned !== "" && rec.unscanned !== unscanned;
+  return {
+    records: [
+      {
+        ...rec,
+        unscanned,
+        reviewRequired: hadMismatch || rec.reviewRequired,
+        reviewReason: hadMismatch
+          ? appendReviewReason(rec.reviewReason, "未收数量已按训练池标注区域二次裁剪识别覆盖。")
+          : hadEmpty
+            ? appendReviewReason(rec.reviewReason, "未收数量由训练池标注区域裁剪识别补全。")
+            : rec.reviewReason,
       },
     ],
     usage: payload.usage,
@@ -485,6 +685,7 @@ function applyCounterVerification(
   fileName: string,
   records: PodRecord[],
   verification: CounterVerificationResult,
+  validLabels: Set<string>,
 ) {
   const issues: ExtractionIssue[] = [];
   const expectedCount = toNullableNumber(verification.expectedCount);
@@ -495,7 +696,16 @@ function applyCounterVerification(
   const nextRecords = records.map((record) => {
     let nextRecord = record;
 
-    if (record.total !== "" && (!expectedCountVisible || expectedCount === null)) {
+    const sourceLabelNorm = nextRecord.totalSourceLabel?.trim() ?? "";
+    const totalLabelTrusted =
+      validLabels.size > 0 && sourceLabelNorm !== "" && validLabels.has(sourceLabelNorm);
+
+    // 固定裁剪区读不到应领件数时，若运单数量已由主模型/训练池裁剪给出且来源标签在训练池合法列表中，则保留，避免误清空
+    if (
+      nextRecord.total !== "" &&
+      (!expectedCountVisible || expectedCount === null) &&
+      !totalLabelTrusted
+    ) {
       nextRecord = {
         ...nextRecord,
         total: "" as const,
@@ -514,14 +724,15 @@ function applyCounterVerification(
       });
     }
 
-    if (record.total !== "" && expectedCount !== null && record.total !== expectedCount) {
+    if (nextRecord.total !== "" && expectedCount !== null && nextRecord.total !== expectedCount) {
+      const prevTotal = nextRecord.total;
       nextRecord = {
         ...nextRecord,
         total: "" as const,
         reviewRequired: true,
         reviewReason: appendReviewReason(
           nextRecord.reviewReason,
-          `运单数量与应领件数不一致：当前为 ${record.total}，应领件数为 ${expectedCount}。`,
+          `运单数量与应领件数不一致：当前为 ${prevTotal}，应领件数为 ${expectedCount}。`,
         ),
       };
       issues.push({
@@ -529,14 +740,15 @@ function applyCounterVerification(
         route: record.route,
         level: "error",
         code: "total_conflicts_expected",
-        message: `运单数量与应领件数不一致：当前为 ${record.total}，应领件数为 ${expectedCount}。`,
+        message: `运单数量与应领件数不一致：当前为 ${prevTotal}，应领件数为 ${expectedCount}。`,
       });
     }
 
     if (
-      record.total !== "" &&
+      nextRecord.total !== "" &&
       expectedCount === null &&
-      ((actualCount !== null && record.total === actualCount) || (pickedUpCount !== null && record.total === pickedUpCount))
+      ((actualCount !== null && nextRecord.total === actualCount) ||
+        (pickedUpCount !== null && nextRecord.total === pickedUpCount))
     ) {
       nextRecord = {
         ...nextRecord,
@@ -554,6 +766,15 @@ function applyCounterVerification(
         code: "total_matches_wrong_counter",
         message: "运单数量疑似取自实领件数或已领，而不是应领件数。",
       });
+    }
+
+    // 主模型与训练裁剪均未给出运单数量时，若固定裁剪区能稳定读到应领件数，则补全（标签与训练池默认一致）
+    if (nextRecord.total === "" && expectedCount !== null && expectedCountVisible) {
+      nextRecord = {
+        ...nextRecord,
+        total: expectedCount,
+        totalSourceLabel: nextRecord.totalSourceLabel || "应领件数",
+      };
     }
 
     return nextRecord;
@@ -667,6 +888,7 @@ export async function POST(request: Request) {
     }
     // Also add some default valid labels just in case
     validLabels.add("应领件数");
+    validLabels.add("应收件数");
     validLabels.add("运单数量");
 
     for (const file of files) {
@@ -674,15 +896,20 @@ export async function POST(request: Request) {
       let workingRecords = consistencyResult.records;
 
       if (consistencyResult.imageType === "POD" && examples.length > 0) {
-        const refined = await refinePODRouteFromTrainingCrop(file, examples, workingRecords, model);
-        workingRecords = refined.records;
-        if (refined.usage) {
-          consistencyResult.usage = {
-            prompt_tokens: (consistencyResult.usage?.prompt_tokens || 0) + (refined.usage.prompt_tokens || 0),
-            completion_tokens: (consistencyResult.usage?.completion_tokens || 0) + (refined.usage.completion_tokens || 0),
-            total_tokens: (consistencyResult.usage?.total_tokens || 0) + (refined.usage.total_tokens || 0),
-          };
-        }
+        let u = consistencyResult.usage!;
+        const refinedRoute = await refinePODRouteFromTrainingCrop(file, examples, workingRecords, model);
+        workingRecords = refinedRoute.records;
+        u = mergeRefineUsage(u, refinedRoute.usage);
+
+        const refinedTotal = await refinePODTotalFromTrainingCrop(file, examples, workingRecords, model);
+        workingRecords = refinedTotal.records;
+        u = mergeRefineUsage(u, refinedTotal.usage);
+
+        const refinedUnscanned = await refinePODUnscannedFromTrainingCrop(file, examples, workingRecords, model);
+        workingRecords = refinedUnscanned.records;
+        u = mergeRefineUsage(u, refinedUnscanned.usage);
+
+        consistencyResult.usage = u;
       }
 
       workingRecords = workingRecords.map(repairRouteVersusStationTeamRecord);
@@ -698,7 +925,12 @@ export async function POST(request: Request) {
       // Only run counter verification for POD images
       if (consistencyResult.imageType === "POD") {
         const counterVerification = await callCounterVerifier(file, model);
-        const counterChecked = applyCounterVerification(file.name, sourceCheckedRecords, counterVerification.result);
+        const counterChecked = applyCounterVerification(
+          file.name,
+          sourceCheckedRecords,
+          counterVerification.result,
+          validLabels,
+        );
         checkedRecords = counterChecked.records;
         counterIssues = counterChecked.issues;
         

@@ -354,6 +354,14 @@ export default function Home() {
     return record.reviewRequired || getRecordIssues(record).length > 0;
   }
 
+  /** 与「待复核」徽章对齐：服务端校验错误也应提示人工复核 */
+  function recordNeedsReviewBadge(record: PodRecord) {
+    return (
+      record.reviewRequired ||
+      getRecordIssues(record).some((issue) => issue.level === "error")
+    );
+  }
+
   function closeRecordPopup() {
     setAnnotatingRecord(null);
     setAnnotationImageName("");
@@ -1229,7 +1237,7 @@ export default function Home() {
                           >
                             <td className="border-b border-slate-200 px-3 py-2 align-top text-slate-600">
                               <div className="max-w-56 whitespace-pre-wrap break-words">{record.imageName}</div>
-                              {record.reviewRequired ? (
+                              {recordNeedsReviewBadge(record) ? (
                                 <div className="mt-1 inline-flex rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-700">待复核</div>
                               ) : null}
                               {hasConsistencyMismatch(record) ? (

@@ -187,6 +187,16 @@ export function validateRecord(record: PodRecord): ExtractionIssue[] {
     if (value === "" && !required) {
       continue;
     }
+    if (required && value === "") {
+      issues.push({
+        imageName: record.imageName,
+        route: record.route,
+        message: `缺少${label}。`,
+        level: "error",
+        code: field === "total" ? "missing_total" : field === "unscanned" ? "missing_unscanned" : undefined,
+      });
+      continue;
+    }
     if (value !== "" && (typeof value !== "number" || value < 0)) {
       issues.push({
         imageName: record.imageName,
