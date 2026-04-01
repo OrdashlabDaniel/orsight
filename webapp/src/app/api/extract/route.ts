@@ -17,6 +17,7 @@ import {
   buildAgentThreadReferenceImages,
   buildTrainingPromptSection,
   buildVisualReferencePack,
+  getTrainingImageDataUrl,
   loadTrainingExamples,
   loadGlobalRules,
   type GlobalRules,
@@ -43,16 +44,18 @@ type ExtractVisionContext = {
   globalRules: GlobalRules;
   visualPack: Awaited<ReturnType<typeof buildVisualReferencePack>>;
   agentRefs: Awaited<ReturnType<typeof buildAgentThreadReferenceImages>>;
+  imageGuidance: Array<{ example: TrainingExample; fingerprint: number[] }>;
 };
 
 async function buildExtractVisionContext(): Promise<ExtractVisionContext> {
   const examples = await loadTrainingExamples();
   const globalRules = await loadGlobalRules();
-  const [visualPack, agentRefs] = await Promise.all([
+  const [visualPack, agentRefs, imageGuidance] = await Promise.all([
     buildVisualReferencePack(examples),
     buildAgentThreadReferenceImages(globalRules.agentThread),
+    buildTrainingImageGuidance(examples),
   ]);
-  return { examples, globalRules, visualPack, agentRefs };
+  return { examples, globalRules, visualPack, agentRefs, imageGuidance };
 }
 
 function mergeParallelRefineReasons(base: PodRecord, ...refined: PodRecord[]): string | null {
@@ -104,6 +107,11 @@ type OpenAIUsage = {
   total_tokens?: number;
 };
 
+type FingerprintedTrainingExample = {
+  example: TrainingExample;
+  fingerprint: number[];
+};
+
 type CropRegion = {
   x: number;
   y: number;
@@ -126,6 +134,86 @@ function medianOf(nums: number[]): number {
   if (nums.length === 0) return 0;
   const s = [...nums].sort((a, b) => a - b);
   return s[Math.floor(s.length / 2)]!;
+}
+
+function hasImageCoordBoxes(example: TrainingExample): boolean {
+  return Boolean(example.boxes?.some((box) => box.coordSpace === "image"));
+}
+
+function parseDataUrlToBuffer(dataUrl: string): Buffer | null {
+  const matched = dataUrl.match(/^data:(.+);base64,(.+)$/);
+  if (!matched) return null;
+  try {
+    return Buffer.from(matched[2]!, "base64");
+  } catch {
+    return null;
+  }
+}
+
+async function imageFingerprintFromBuffer(bytes: Buffer): Promise<number[]> {
+  const raw = await sharp(bytes)
+    .rotate()
+    .resize(24, 24, { fit: "fill" })
+    .grayscale()
+    .raw()
+    .toBuffer();
+  return Array.from(raw, (value) => value / 255);
+}
+
+async function buildTrainingImageGuidance(examples: TrainingExample[]): Promise<FingerprintedTrainingExample[]> {
+  const candidates = examples.filter(hasImageCoordBoxes);
+  const loaded = await Promise.all(
+    candidates.map(async (example) => {
+      const dataUrl = await getTrainingImageDataUrl(example.imageName);
+      if (!dataUrl) return null;
+      const bytes = parseDataUrlToBuffer(dataUrl);
+      if (!bytes) return null;
+      try {
+        const fingerprint = await imageFingerprintFromBuffer(bytes);
+        return { example, fingerprint };
+      } catch {
+        return null;
+      }
+    }),
+  );
+
+  return loaded.filter((item): item is FingerprintedTrainingExample => Boolean(item));
+}
+
+function fingerprintDistance(left: number[], right: number[]): number {
+  const n = Math.min(left.length, right.length);
+  if (n === 0) return Number.POSITIVE_INFINITY;
+  let total = 0;
+  for (let i = 0; i < n; i++) {
+    total += Math.abs(left[i]! - right[i]!);
+  }
+  return total / n;
+}
+
+async function selectMostSimilarTrainingExamples(
+  file: File,
+  ctx: ExtractVisionContext,
+  limit = 3,
+): Promise<TrainingExample[]> {
+  if (ctx.imageGuidance.length === 0) {
+    return ctx.examples;
+  }
+
+  try {
+    const bytes = Buffer.from(await file.arrayBuffer());
+    const currentFingerprint = await imageFingerprintFromBuffer(bytes);
+    const ranked = [...ctx.imageGuidance]
+      .map((item) => ({
+        example: item.example,
+        distance: fingerprintDistance(currentFingerprint, item.fingerprint),
+      }))
+      .sort((left, right) => left.distance - right.distance);
+
+    const similar = ranked.slice(0, limit).map((item) => item.example);
+    return similar.length > 0 ? similar : ctx.examples;
+  } catch {
+    return ctx.examples;
+  }
 }
 
 /** Median bitmap-normalized box for a field across training examples (for Sharp crop). */
@@ -157,6 +245,42 @@ function mostCommonTotalSourceLabel(examples: TrainingExample[]): string {
     }
   }
   return best;
+}
+
+function clearFieldFromTrainingMismatch(
+  record: PodRecord,
+  field: "route" | "total" | "unscanned" | "exceptions",
+  label: string,
+  reason: string,
+): PodRecord {
+  if (field === "route") {
+    if (!record.route.trim()) return record;
+    return {
+      ...record,
+      route: "",
+      reviewRequired: true,
+      reviewReason: appendReviewReason(record.reviewReason, `${label} 未能被训练池标注区域确认：${reason}`),
+    };
+  }
+
+  if (field === "total") {
+    if (record.total === "") return record;
+    return {
+      ...record,
+      total: "" as const,
+      totalSourceLabel: "",
+      reviewRequired: true,
+      reviewReason: appendReviewReason(record.reviewReason, `${label} 未能被训练池标注区域确认：${reason}`),
+    };
+  }
+
+  if (record[field] === "") return record;
+  return {
+    ...record,
+    [field]: "" as const,
+    reviewRequired: true,
+    reviewReason: appendReviewReason(record.reviewReason, `${label} 未能被训练池标注区域确认：${reason}`),
+  };
 }
 
 async function cropRegionToDataUrl(bytes: Buffer, box: CropRegion, pad = 0.02): Promise<string | null> {
@@ -275,10 +399,21 @@ async function refinePODRouteFromTrainingCrop(
   }
 
   const routeRaw = parsed?.route;
-  if (routeRaw === null || routeRaw === undefined) return { records, usage: payload.usage };
+  if (routeRaw === null || routeRaw === undefined) {
+    const [rec] = records;
+    return {
+      records: [clearFieldFromTrainingMismatch(rec, "route", "抽查路线", "裁剪区域未读到有效路线编码。")],
+      usage: payload.usage,
+    };
+  }
   const route = normalizeText(String(routeRaw));
-  if (!route || route.toLowerCase() === "null") return { records, usage: payload.usage };
-  if (!isRouteFormatValid(route)) return { records, usage: payload.usage };
+  if (!route || route.toLowerCase() === "null" || !isRouteFormatValid(route)) {
+    const [rec] = records;
+    return {
+      records: [clearFieldFromTrainingMismatch(rec, "route", "抽查路线", "裁剪区域结果不符合有效路线格式。")],
+      usage: payload.usage,
+    };
+  }
 
   const [rec] = records;
   const hadBadRoute = Boolean(rec.route.trim()) && !isRouteFormatValid(rec.route);
@@ -359,7 +494,13 @@ async function refinePODTotalFromTrainingCrop(
   }
 
   const total = normalizeNumber(parsed?.total);
-  if (total === "" || typeof total !== "number") return { records, usage: payload.usage };
+  if (total === "" || typeof total !== "number") {
+    const [rec] = records;
+    return {
+      records: [clearFieldFromTrainingMismatch(rec, "total", "运单数量", "裁剪区域未读到稳定数字。")],
+      usage: payload.usage,
+    };
+  }
 
   let label = normalizeText(parsed?.totalSourceLabel);
   if (!label) label = fallbackLabel;
@@ -444,7 +585,13 @@ async function refinePODUnscannedFromTrainingCrop(
   }
 
   const unscanned = normalizeNumber(parsed?.unscanned);
-  if (unscanned === "" || typeof unscanned !== "number") return { records, usage: payload.usage };
+  if (unscanned === "" || typeof unscanned !== "number") {
+    const [rec] = records;
+    return {
+      records: [clearFieldFromTrainingMismatch(rec, "unscanned", "未收数量", "裁剪区域未读到稳定数字。")],
+      usage: payload.usage,
+    };
+  }
 
   const [rec] = records;
   const hadEmpty = rec.unscanned === "";
@@ -525,9 +672,21 @@ async function refinePODExceptionsFromTrainingCrop(
   }
 
   const rawEx = parsed?.exceptions;
-  if (rawEx === null || rawEx === undefined) return { records, usage: payload.usage };
+  if (rawEx === null || rawEx === undefined) {
+    const [rec] = records;
+    return {
+      records: [clearFieldFromTrainingMismatch(rec, "exceptions", "错扫数量", "裁剪区域未读到稳定数字。")],
+      usage: payload.usage,
+    };
+  }
   const ex = normalizeNumber(rawEx);
-  if (ex === "" || typeof ex !== "number") return { records, usage: payload.usage };
+  if (ex === "" || typeof ex !== "number") {
+    const [rec] = records;
+    return {
+      records: [clearFieldFromTrainingMismatch(rec, "exceptions", "错扫数量", "裁剪区域结果不是有效数字。")],
+      usage: payload.usage,
+    };
+  }
 
   const [rec] = records;
   const hadEmpty = rec.exceptions === "";
@@ -1176,9 +1335,10 @@ export async function POST(request: Request) {
     for (const file of files) {
       const consistencyResult = await runConsistencyCheck(file, model, visionCtx);
       let workingRecords = consistencyResult.records;
+      const similarExamples = await selectMostSimilarTrainingExamples(file, visionCtx);
 
-      if (consistencyResult.imageType === "POD" && examples.length > 0) {
-        const refined = await runPODTrainingRefinesParallel(file, examples, workingRecords, model);
+      if (consistencyResult.imageType === "POD" && similarExamples.length > 0) {
+        const refined = await runPODTrainingRefinesParallel(file, similarExamples, workingRecords, model);
         workingRecords = refined.records;
         if (refined.usage) {
           consistencyResult.usage = mergeRefineUsage(
