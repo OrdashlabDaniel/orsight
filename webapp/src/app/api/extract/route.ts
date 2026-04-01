@@ -98,6 +98,12 @@ type CounterVerificationResult = {
   pickedUpVisible?: unknown;
 };
 
+type OpenAIUsage = {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  total_tokens?: number;
+};
+
 type CropRegion = {
   x: number;
   y: number;
@@ -601,7 +607,7 @@ async function callVisionModel(
   file: File,
   model: string,
   ctx: ExtractVisionContext,
-): Promise<{ records: RawModelRecord[]; imageType: string; usage?: any }> {
+): Promise<{ records: RawModelRecord[]; imageType: string; usage?: OpenAIUsage }> {
   if (!OPENAI_API_KEY) {
     throw new Error("Missing OPENAI_API_KEY. Please configure the AI model first.");
   }
@@ -661,7 +667,7 @@ async function callVisionModel(
         content?: string;
       };
     }>;
-    usage?: any;
+    usage?: OpenAIUsage;
   };
 
   const content = payload.choices?.[0]?.message?.content;
@@ -683,7 +689,10 @@ async function callVisionModel(
   };
 }
 
-async function callCounterVerifier(file: File, model: string): Promise<{ result: CounterVerificationResult, usage?: any }> {
+async function callCounterVerifier(
+  file: File,
+  model: string,
+): Promise<{ result: CounterVerificationResult; usage?: OpenAIUsage }> {
   if (!OPENAI_API_KEY) {
     throw new Error("Missing OPENAI_API_KEY. Please configure the AI model first.");
   }
@@ -765,7 +774,7 @@ async function callCounterVerifier(file: File, model: string): Promise<{ result:
         content?: string;
       };
     }>;
-    usage?: any;
+    usage?: OpenAIUsage;
   };
 
   const content = payload.choices?.[0]?.message?.content;
@@ -856,6 +865,101 @@ function toNullableNumber(value: unknown) {
 
 function toBoolean(value: unknown) {
   return value === true;
+}
+
+const MAX_REASONABLE_POD_COUNT = 9999;
+
+function sanitizePodCountField(
+  record: PodRecord,
+  fileName: string,
+  field: "total" | "unscanned" | "exceptions",
+  label: string,
+  issues: ExtractionIssue[],
+): PodRecord {
+  const value = record[field];
+  if (value === "") {
+    return record;
+  }
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return record;
+  }
+  if (value <= MAX_REASONABLE_POD_COUNT) {
+    return record;
+  }
+
+  issues.push({
+    imageName: fileName,
+    route: record.route,
+    level: "error",
+    code: `${field}_out_of_range`,
+    message: `${label} 识别为异常大数值 ${value}，已清空并标记人工复核。`,
+  });
+  return {
+    ...record,
+    [field]: "" as const,
+    reviewRequired: true,
+    reviewReason: appendReviewReason(
+      record.reviewReason,
+      `${label} 识别结果异常偏大（${value}），疑似误读到时间戳、文件名或无关长数字，已清空待复核。`,
+    ),
+  };
+}
+
+function applyRecordSanityChecks(fileName: string, records: PodRecord[]) {
+  const issues: ExtractionIssue[] = [];
+
+  const nextRecords = records.map((record) => {
+    let nextRecord = record;
+
+    nextRecord = sanitizePodCountField(nextRecord, fileName, "total", "运单数量", issues);
+    nextRecord = sanitizePodCountField(nextRecord, fileName, "unscanned", "未收数量", issues);
+    nextRecord = sanitizePodCountField(nextRecord, fileName, "exceptions", "错扫数量", issues);
+
+    if (nextRecord.total !== "" && nextRecord.unscanned !== "" && nextRecord.unscanned > nextRecord.total) {
+      issues.push({
+        imageName: fileName,
+        route: nextRecord.route,
+        level: "error",
+        code: "unscanned_exceeds_total",
+        message: `未收数量 ${nextRecord.unscanned} 大于运单数量 ${nextRecord.total}，已清空未收数量并标记复核。`,
+      });
+      nextRecord = {
+        ...nextRecord,
+        unscanned: "" as const,
+        reviewRequired: true,
+        reviewReason: appendReviewReason(
+          nextRecord.reviewReason,
+          `未收数量大于运单数量（${nextRecord.unscanned} > ${nextRecord.total}），疑似误读，已清空待复核。`,
+        ),
+      };
+    }
+
+    if (nextRecord.total !== "" && nextRecord.exceptions !== "" && nextRecord.exceptions > nextRecord.total) {
+      issues.push({
+        imageName: fileName,
+        route: nextRecord.route,
+        level: "error",
+        code: "exceptions_exceeds_total",
+        message: `错扫数量 ${nextRecord.exceptions} 大于运单数量 ${nextRecord.total}，已清空错扫数量并标记复核。`,
+      });
+      nextRecord = {
+        ...nextRecord,
+        exceptions: "" as const,
+        reviewRequired: true,
+        reviewReason: appendReviewReason(
+          nextRecord.reviewReason,
+          `错扫数量大于运单数量（${nextRecord.exceptions} > ${nextRecord.total}），疑似误读，已清空待复核。`,
+        ),
+      };
+    }
+
+    return nextRecord;
+  });
+
+  return {
+    records: nextRecords,
+    issues,
+  };
 }
 
 function applyCounterVerification(
@@ -1091,8 +1195,9 @@ export async function POST(request: Request) {
       workingRecords = workingRecords.map(repairRouteVersusStationTeamRecord);
       const sourceCheckedRecords = markSourceMismatchForReview(workingRecords, validLabels);
 
-      let checkedRecords = sourceCheckedRecords;
-      let counterIssues: ExtractionIssue[] = [];
+      const sanityChecked = applyRecordSanityChecks(file.name, sourceCheckedRecords);
+      let checkedRecords = sanityChecked.records;
+      let counterIssues: ExtractionIssue[] = sanityChecked.issues;
 
       let totalPromptTokens = consistencyResult.usage?.prompt_tokens || 0;
       let totalCompletionTokens = consistencyResult.usage?.completion_tokens || 0;
@@ -1103,12 +1208,12 @@ export async function POST(request: Request) {
         const counterVerification = await callCounterVerifier(file, model);
         const counterChecked = applyCounterVerification(
           file.name,
-          sourceCheckedRecords,
+          checkedRecords,
           counterVerification.result,
           validLabels,
         );
         checkedRecords = counterChecked.records;
-        counterIssues = counterChecked.issues;
+        counterIssues = [...counterIssues, ...counterChecked.issues];
         
         if (counterVerification.usage) {
           totalPromptTokens += counterVerification.usage.prompt_tokens || 0;

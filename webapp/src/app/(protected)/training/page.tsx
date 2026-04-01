@@ -123,7 +123,7 @@ export default function TrainingMode() {
       });
       if (!res.ok) throw new Error("保存失败");
       setNoticeMessage("填表工作规则已保存，将在下次识别时生效。");
-    } catch (e) {
+    } catch {
       setErrorMessage("保存工作规则失败。");
     } finally {
       setIsSavingRules(false);
