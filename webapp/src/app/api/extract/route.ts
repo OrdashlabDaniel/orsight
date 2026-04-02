@@ -17,10 +17,12 @@ import {
   buildAgentThreadReferenceImages,
   buildTrainingPromptSection,
   buildVisualReferencePack,
+  type FieldAggregation,
   getTrainingImageDataUrl,
   loadTrainingExamples,
   loadGlobalRules,
   type GlobalRules,
+  type TrainingBox,
   type TrainingExample,
   type TrainingField,
 } from "@/lib/training";
@@ -107,6 +109,17 @@ type OpenAIUsage = {
   total_tokens?: number;
 };
 
+const TRAINING_FIELD_CN: Record<TrainingField, string> = {
+  date: "日期",
+  route: "抽查路线",
+  driver: "抽查司机",
+  total: "运单数量",
+  unscanned: "未收数量",
+  exceptions: "错扫数量",
+  waybillStatus: "响应更新状态",
+  stationTeam: "站点车队",
+};
+
 type FingerprintedTrainingExample = {
   example: TrainingExample;
   fingerprint: number[];
@@ -138,6 +151,10 @@ function medianOf(nums: number[]): number {
 
 function hasImageCoordBoxes(example: TrainingExample): boolean {
   return Boolean(example.boxes?.some((box) => box.coordSpace === "image"));
+}
+
+function imageCoordBoxes(example: TrainingExample): TrainingBox[] {
+  return (example.boxes || []).filter((box) => box.coordSpace === "image");
 }
 
 function parseDataUrlToBuffer(dataUrl: string): Buffer | null {
@@ -214,6 +231,236 @@ async function selectMostSimilarTrainingExamples(
   } catch {
     return ctx.examples;
   }
+}
+
+function inferFieldAggregation(field: TrainingField, boxCount: number): FieldAggregation {
+  if (boxCount <= 1) return "first";
+  return field === "total" || field === "unscanned" || field === "exceptions" ? "sum" : "join_comma";
+}
+
+function describeFieldAggregation(mode: FieldAggregation): string {
+  switch (mode) {
+    case "sum":
+      return "若同字段有多张小图，只对明确属于该字段标签的数字求和。";
+    case "join_comma":
+      return "若同字段有多张小图，只拼接与该字段标签直接对应的文本，并用英文逗号连接。";
+    case "join_newline":
+      return "若同字段有多张小图，只拼接与该字段标签直接对应的文本，并用换行连接。";
+    case "first":
+      return "只采用第一个能够确认标签语义的读数。";
+    default:
+      return "";
+  }
+}
+
+async function cropsToPngDataUrls(
+  imageBuffer: Buffer,
+  boxes: TrainingBox[],
+): Promise<string[]> {
+  const meta = await sharp(imageBuffer).metadata();
+  const iw = meta.width ?? 0;
+  const ih = meta.height ?? 0;
+  if (!iw || !ih) {
+    throw new Error("无法读取图片宽高");
+  }
+
+  const out: string[] = [];
+  for (const box of boxes) {
+    let left = Math.floor(box.x * iw);
+    let top = Math.floor(box.y * ih);
+    let width = Math.ceil(box.width * iw);
+    let height = Math.ceil(box.height * ih);
+    left = Math.max(0, Math.min(iw - 1, left));
+    top = Math.max(0, Math.min(ih - 1, top));
+    width = Math.max(1, Math.min(iw - left, width));
+    height = Math.max(1, Math.min(ih - top, height));
+
+    const cropBuf = await sharp(imageBuffer)
+      .extract({ left, top, width, height })
+      .png()
+      .toBuffer();
+    out.push(`data:image/png;base64,${cropBuf.toString("base64")}`);
+  }
+  return out;
+}
+
+function buildBoxGuidedCropInstructionText(
+  boxes: TrainingBox[],
+  aggs: Partial<Record<TrainingField, FieldAggregation>>,
+): string {
+  const byField = new Map<TrainingField, TrainingBox[]>();
+  for (const box of boxes) {
+    const list = byField.get(box.field) || [];
+    list.push(box);
+    byField.set(box.field, list);
+  }
+
+  const lines: string[] = [
+    `下面会附上 ${boxes.length} 张裁剪小图，顺序固定：第 1 张对应第 1 个训练框，以此类推。`,
+    "每张图只包含该矩形框内像素。你必须先识别图中可见的字段标签/文字项目，再读取与该标签直接对应的值；禁止只因数字在常见位置就认定字段。",
+    "",
+    "字段与图片对应关系：",
+  ];
+
+  boxes.forEach((box, index) => {
+    lines.push(`图${index + 1} → 【${TRAINING_FIELD_CN[box.field]}】（JSON 键名 ${box.field}）`);
+  });
+
+  lines.push("", "同字段多张小图时的合并规则：");
+  for (const [field, fieldBoxes] of byField) {
+    if (fieldBoxes.length <= 1) continue;
+    const mode = aggs[field] ?? inferFieldAggregation(field, fieldBoxes.length);
+    lines.push(`- ${field}（${TRAINING_FIELD_CN[field]}）：${describeFieldAggregation(mode)}`);
+  }
+
+  lines.push(
+    "",
+    "输出一个 JSON 对象，键可包括：date, route, driver, total, totalSourceLabel, unscanned, exceptions, stationTeam, previewNote。",
+    "规则：只有当小图里可见标签足以证明字段语义时，才允许输出该字段值；否则输出 null 或省略。",
+  );
+
+  return lines.join("\n");
+}
+
+function mergeBoxGuidedRecord(
+  base: PodRecord,
+  parsed: Record<string, unknown>,
+  boxedFields: Set<TrainingField>,
+): PodRecord {
+  const next = { ...base };
+
+  if (boxedFields.has("date")) {
+    const value = normalizeText(parsed.date);
+    next.date = value || "";
+    if (!value) {
+      next.reviewRequired = true;
+      next.reviewReason = appendReviewReason(next.reviewReason, "训练池日期标注区域未能确认有效日期。");
+    }
+  }
+
+  if (boxedFields.has("route")) {
+    const value = normalizeText(parsed.route);
+    next.route = value && isRouteFormatValid(value) ? value : "";
+    if (!next.route) {
+      next.reviewRequired = true;
+      next.reviewReason = appendReviewReason(next.reviewReason, "训练池路线标注区域未能确认有效快递员路线。");
+    }
+  }
+
+  if (boxedFields.has("driver")) {
+    const value = normalizeText(parsed.driver);
+    next.driver = value || "";
+    if (!value) {
+      next.reviewRequired = true;
+      next.reviewReason = appendReviewReason(next.reviewReason, "训练池司机标注区域未能确认司机姓名。");
+    }
+  }
+
+  if (boxedFields.has("stationTeam")) {
+    next.stationTeam = normalizeText(parsed.stationTeam) || "";
+  }
+
+  if (boxedFields.has("total")) {
+    const total = normalizeNumber(parsed.total);
+    const label = normalizeText(parsed.totalSourceLabel);
+    next.total = typeof total === "number" ? total : "";
+    next.totalSourceLabel = typeof total === "number" ? label : "";
+    if (next.total === "") {
+      next.reviewRequired = true;
+      next.reviewReason = appendReviewReason(next.reviewReason, "训练池运单数量标注区域未能确认合法标签和值。");
+    }
+  }
+
+  if (boxedFields.has("unscanned")) {
+    const unscanned = normalizeNumber(parsed.unscanned);
+    next.unscanned = typeof unscanned === "number" ? unscanned : "";
+    if (next.unscanned === "") {
+      next.reviewRequired = true;
+      next.reviewReason = appendReviewReason(next.reviewReason, "训练池未收数量标注区域未能确认合法标签和值。");
+    }
+  }
+
+  if (boxedFields.has("exceptions")) {
+    const exceptions = normalizeNumber(parsed.exceptions);
+    next.exceptions = typeof exceptions === "number" ? exceptions : "";
+    if (next.exceptions === "") {
+      next.reviewRequired = true;
+      next.reviewReason = appendReviewReason(next.reviewReason, "训练池错扫数量标注区域未能确认合法标签和值。");
+    }
+  }
+
+  return next;
+}
+
+async function refinePODFromTrainingExampleBoxes(
+  file: File,
+  example: TrainingExample,
+  records: PodRecord[],
+  model: string,
+): Promise<{ records: PodRecord[]; usage?: OpenAIUsage }> {
+  if (!OPENAI_API_KEY || records.length !== 1) return { records };
+
+  const boxes = imageCoordBoxes(example);
+  if (boxes.length === 0) return { records };
+
+  const bytes = Buffer.from(await file.arrayBuffer());
+  let cropUrls: string[];
+  try {
+    cropUrls = await cropsToPngDataUrls(bytes, boxes);
+  } catch {
+    return { records };
+  }
+
+  const userText = buildBoxGuidedCropInstructionText(boxes, example.fieldAggregations || {});
+  const systemText = `你是 OrSight 的训练池强引导识别助手。你会收到多张已经按训练标注框裁剪好的小图。
+你必须先识别每张小图中可见的字段标签/项目名称，再读取该标签直接对应的值；禁止仅凭坐标位置、数字大小或常见布局去猜字段。
+若小图里没有足够标签语义证明字段归属，就输出 null 或省略该字段。只返回合法 JSON。`;
+
+  const userContent: OpenAIMessageContent[] = [{ type: "text", text: userText }];
+  for (const url of cropUrls) {
+    userContent.push({ type: "image_url", image_url: { url } });
+  }
+
+  const response = await fetch(`${OPENAI_BASE_URL}/chat/completions`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${OPENAI_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model,
+      reasoning_effort: OPENAI_REASONING_EFFORT,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: systemText },
+        { role: "user", content: userContent },
+      ],
+    }),
+  });
+
+  if (!response.ok) return { records };
+
+  const payload = (await response.json()) as {
+    choices?: Array<{ message?: { content?: string } }>;
+    usage?: OpenAIUsage;
+  };
+  const content = payload.choices?.[0]?.message?.content;
+  if (!content) return { records };
+
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(content) as Record<string, unknown>;
+  } catch {
+    return { records };
+  }
+
+  const boxedFields = new Set<TrainingField>(boxes.map((box) => box.field));
+  const [base] = records;
+  const next = mergeBoxGuidedRecord(base, parsed, boxedFields);
+  return {
+    records: [next],
+    usage: payload.usage,
+  };
 }
 
 /** Median bitmap-normalized box for a field across training examples (for Sharp crop). */
@@ -718,6 +965,11 @@ async function runPODTrainingRefinesParallel(
   model: string,
 ): Promise<{ records: PodRecord[]; usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } }> {
   if (!OPENAI_API_KEY || records.length !== 1) return { records };
+  const boxGuidedExample = examples.find((example) => imageCoordBoxes(example).length > 0);
+  if (boxGuidedExample) {
+    return await refinePODFromTrainingExampleBoxes(file, boxGuidedExample, records, model);
+  }
+
   const base = records[0]!;
 
   const emptyUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
@@ -1125,6 +1377,18 @@ function applyRecordSanityChecks(fileName: string, records: PodRecord[]) {
   };
 }
 
+function deriveWaybillStatus(records: PodRecord[]) {
+  return records.map((record) => {
+    if (record.unscanned === "") {
+      return record;
+    }
+    return {
+      ...record,
+      waybillStatus: record.unscanned > 0 ? "待更新" : "全领取",
+    };
+  });
+}
+
 function applyCounterVerification(
   fileName: string,
   records: PodRecord[],
@@ -1385,6 +1649,8 @@ export async function POST(request: Request) {
           totalTokens += counterVerification.usage.total_tokens || 0;
         }
       }
+
+      checkedRecords = deriveWaybillStatus(checkedRecords);
 
       // Log usage to Supabase if user is logged in
       if (user && user.id) {
