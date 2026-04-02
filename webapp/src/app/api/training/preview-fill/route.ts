@@ -13,6 +13,7 @@ const ALLOWED_FIELDS = new Set<TrainingField>([
   "date",
   "route",
   "driver",
+  "taskCode",
   "total",
   "unscanned",
   "exceptions",
@@ -24,6 +25,7 @@ const FIELD_CN: Record<TrainingField, string> = {
   date: "日期",
   route: "抽查路线",
   driver: "抽查司机",
+  taskCode: "任务编码",
   total: "运单数量",
   unscanned: "未收数量",
   exceptions: "错扫数量",
@@ -194,7 +196,7 @@ function buildCropInstructionText(
   lines.push(
     "",
     "请输出一个 JSON 对象，键包括（无对应小图的键可省略或 null）：",
-    "date, route, driver, total, totalSourceLabel, unscanned, exceptions, waybillStatus, stationTeam, previewNote",
+    "date, route, driver, taskCode, total, totalSourceLabel, unscanned, exceptions, waybillStatus, stationTeam, previewNote",
     "数字字段用整数或 null；文本用字符串。previewNote 可说明读数不确定之处。",
   );
 
@@ -317,6 +319,7 @@ export async function POST(request: Request) {
     if (typeof record.date === "string") out.date = record.date;
     if (typeof record.route === "string") out.route = record.route;
     if (typeof record.driver === "string") out.driver = record.driver;
+    if (typeof record.taskCode === "string") out.taskCode = record.taskCode;
     if (typeof record.waybillStatus === "string") out.waybillStatus = record.waybillStatus;
     if (typeof record.stationTeam === "string") out.stationTeam = record.stationTeam;
     if (typeof record.totalSourceLabel === "string") out.totalSourceLabel = record.totalSourceLabel;

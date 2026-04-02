@@ -11,6 +11,7 @@ export type TrainingField =
   | "date"
   | "route"
   | "driver"
+  | "taskCode"
   | "total"
   | "unscanned"
   | "exceptions"
@@ -43,6 +44,7 @@ export type TrainingExample = {
     date: string;
     route: string;
     driver: string;
+    taskCode?: string;
     total: number;
     totalSourceLabel?: string;
     unscanned: number;
@@ -383,6 +385,7 @@ const TRAINING_FIELD_LABELS: Record<string, string> = {
   date: "日期",
   route: "抽查路线",
   driver: "抽查司机",
+  taskCode: "任务编码",
   total: "运单数量",
   unscanned: "未收数量",
   exceptions: "错扫数量",
@@ -394,6 +397,7 @@ const TRAINING_FIELD_COLORS: Record<TrainingField, string> = {
   date: "#2563eb",
   route: "#7c3aed",
   driver: "#0891b2",
+  taskCode: "#9333ea",
   total: "#16a34a",
   unscanned: "#ea580c",
   exceptions: "#dc2626",
@@ -611,6 +615,7 @@ export async function buildVisualReferencePack(
         `date=${ex.output.date}`,
         `route=${ex.output.route}`,
         `driver=${ex.output.driver}`,
+        ex.output.taskCode ? `taskCode=${ex.output.taskCode}` : "",
         `total=${ex.output.total}`,
         ex.output.totalSourceLabel ? `totalSourceLabel=${ex.output.totalSourceLabel}` : "",
         `unscanned=${ex.output.unscanned}`,

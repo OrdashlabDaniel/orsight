@@ -19,6 +19,7 @@ type SaveTrainingPayload = {
     date?: unknown;
     route?: unknown;
     driver?: unknown;
+    taskCode?: unknown;
     total?: unknown;
     totalSourceLabel?: unknown;
     unscanned?: unknown;
@@ -98,6 +99,7 @@ const TRAINING_FIELD_KEYS = new Set<string>([
   "date",
   "route",
   "driver",
+  "taskCode",
   "total",
   "unscanned",
   "exceptions",
@@ -141,6 +143,7 @@ export async function POST(request: Request) {
         date: normalizeText(output?.date),
         route: normalizeText(output?.route),
         driver: normalizeText(output?.driver),
+        taskCode: normalizeText(output?.taskCode) || undefined,
         total: normalizeNumber(output?.total) || 0,
         totalSourceLabel: normalizeText(output?.totalSourceLabel) || undefined,
         unscanned: normalizeNumber(output?.unscanned) || 0,
@@ -158,7 +161,13 @@ export async function POST(request: Request) {
 
     // Only upsert the example to the database if it actually has some data (i.e. it's not just a raw image upload)
     let nextExamples = await loadTrainingExamples();
-    if (example.output.date || example.output.route || example.output.driver || example.notes) {
+    if (
+      example.output.date ||
+      example.output.route ||
+      example.output.driver ||
+      example.output.taskCode ||
+      example.notes
+    ) {
       nextExamples = await upsertTrainingExample(example);
     }
     return NextResponse.json({

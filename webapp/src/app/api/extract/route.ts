@@ -97,6 +97,7 @@ function buildAggregationBaseRecord(records: PodRecord[]): PodRecord {
     date: String(firstNonEmptyValue(records, (record) => record.date) || ""),
     route: String(firstNonEmptyValue(records, (record) => record.route) || ""),
     driver: String(firstNonEmptyValue(records, (record) => record.driver) || ""),
+    taskCode: String(firstNonEmptyValue(records, (record) => record.taskCode) || ""),
     total: firstNonEmptyValue(records, (record) => record.total) as PodRecord["total"],
     totalSourceLabel: String(firstNonEmptyValue(records, (record) => record.totalSourceLabel) || ""),
     unscanned: firstNonEmptyValue(records, (record) => record.unscanned) as PodRecord["unscanned"],
@@ -120,6 +121,7 @@ type RawModelRecord = {
   date?: unknown;
   route?: unknown;
   driver?: unknown;
+  taskCode?: unknown;
   total?: unknown;
   totalSourceLabel?: unknown;
   unscanned?: unknown;
@@ -149,6 +151,7 @@ const TRAINING_FIELD_CN: Record<TrainingField, string> = {
   date: "日期",
   route: "抽查路线",
   driver: "抽查司机",
+  taskCode: "任务编码",
   total: "运单数量",
   unscanned: "未收数量",
   exceptions: "错扫数量",
@@ -455,7 +458,7 @@ function buildBoxGuidedCropInstructionText(
 
   lines.push(
     "",
-    "输出一个 JSON 对象，键可包括：date, route, driver, total, totalSourceLabel, unscanned, exceptions, stationTeam, previewNote。",
+    "输出一个 JSON 对象，键可包括：date, route, driver, taskCode, total, totalSourceLabel, unscanned, exceptions, stationTeam, previewNote。",
     "规则：只有当小图里可见标签足以证明字段语义时，才允许输出该字段值；否则输出 null 或省略。",
   );
 
@@ -493,6 +496,15 @@ function mergeBoxGuidedRecord(
     if (!value) {
       next.reviewRequired = true;
       next.reviewReason = appendReviewReason(next.reviewReason, "训练池司机标注区域未能确认司机姓名。");
+    }
+  }
+
+  if (boxedFields.has("taskCode")) {
+    const value = normalizeText(parsed.taskCode);
+    next.taskCode = value || "";
+    if (!value) {
+      next.reviewRequired = true;
+      next.reviewReason = appendReviewReason(next.reviewReason, "训练池任务编码标注区域未能确认任务编码。");
     }
   }
 
@@ -1376,6 +1388,7 @@ function mapRecord(imageName: string, raw: RawModelRecord, index: number): PodRe
     date: normalizeText(raw.date),
     route: normalizeText(raw.route),
     driver: normalizeText(raw.driver),
+    taskCode: normalizeText(raw.taskCode),
     total: normalizeNumber(raw.total),
     totalSourceLabel: normalizeText(raw.totalSourceLabel),
     unscanned: normalizeNumber(raw.unscanned),
@@ -1392,6 +1405,7 @@ function recordSignature(record: PodRecord): string {
     date: record.date,
     route: record.route,
     driver: record.driver,
+    taskCode: record.taskCode || "",
     total: record.total,
     totalSourceLabel: record.totalSourceLabel,
     unscanned: record.unscanned,

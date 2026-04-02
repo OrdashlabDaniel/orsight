@@ -9,6 +9,7 @@ export type AnnotationField =
   | "date"
   | "route"
   | "driver"
+  | "taskCode"
   | "total"
   | "unscanned"
   | "exceptions"
@@ -32,7 +33,16 @@ export type WorkbenchAnnotationBox = {
 
 export type AnnotationWorkbenchSeed = Pick<
   PodRecord,
-  "date" | "route" | "driver" | "total" | "unscanned" | "exceptions" | "waybillStatus" | "stationTeam" | "totalSourceLabel"
+  | "date"
+  | "route"
+  | "driver"
+  | "taskCode"
+  | "total"
+  | "unscanned"
+  | "exceptions"
+  | "waybillStatus"
+  | "stationTeam"
+  | "totalSourceLabel"
 >;
 
 type ManualRecordState = Partial<PodRecord> & { stationTeam?: string; totalSourceLabel?: string };
@@ -64,6 +74,7 @@ const annotationFields: Array<{ key: AnnotationField; label: string }> = [
   { key: "date", label: "日期" },
   { key: "route", label: "抽查路线" },
   { key: "driver", label: "抽查司机" },
+  { key: "taskCode", label: "任务编码" },
   { key: "total", label: "运单数量" },
   { key: "unscanned", label: "未收数量" },
   { key: "exceptions", label: "错扫数量" },
@@ -87,6 +98,7 @@ function seedToManual(seed: AnnotationWorkbenchSeed): ManualRecordState {
     date: seed.date ?? "",
     route: seed.route ?? "",
     driver: seed.driver ?? "",
+    taskCode: seed.taskCode ?? "",
     total: seed.total ?? "",
     unscanned: seed.unscanned ?? "",
     exceptions: seed.exceptions ?? "",
@@ -111,6 +123,7 @@ export type TrainingAnnotationWorkbenchProps = {
   initialBoxes?: WorkbenchAnnotationBox[];
   initialFieldAggregations?: Partial<Record<AnnotationField, FieldAggregation>>;
   initialNotes?: string;
+  initialField?: AnnotationField;
   onClose: () => void;
   onSaved?: (result: { totalExamples?: number; finalSeed: AnnotationWorkbenchSeed }) => void | Promise<void>;
   onNotice?: (message: string) => void;
@@ -125,6 +138,7 @@ export function TrainingAnnotationWorkbench({
   initialBoxes = [],
   initialFieldAggregations = {},
   initialNotes,
+  initialField,
   onClose,
   onSaved,
   onNotice,
@@ -134,7 +148,7 @@ export function TrainingAnnotationWorkbench({
   const [annotationBoxes, setAnnotationBoxes] = useState<WorkbenchAnnotationBox[]>(() => ensureBoxIds(initialBoxes));
   const [fieldAggregations, setFieldAggregations] =
     useState<Partial<Record<AnnotationField, FieldAggregation>>>(initialFieldAggregations);
-  const [annotationField, setAnnotationField] = useState<AnnotationField>("driver");
+  const [annotationField, setAnnotationField] = useState<AnnotationField>(initialField ?? "driver");
   const [annotationNotes, setAnnotationNotes] = useState(initialNotes ?? "人工标注用于训练池。");
   const [drawingState, setDrawingState] = useState<DrawingState | null>(null);
   const [isSavingTraining, setIsSavingTraining] = useState(false);
@@ -299,9 +313,9 @@ export function TrainingAnnotationWorkbench({
     setAnnotationBoxes(ensureBoxIds(initialBoxes));
     setFieldAggregations(initialFieldAggregations);
     setAnnotationNotes(initialNotes ?? "人工标注用于训练池。");
-    setAnnotationField("driver");
+    setAnnotationField(initialField ?? "driver");
     setDrawingState(null);
-  }, [open, initialSeed, initialBoxes, initialFieldAggregations, initialNotes]);
+  }, [open, initialSeed, initialBoxes, initialFieldAggregations, initialNotes, initialField]);
 
   const handleClose = useCallback(() => {
     setDrawingState(null);
@@ -463,6 +477,7 @@ export function TrainingAnnotationWorkbench({
       date: m.date ?? "",
       route: m.route ?? "",
       driver: m.driver ?? "",
+      taskCode: m.taskCode ?? "",
       total: numOrEmpty(m.total),
       unscanned: numOrEmpty(m.unscanned),
       exceptions: numOrEmpty(m.exceptions),
@@ -518,6 +533,9 @@ export function TrainingAnnotationWorkbench({
         }
         if (boxed.has("driver")) {
           next.driver = strFromModel(r.driver);
+        }
+        if (boxed.has("taskCode")) {
+          next.taskCode = strFromModel(r.taskCode);
         }
         if (boxed.has("waybillStatus")) {
           next.waybillStatus = strFromModel(r.waybillStatus);
@@ -579,6 +597,7 @@ export function TrainingAnnotationWorkbench({
             date: manualRecord.date || "",
             route: manualRecord.route || "",
             driver: manualRecord.driver || "",
+            taskCode: manualRecord.taskCode || "",
             total: Number(manualRecord.total) || 0,
             totalSourceLabel: manualRecord.totalSourceLabel || "",
             unscanned: Number(manualRecord.unscanned) || 0,

@@ -2,6 +2,7 @@
 
 import Image from "next/image";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import * as XLSX from "xlsx";
 
@@ -36,6 +37,7 @@ type TrainingStatusItem = {
       date: string;
       route: string;
       driver: string;
+      taskCode?: string;
       total: number;
       unscanned: number;
       exceptions: number;
@@ -71,13 +73,14 @@ type ViewerDragState = {
 };
 
 const editableColumns: Array<{
-  key: keyof Pick<PodRecord, "date" | "route" | "driver" | "total" | "unscanned" | "exceptions" | "waybillStatus">;
+  key: keyof Pick<PodRecord, "date" | "route" | "driver" | "taskCode" | "total" | "unscanned" | "exceptions" | "waybillStatus">;
   label: string;
   type?: "text" | "number";
 }> = [
   { key: "date", label: "日期" },
   { key: "route", label: "抽查路线" },
   { key: "driver", label: "抽查司机" },
+  { key: "taskCode", label: "任务编码" },
   { key: "total", label: "运单数量", type: "number" },
   { key: "unscanned", label: "未收数量", type: "number" },
   { key: "exceptions", label: "错扫数量", type: "number" },
@@ -89,6 +92,7 @@ function podRecordToAnnotationSeed(record: PodRecord): AnnotationWorkbenchSeed {
     date: record.date ?? "",
     route: record.route ?? "",
     driver: record.driver ?? "",
+    taskCode: record.taskCode ?? "",
     total: record.total ?? "",
     unscanned: record.unscanned ?? "",
     exceptions: record.exceptions ?? "",
@@ -103,6 +107,7 @@ function buildExportRows(records: PodRecord[]) {
     record.date,
     record.route,
     record.driver,
+    record.taskCode || "",
     record.total,
     record.unscanned,
     record.exceptions,
@@ -132,6 +137,7 @@ function formatDateForFilename(rawDate: string | undefined) {
 }
 
 export default function Home() {
+  const router = useRouter();
   const primaryModelName = "gpt-5-mini";
   const reviewModelName = "gpt-5";
 
@@ -585,6 +591,16 @@ export default function Home() {
     setNoticeMessage("已清空上传图片和表格数据。");
   }
 
+  function handleAddTaskCodeField() {
+    const confirmed = window.confirm(
+      "确认要为填表结果新增“任务编码”栏吗？确认后会自动跳转到训练模式，请上传范例图片并框选任务编码的位置。",
+    );
+    if (!confirmed) {
+      return;
+    }
+    router.push("/training?setupField=taskCode&source=fill");
+  }
+
   async function extractData() {
     if (!uploads.length) {
       setErrorMessage("请先上传图片。");
@@ -977,6 +993,7 @@ export default function Home() {
             currentRecord.date === record.date &&
             currentRecord.route === record.route &&
             currentRecord.driver === record.driver &&
+            (currentRecord.taskCode || "") === (record.taskCode || "") &&
             currentRecord.total === record.total &&
             currentRecord.unscanned === record.unscanned &&
             currentRecord.exceptions === record.exceptions &&
@@ -1012,6 +1029,7 @@ export default function Home() {
           date: seed.date,
           route: seed.route,
           driver: seed.driver,
+          taskCode: seed.taskCode,
           total: seed.total === "" ? "" : Number(seed.total),
           unscanned: seed.unscanned === "" ? "" : Number(seed.unscanned),
           exceptions: seed.exceptions === "" ? "" : Number(seed.exceptions),
@@ -1031,9 +1049,18 @@ export default function Home() {
             <Link href="/forms" className="font-medium text-blue-600 hover:underline">
               ← 返回填表池
             </Link>
-            <Link href="/training" className="font-medium text-slate-700 hover:text-slate-900 hover:underline">
-              切换到训练模式
-            </Link>
+            <div className="flex flex-wrap items-center gap-3">
+              <button
+                type="button"
+                className="rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-xs font-medium text-blue-700 hover:bg-blue-100"
+                onClick={handleAddTaskCodeField}
+              >
+                添加任务编码并去标注
+              </button>
+              <Link href="/training" className="font-medium text-slate-700 hover:text-slate-900 hover:underline">
+                切换到训练模式
+              </Link>
+            </div>
           </div>
           <h1 className="text-2xl font-semibold">OrSight - 填表模式</h1>
           <p className="mt-2 text-sm text-slate-600">
@@ -1440,7 +1467,7 @@ export default function Home() {
                               <td key={column.key} className="border-b border-slate-200 px-2 py-2 align-top">
                                 <input
                                   type={column.type || "text"}
-                                  value={record[column.key]}
+                                  value={record[column.key] ?? ""}
                                   onChange={(event) => updateRecord(record.id, column.key, event.target.value)}
                                   className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 outline-none focus:border-slate-500"
                                 />

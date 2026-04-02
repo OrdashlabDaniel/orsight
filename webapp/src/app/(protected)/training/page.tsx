@@ -43,6 +43,7 @@ type TrainingStatusItem = {
       date: string;
       route: string;
       driver: string;
+      taskCode?: string;
       total: number;
       totalSourceLabel?: string;
       unscanned: number;
@@ -63,6 +64,8 @@ type TrainingStatusResponse = {
 };
 
 export default function TrainingMode() {
+  const [setupField, setSetupField] = useState("");
+  const taskCodeOnboarding = setupField === "taskCode";
   const [uploads, setUploads] = useState<UploadItem[]>([]);
   const [selectedUploadId, setSelectedUploadId] = useState<string | null>(null);
   
@@ -96,6 +99,18 @@ export default function TrainingMode() {
   const [agentDragActive, setAgentDragActive] = useState(false);
   const [agentChatLoading, setAgentChatLoading] = useState(false);
   const [isSavingRules, setIsSavingRules] = useState(false);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    setSetupField(params.get("setupField") || "");
+  }, []);
+
+  useEffect(() => {
+    if (!taskCodeOnboarding) {
+      return;
+    }
+    uploadPanelRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [taskCodeOnboarding]);
 
   useEffect(() => {
     void loadGlobalRules();
@@ -381,6 +396,10 @@ export default function TrainingMode() {
       });
       setNoticeMessage(`已加入 ${nextUploads.length} 张待标注图片。`);
       setErrorMessage("");
+      if (taskCodeOnboarding && nextUploads[0]) {
+        setSelectedUploadId(nextUploads[0].id);
+        void openAnnotationPanel(nextUploads[0]);
+      }
     } catch {
       setErrorMessage("读取图片内容失败，可能是文件已被其他程序移动或删除，请重试。");
     }
@@ -461,6 +480,7 @@ export default function TrainingMode() {
         date: existingExample?.output.date || "",
         route: existingExample?.output.route || "",
         driver: existingExample?.output.driver || "",
+        taskCode: existingExample?.output.taskCode || "",
         total: existingExample?.output.total ?? "",
         unscanned: existingExample?.output.unscanned ?? "",
         exceptions: existingExample?.output.exceptions ?? "",
@@ -530,6 +550,14 @@ export default function TrainingMode() {
           <p className="mt-2 text-sm text-slate-600">
             在此模式下，您可以上传图片并手动标注字段，这些图片将长期存入云端训练池，作为 AI 识别的引导示例。
           </p>
+          {taskCodeOnboarding ? (
+            <div className="mt-4 rounded-2xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-800">
+              <div className="font-medium">当前正在扩展新字段：任务编码</div>
+              <div className="mt-1">
+                请先上传一张范例图片。上传后系统会自动打开标注工作台，并默认选中“任务编码”，你只需要框出任务编号所在位置，并在右侧填写最终要写入表格的任务编码。
+              </div>
+            </div>
+          ) : null}
           <div className="mt-3 flex flex-wrap gap-2 text-xs">
             <span className="rounded-full bg-blue-100 px-3 py-1 text-blue-700">训练池图片：{trainingStatus?.totalImages || 0}</span>
             <span className="rounded-full bg-emerald-100 px-3 py-1 text-emerald-700">已标注：{trainingStatus?.labeledImages || 0}</span>
@@ -736,6 +764,7 @@ export default function TrainingMode() {
                                 date: "",
                                 route: "",
                                 driver: "",
+                                taskCode: "",
                                 total: 0,
                                 totalSourceLabel: "",
                                 unscanned: 0,
@@ -903,6 +932,7 @@ export default function TrainingMode() {
             initialBoxes={annotationDraft.boxes}
             initialFieldAggregations={annotationDraft.fieldAggregations}
             initialNotes={annotationDraft.notes}
+            initialField={taskCodeOnboarding ? "taskCode" : undefined}
             onClose={closeRecordPopup}
             onNotice={setNoticeMessage}
             onError={setErrorMessage}
