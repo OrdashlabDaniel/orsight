@@ -1,20 +1,11 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import type { PodRecord } from "@/lib/pod";
+import { DEFAULT_TABLE_FIELDS, isBuiltInFieldId, type TableFieldDefinition } from "@/lib/table-fields";
 
 /** 训练标注字段 key，与训练池 boxes 一致 */
-export type AnnotationField =
-  | "date"
-  | "route"
-  | "driver"
-  | "taskCode"
-  | "total"
-  | "unscanned"
-  | "exceptions"
-  | "waybillStatus"
-  | "stationTeam";
+export type AnnotationField = string;
 
 /** 与 @/lib/training FieldAggregation 一致 */
 export type FieldAggregation = "sum" | "join_comma" | "join_newline" | "first";
@@ -31,21 +22,21 @@ export type WorkbenchAnnotationBox = {
   coordSpace?: "image" | "container";
 };
 
-export type AnnotationWorkbenchSeed = Pick<
-  PodRecord,
-  | "date"
-  | "route"
-  | "driver"
-  | "taskCode"
-  | "total"
-  | "unscanned"
-  | "exceptions"
-  | "waybillStatus"
-  | "stationTeam"
-  | "totalSourceLabel"
->;
+export type AnnotationWorkbenchSeed = {
+  date?: string;
+  route?: string;
+  driver?: string;
+  taskCode?: string;
+  total?: number | "";
+  unscanned?: number | "";
+  exceptions?: number | "";
+  waybillStatus?: string;
+  stationTeam?: string;
+  totalSourceLabel?: string;
+  customFieldValues?: Record<string, string | number | "">;
+};
 
-type ManualRecordState = Partial<PodRecord> & { stationTeam?: string; totalSourceLabel?: string };
+type ManualRecordState = AnnotationWorkbenchSeed;
 
 type DrawingState = {
   startX: number;
@@ -70,7 +61,7 @@ function clamp01(n: number) {
   return Math.max(0, Math.min(1, n));
 }
 
-const annotationFields: Array<{ key: AnnotationField; label: string }> = [
+export const annotationFields: Array<{ key: AnnotationField; label: string }> = [
   { key: "date", label: "日期" },
   { key: "route", label: "抽查路线" },
   { key: "driver", label: "抽查司机" },
@@ -82,15 +73,15 @@ const annotationFields: Array<{ key: AnnotationField; label: string }> = [
   { key: "stationTeam", label: "站点车队" },
 ];
 
-function defaultAggregationForField(field: AnnotationField): FieldAggregation {
-  return field === "total" || field === "unscanned" || field === "exceptions" ? "sum" : "join_comma";
+function defaultAggregationForField(field: TableFieldDefinition): FieldAggregation {
+  return field.type === "number" ? "sum" : "join_comma";
 }
 
 function effectiveFieldAggregation(
-  field: AnnotationField,
+  field: TableFieldDefinition,
   aggs: Partial<Record<AnnotationField, FieldAggregation>>,
 ): FieldAggregation {
-  return aggs[field] ?? defaultAggregationForField(field);
+  return aggs[field.id] ?? defaultAggregationForField(field);
 }
 
 function seedToManual(seed: AnnotationWorkbenchSeed): ManualRecordState {
@@ -105,6 +96,7 @@ function seedToManual(seed: AnnotationWorkbenchSeed): ManualRecordState {
     waybillStatus: seed.waybillStatus ?? "",
     stationTeam: seed.stationTeam ?? "",
     totalSourceLabel: seed.totalSourceLabel ?? "",
+    customFieldValues: { ...(seed.customFieldValues || {}) },
   };
 }
 
@@ -119,6 +111,7 @@ export type TrainingAnnotationWorkbenchProps = {
   open: boolean;
   imageName: string;
   imageSrc: string;
+  fieldDefinitions?: TableFieldDefinition[];
   initialSeed: AnnotationWorkbenchSeed;
   initialBoxes?: WorkbenchAnnotationBox[];
   initialFieldAggregations?: Partial<Record<AnnotationField, FieldAggregation>>;
@@ -134,6 +127,7 @@ export function TrainingAnnotationWorkbench({
   open,
   imageName,
   imageSrc,
+  fieldDefinitions,
   initialSeed,
   initialBoxes = [],
   initialFieldAggregations = {},
@@ -144,11 +138,20 @@ export function TrainingAnnotationWorkbench({
   onNotice,
   onError,
 }: TrainingAnnotationWorkbenchProps) {
+  const activeFieldDefinitions = useMemo(
+    () => (fieldDefinitions?.length ? fieldDefinitions : DEFAULT_TABLE_FIELDS).filter((field) => field.active),
+    [fieldDefinitions],
+  );
+  const fieldDefinitionMap = useMemo(
+    () => Object.fromEntries(activeFieldDefinitions.map((field) => [field.id, field])),
+    [activeFieldDefinitions],
+  );
+  const defaultFieldId = initialField ?? activeFieldDefinitions[0]?.id ?? "driver";
   const [manualRecord, setManualRecord] = useState<ManualRecordState>(() => seedToManual(initialSeed));
   const [annotationBoxes, setAnnotationBoxes] = useState<WorkbenchAnnotationBox[]>(() => ensureBoxIds(initialBoxes));
   const [fieldAggregations, setFieldAggregations] =
     useState<Partial<Record<AnnotationField, FieldAggregation>>>(initialFieldAggregations);
-  const [annotationField, setAnnotationField] = useState<AnnotationField>(initialField ?? "driver");
+  const [annotationField, setAnnotationField] = useState<AnnotationField>(defaultFieldId);
   const [annotationNotes, setAnnotationNotes] = useState(initialNotes ?? "人工标注用于训练池。");
   const [drawingState, setDrawingState] = useState<DrawingState | null>(null);
   const [isSavingTraining, setIsSavingTraining] = useState(false);
@@ -313,9 +316,9 @@ export function TrainingAnnotationWorkbench({
     setAnnotationBoxes(ensureBoxIds(initialBoxes));
     setFieldAggregations(initialFieldAggregations);
     setAnnotationNotes(initialNotes ?? "人工标注用于训练池。");
-    setAnnotationField(initialField ?? "driver");
+    setAnnotationField(initialField ?? activeFieldDefinitions[0]?.id ?? "driver");
     setDrawingState(null);
-  }, [open, initialSeed, initialBoxes, initialFieldAggregations, initialNotes, initialField]);
+  }, [open, initialSeed, initialBoxes, initialFieldAggregations, initialNotes, initialField, activeFieldDefinitions]);
 
   const handleClose = useCallback(() => {
     setDrawingState(null);
@@ -336,8 +339,28 @@ export function TrainingAnnotationWorkbench({
   }, [open, handleClose]);
 
   function getAnnotationFieldValue(field: AnnotationField) {
-    const value = manualRecord[field as keyof ManualRecordState];
+    const value = isBuiltInFieldId(field)
+      ? manualRecord[field]
+      : manualRecord.customFieldValues?.[field];
     return value === null || value === undefined || value === "" ? "" : String(value);
+  }
+
+  function setAnnotationFieldValue(field: TableFieldDefinition, rawValue: string) {
+    setManualRecord((current) => {
+      if (isBuiltInFieldId(field.id)) {
+        return {
+          ...current,
+          [field.id]: rawValue,
+        };
+      }
+      return {
+        ...current,
+        customFieldValues: {
+          ...(current.customFieldValues || {}),
+          [field.id]: field.type === "number" ? (rawValue === "" ? "" : Number(rawValue)) : rawValue,
+        },
+      };
+    });
   }
 
   function beginDrawing(event: React.MouseEvent<HTMLDivElement>) {
@@ -473,6 +496,17 @@ export function TrainingAnnotationWorkbench({
       const n = typeof v === "number" ? v : Number(v);
       return Number.isFinite(n) ? n : "";
     };
+    const customFieldValues = Object.fromEntries(
+      activeFieldDefinitions
+        .filter((field) => !isBuiltInFieldId(field.id))
+        .map((field) => [
+          field.id,
+          field.type === "number"
+            ? numOrEmpty(m.customFieldValues?.[field.id])
+            : String(m.customFieldValues?.[field.id] ?? ""),
+        ])
+        .filter(([, value]) => value !== ""),
+    ) as Record<string, string | number | "">;
     return {
       date: m.date ?? "",
       route: m.route ?? "",
@@ -484,6 +518,7 @@ export function TrainingAnnotationWorkbench({
       waybillStatus: m.waybillStatus ?? "",
       stationTeam: m.stationTeam ?? "",
       totalSourceLabel: m.totalSourceLabel ?? "",
+      customFieldValues,
     };
   }
 
@@ -502,6 +537,7 @@ export function TrainingAnnotationWorkbench({
           imageDataUrl,
           boxes: boxesForVisionApi(annotationBoxes),
           fieldAggregations,
+          tableFields: activeFieldDefinitions,
         }),
       });
       const data = (await res.json()) as {
@@ -555,6 +591,19 @@ export function TrainingAnnotationWorkbench({
         if (boxed.has("exceptions")) {
           next.exceptions = numOrEmpty(r.exceptions);
         }
+        const customRecord =
+          r.customFieldValues && typeof r.customFieldValues === "object"
+            ? (r.customFieldValues as Record<string, string | number | "">)
+            : {};
+        for (const field of activeFieldDefinitions) {
+          if (isBuiltInFieldId(field.id) || !boxed.has(field.id)) {
+            continue;
+          }
+          next.customFieldValues = {
+            ...(next.customFieldValues || {}),
+            [field.id]: customRecord[field.id] ?? "",
+          };
+        }
         return next;
       });
       onNotice?.(
@@ -604,6 +653,7 @@ export function TrainingAnnotationWorkbench({
             exceptions: Number(manualRecord.exceptions) || 0,
             waybillStatus: manualRecord.waybillStatus || "",
             stationTeam: manualRecord.stationTeam || "",
+            customFieldValues: manualRecord.customFieldValues || {},
           },
           boxes: annotationBoxes,
           fieldAggregations,
@@ -696,7 +746,7 @@ export function TrainingAnnotationWorkbench({
               {annotationBoxes.map((box) => {
                 const sameField = annotationBoxes.filter((b) => b.field === box.field);
                 const idx = sameField.findIndex((b) => b.id === box.id) + 1;
-                const baseLabel = annotationFields.find((f) => f.key === box.field)?.label || box.field;
+                const baseLabel = fieldDefinitionMap[box.field]?.label || box.field;
                 const tag = sameField.length > 1 ? `${baseLabel}#${idx}` : baseLabel;
                 return (
                   <div
@@ -732,17 +782,17 @@ export function TrainingAnnotationWorkbench({
             <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
               <div className="mb-3 text-sm font-medium text-slate-700">填写正确数值</div>
               <div className="space-y-3">
-                {annotationFields.map((field) => (
-                  <div key={field.key}>
+                {activeFieldDefinitions.map((field) => (
+                  <div key={field.id}>
                     <label className="mb-1 block text-xs text-slate-500">{field.label}</label>
                     <input
-                      type={field.key === "total" || field.key === "unscanned" || field.key === "exceptions" ? "number" : "text"}
+                      type={field.type === "number" ? "number" : "text"}
                       className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-blue-500"
-                      value={String(manualRecord[field.key as keyof ManualRecordState] ?? "")}
-                      onChange={(e) => setManualRecord({ ...manualRecord, [field.key]: e.target.value })}
+                      value={getAnnotationFieldValue(field.id)}
+                      onChange={(e) => setAnnotationFieldValue(field, e.target.value)}
                       placeholder={`输入${field.label}`}
                     />
-                    {field.key === "total" && (
+                    {field.id === "total" && (
                       <input
                         type="text"
                         className="mt-2 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-blue-500"
@@ -759,19 +809,19 @@ export function TrainingAnnotationWorkbench({
             <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
               <div className="mb-3 text-sm font-medium text-slate-700">选择字段并画框</div>
               <div className="space-y-3">
-                {annotationFields.map((field) => {
-                  const boxesFor = annotationBoxes.filter((box) => box.field === field.key);
+                {activeFieldDefinitions.map((field) => {
+                  const boxesFor = annotationBoxes.filter((box) => box.field === field.id);
                   const count = boxesFor.length;
                   const hasBox = count > 0;
                   return (
-                    <div key={field.key} className="rounded-lg border border-slate-100 bg-white/60 px-2 py-2">
+                    <div key={field.id} className="rounded-lg border border-slate-100 bg-white/60 px-2 py-2">
                       <div className="flex flex-wrap items-center gap-2 text-sm">
                         <label className="flex min-w-0 flex-1 cursor-pointer items-center gap-2">
                           <input
                             type="radio"
                             name="annotationField"
-                            checked={annotationField === field.key}
-                            onChange={() => setAnnotationField(field.key)}
+                            checked={annotationField === field.id}
+                            onChange={() => setAnnotationField(field.id)}
                             className="text-blue-600"
                           />
                           <span className={hasBox ? "font-medium text-slate-900" : "text-slate-500"}>{field.label}</span>
@@ -782,11 +832,11 @@ export function TrainingAnnotationWorkbench({
                         {count >= 2 ? (
                           <select
                             className="max-w-[140px] rounded border border-slate-300 bg-white px-1 py-1 text-[11px] outline-none focus:border-blue-500"
-                            value={effectiveFieldAggregation(field.key, fieldAggregations)}
+                            value={effectiveFieldAggregation(field, fieldAggregations)}
                             onChange={(e) =>
                               setFieldAggregations((prev) => ({
                                 ...prev,
-                                [field.key]: e.target.value as FieldAggregation,
+                                [field.id]: e.target.value as FieldAggregation,
                               }))
                             }
                           >
@@ -800,7 +850,7 @@ export function TrainingAnnotationWorkbench({
                           <button
                             type="button"
                             className="text-xs text-rose-500 hover:text-rose-700"
-                            onClick={() => clearAnnotationFieldBoxes(field.key)}
+                            onClick={() => clearAnnotationFieldBoxes(field.id)}
                           >
                             清除全部
                           </button>

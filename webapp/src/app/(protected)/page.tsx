@@ -17,9 +17,17 @@ import {
   type ExtractionIssue,
   type ExtractionResponse,
   type PodRecord,
-  excelHeaders,
   organizeRecords,
 } from "@/lib/pod";
+import {
+  DEFAULT_TABLE_FIELDS,
+  createCustomField,
+  getActiveTableFields,
+  getRecordFieldValue,
+  hasRecordFieldValue,
+  setRecordFieldValue,
+  type TableFieldDefinition,
+} from "@/lib/table-fields";
 
 type UploadItem = {
   id: string;
@@ -42,6 +50,7 @@ type TrainingStatusItem = {
       unscanned: number;
       exceptions: number;
       stationTeam?: string;
+      customFieldValues?: Record<string, string | number | "">;
     };
     boxes?: WorkbenchAnnotationBox[];
   } | null;
@@ -72,7 +81,7 @@ type ViewerDragState = {
   originY: number;
 };
 
-const editableColumns: Array<{
+export const editableColumns: Array<{
   key: keyof Pick<PodRecord, "date" | "route" | "driver" | "taskCode" | "total" | "unscanned" | "exceptions" | "waybillStatus">;
   label: string;
   type?: "text" | "number";
@@ -99,20 +108,12 @@ function podRecordToAnnotationSeed(record: PodRecord): AnnotationWorkbenchSeed {
     waybillStatus: record.waybillStatus ?? "",
     stationTeam: record.stationTeam ?? "",
     totalSourceLabel: record.totalSourceLabel ?? "",
+    customFieldValues: { ...(record.customFieldValues || {}) },
   };
 }
 
-function buildExportRows(records: PodRecord[]) {
-  return records.map((record) => [
-    record.date,
-    record.route,
-    record.driver,
-    record.taskCode || "",
-    record.total,
-    record.unscanned,
-    record.exceptions,
-    record.waybillStatus || "",
-  ]);
+function buildExportRows(records: PodRecord[], fields: TableFieldDefinition[]) {
+  return records.map((record) => fields.map((field) => getRecordFieldValue(record, field)));
 }
 
 function formatDateForFilename(rawDate: string | undefined) {
@@ -172,6 +173,12 @@ export default function Home() {
   const [viewerLoadError, setViewerLoadError] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
   const [noticeMessage, setNoticeMessage] = useState("");
+  const [tableFields, setTableFields] = useState<TableFieldDefinition[]>(DEFAULT_TABLE_FIELDS);
+  const [isFieldManagerOpen, setIsFieldManagerOpen] = useState(false);
+  const [fieldDrafts, setFieldDrafts] = useState<TableFieldDefinition[]>(DEFAULT_TABLE_FIELDS);
+  const [newFieldName, setNewFieldName] = useState("");
+  const [newFieldType, setNewFieldType] = useState<"text" | "number">("text");
+  const [isSavingFieldConfig, setIsSavingFieldConfig] = useState(false);
   const [routeFilter, setRouteFilter] = useState("");
   const [isRouteDropdownOpen, setIsRouteDropdownOpen] = useState(false);
   const filterInputRef = useRef<HTMLInputElement | null>(null);
@@ -186,6 +193,10 @@ export default function Home() {
     return () => {
       uploadsRef.current.forEach((upload) => URL.revokeObjectURL(upload.previewUrl));
     };
+  }, []);
+
+  useEffect(() => {
+    void loadTableFieldConfig();
   }, []);
 
   useEffect(() => {
@@ -279,6 +290,8 @@ export default function Home() {
     () => uploads.find((upload) => upload.id === selectedUploadId) || uploads[0] || null,
     [selectedUploadId, uploads],
   );
+  const activeTableFields = useMemo(() => getActiveTableFields(tableFields), [tableFields]);
+  const tableHeaders = useMemo(() => activeTableFields.map((field) => field.label), [activeTableFields]);
   const organizedRecordsResult = useMemo(() => organizeRecords(records), [records]);
   
   const allAvailableRoutes = useMemo(() => {
@@ -436,6 +449,21 @@ export default function Home() {
     return { top, left, width };
   }
 
+  async function loadTableFieldConfig() {
+    try {
+      const response = await fetch("/api/table-fields");
+      const payload = (await response.json()) as { error?: string; tableFields?: TableFieldDefinition[] };
+      if (!response.ok) {
+        throw new Error(payload.error || "表格项目配置读取失败。");
+      }
+      const nextFields = payload.tableFields?.length ? payload.tableFields : DEFAULT_TABLE_FIELDS;
+      setTableFields(nextFields);
+      setFieldDrafts(nextFields);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "表格项目配置读取失败。");
+    }
+  }
+
   async function loadTrainingStatus() {
     try {
       const response = await fetch("/api/training/status");
@@ -591,14 +619,116 @@ export default function Home() {
     setNoticeMessage("已清空上传图片和表格数据。");
   }
 
-  function handleAddTaskCodeField() {
-    const confirmed = window.confirm(
-      "确认要新增表格项目吗？确认后会自动跳转到训练模式，请上传范例图片并标注这个新项目对应的位置。",
-    );
-    if (!confirmed) {
+  function openFieldManager() {
+    setFieldDrafts(tableFields.map((field) => ({ ...field })));
+    setNewFieldName("");
+    setNewFieldType("text");
+    setIsFieldManagerOpen(true);
+  }
+
+  async function saveFieldConfig(nextFields: TableFieldDefinition[]) {
+    const response = await fetch("/api/table-fields", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tableFields: nextFields }),
+    });
+    const payload = (await response.json()) as { error?: string; tableFields?: TableFieldDefinition[] };
+    if (!response.ok) {
+      throw new Error(payload.error || "保存表格项目失败。");
+    }
+    const saved = payload.tableFields?.length ? payload.tableFields : nextFields;
+    setTableFields(saved);
+    setFieldDrafts(saved);
+    return saved;
+  }
+
+  function updateFieldDraft(id: string, updater: (field: TableFieldDefinition) => TableFieldDefinition) {
+    setFieldDrafts((current) => current.map((field) => (field.id === id ? updater(field) : field)));
+  }
+
+  function validateFieldDrafts(fields: TableFieldDefinition[]) {
+    const activeFields = fields.filter((field) => field.active);
+    if (!activeFields.length) {
+      throw new Error("至少需要保留一个表格项目。");
+    }
+
+    const normalizedLabels = new Map<string, string>();
+    for (const field of activeFields) {
+      const label = field.label.trim();
+      if (!label) {
+        throw new Error("表格项目名称不能为空。");
+      }
+      const key = label.toLocaleLowerCase("zh-CN");
+      if (normalizedLabels.has(key)) {
+        throw new Error(`表格项目「${label}」与「${normalizedLabels.get(key)}」重名，请调整后再保存。`);
+      }
+      normalizedLabels.set(key, label);
+    }
+
+    return fields.map((field) => ({
+      ...field,
+      label: field.label.trim(),
+    }));
+  }
+
+  function handleDeleteFieldDraft(field: TableFieldDefinition) {
+    const hasCurrentValues = records.some((record) => hasRecordFieldValue(record, field));
+    const message = hasCurrentValues
+      ? `当前表格里已经有「${field.label}」的数据。删除后该项目会从表格中隐藏，请确认是否继续？`
+      : `确认删除表格项目「${field.label}」吗？`;
+    if (!window.confirm(message)) {
       return;
     }
-    router.push("/training?setupField=taskCode&source=fill");
+    updateFieldDraft(field.id, (current) => ({ ...current, active: false }));
+  }
+
+  function handleRestoreFieldDraft(field: TableFieldDefinition) {
+    updateFieldDraft(field.id, (current) => ({ ...current, active: true }));
+  }
+
+  async function submitFieldDrafts() {
+    setIsSavingFieldConfig(true);
+    setErrorMessage("");
+    try {
+      const nextFields = validateFieldDrafts(fieldDrafts);
+      await saveFieldConfig(nextFields);
+      setIsFieldManagerOpen(false);
+      setNoticeMessage("表格项目配置已更新。");
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "保存表格项目失败。");
+    } finally {
+      setIsSavingFieldConfig(false);
+    }
+  }
+
+  async function createFieldAndStartTraining() {
+    const label = newFieldName.trim();
+    if (!label) {
+      setErrorMessage("请先填写新表格项目名称。");
+      return;
+    }
+    if (fieldDrafts.some((field) => field.active && field.label.trim().toLocaleLowerCase("zh-CN") === label.toLocaleLowerCase("zh-CN"))) {
+      setErrorMessage("已有同名的表格项目，请换一个名称。");
+      return;
+    }
+
+    const nextField = {
+      ...createCustomField(label),
+      type: newFieldType,
+    };
+    const nextFields = [...fieldDrafts, nextField];
+    setIsSavingFieldConfig(true);
+    setErrorMessage("");
+    try {
+      const validatedFields = validateFieldDrafts(nextFields);
+      await saveFieldConfig(validatedFields);
+      setIsFieldManagerOpen(false);
+      router.push(`/training?setupField=${encodeURIComponent(nextField.id)}&source=fill`);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "新增表格项目失败。");
+    } finally {
+      setIsSavingFieldConfig(false);
+    }
   }
 
   async function extractData() {
@@ -746,14 +876,17 @@ export default function Home() {
   }
 
   async function copyTable() {
-    const rows = [excelHeaders, ...buildExportRows(filteredRecordsResult.records)];
+    const rows = [tableHeaders, ...buildExportRows(filteredRecordsResult.records, activeTableFields)];
     const text = rows.map((row) => row.join("\t")).join("\n");
     await navigator.clipboard.writeText(text);
     setNoticeMessage("表格内容已复制，可直接粘贴到其他表格。");
   }
 
   function downloadExcel() {
-    const worksheet = XLSX.utils.aoa_to_sheet([excelHeaders, ...buildExportRows(filteredRecordsResult.records)]);
+    const worksheet = XLSX.utils.aoa_to_sheet([
+      tableHeaders,
+      ...buildExportRows(filteredRecordsResult.records, activeTableFields),
+    ]);
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, "OrSight数据");
     const filename = `${formatDateForFilename(filteredRecordsResult.records[0]?.date)}.xlsx`;
@@ -761,24 +894,13 @@ export default function Home() {
     setNoticeMessage(`Excel 已下载：${filename}`);
   }
 
-  function updateRecord(id: string, field: keyof PodRecord, value: string) {
+  function updateRecord(id: string, field: TableFieldDefinition, value: string) {
     setRecords((current) =>
       current.map((record) => {
         if (record.id !== id) {
           return record;
         }
-
-        if (field === "total" || field === "unscanned" || field === "exceptions") {
-          return {
-            ...record,
-            [field]: value === "" ? "" : Number(value),
-          };
-        }
-
-        return {
-          ...record,
-          [field]: value,
-        };
+        return setRecordFieldValue(record, field, value);
       }),
     );
   }
@@ -1026,16 +1148,19 @@ export default function Home() {
         }
         return {
           ...record,
-          date: seed.date,
-          route: seed.route,
-          driver: seed.driver,
-          taskCode: seed.taskCode,
-          total: seed.total === "" ? "" : Number(seed.total),
-          unscanned: seed.unscanned === "" ? "" : Number(seed.unscanned),
-          exceptions: seed.exceptions === "" ? "" : Number(seed.exceptions),
-          waybillStatus: seed.waybillStatus,
-          stationTeam: seed.stationTeam,
-          totalSourceLabel: seed.totalSourceLabel,
+          date: seed.date ?? record.date,
+          route: seed.route ?? record.route,
+          driver: seed.driver ?? record.driver,
+          taskCode: seed.taskCode ?? record.taskCode,
+          total: seed.total === undefined ? record.total : seed.total === "" ? "" : Number(seed.total),
+          unscanned:
+            seed.unscanned === undefined ? record.unscanned : seed.unscanned === "" ? "" : Number(seed.unscanned),
+          exceptions:
+            seed.exceptions === undefined ? record.exceptions : seed.exceptions === "" ? "" : Number(seed.exceptions),
+          waybillStatus: seed.waybillStatus ?? record.waybillStatus,
+          stationTeam: seed.stationTeam ?? record.stationTeam,
+          totalSourceLabel: seed.totalSourceLabel ?? record.totalSourceLabel,
+          customFieldValues: { ...(seed.customFieldValues || {}) },
         };
       }),
     );
@@ -1053,7 +1178,7 @@ export default function Home() {
               <button
                 type="button"
                 className="rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-xs font-medium text-blue-700 hover:bg-blue-100"
-                onClick={handleAddTaskCodeField}
+                onClick={openFieldManager}
               >
                 新增表格项目
               </button>
@@ -1073,6 +1198,144 @@ export default function Home() {
             <span className="rounded-full bg-blue-100 px-3 py-1 text-blue-700">训练池图片：{trainingStatus?.totalImages || 0}</span>
           </div>
         </header>
+
+        {isFieldManagerOpen ? (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4">
+            <div className="w-full max-w-3xl rounded-3xl border border-slate-200 bg-white shadow-2xl">
+              <div className="flex items-center justify-between border-b border-slate-200 px-6 py-4">
+                <div>
+                  <h2 className="text-lg font-semibold">表格项目管理</h2>
+                  <p className="mt-1 text-sm text-slate-500">你可以新增、重命名、删除或恢复表格项目。删除命中当前表格数据时会先提示。</p>
+                </div>
+                <button
+                  type="button"
+                  className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-medium hover:bg-slate-50"
+                  onClick={() => setIsFieldManagerOpen(false)}
+                >
+                  关闭
+                </button>
+              </div>
+
+              <div className="grid gap-6 px-6 py-5 lg:grid-cols-[1.1fr_0.9fr]">
+                <div className="space-y-4">
+                  <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                    <div className="mb-3 text-sm font-medium text-slate-700">新增项目并进入标注</div>
+                    <div className="space-y-3">
+                      <input
+                        type="text"
+                        className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm outline-none focus:border-blue-500"
+                        placeholder="输入新的表格项目名称"
+                        value={newFieldName}
+                        onChange={(event) => setNewFieldName(event.target.value)}
+                      />
+                      <div className="flex items-center gap-3">
+                        <select
+                          className="rounded-xl border border-slate-300 px-3 py-2 text-sm outline-none focus:border-blue-500"
+                          value={newFieldType}
+                          onChange={(event) => setNewFieldType(event.target.value as "text" | "number")}
+                        >
+                          <option value="text">文本项目</option>
+                          <option value="number">数字项目</option>
+                        </select>
+                        <button
+                          type="button"
+                          className="rounded-xl bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:bg-blue-300"
+                          onClick={() => void createFieldAndStartTraining()}
+                          disabled={isSavingFieldConfig}
+                        >
+                          {isSavingFieldConfig ? "处理中..." : "新增并去标注"}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="rounded-2xl border border-slate-200 p-4">
+                    <div className="mb-3 text-sm font-medium text-slate-700">当前项目</div>
+                    <div className="space-y-3">
+                      {fieldDrafts.filter((field) => field.active).map((field) => (
+                        <div key={field.id} className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <input
+                              type="text"
+                              className="min-w-0 flex-1 rounded-xl border border-slate-300 px-3 py-2 text-sm outline-none focus:border-blue-500"
+                              value={field.label}
+                              onChange={(event) =>
+                                updateFieldDraft(field.id, (current) => ({
+                                  ...current,
+                                  label: event.target.value.slice(0, 40),
+                                }))
+                              }
+                            />
+                            <span className="rounded-full bg-slate-200 px-2 py-1 text-[11px] text-slate-600">
+                              {field.type === "number" ? "数字" : "文本"}
+                            </span>
+                            {field.builtIn ? (
+                              <span className="rounded-full bg-blue-100 px-2 py-1 text-[11px] text-blue-700">内置</span>
+                            ) : (
+                              <span className="rounded-full bg-violet-100 px-2 py-1 text-[11px] text-violet-700">自定义</span>
+                            )}
+                            <button
+                              type="button"
+                              className="rounded-xl border border-rose-300 bg-rose-50 px-3 py-2 text-sm font-medium text-rose-700 hover:bg-rose-100"
+                              onClick={() => handleDeleteFieldDraft(field)}
+                            >
+                              删除
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="space-y-4">
+                  <div className="rounded-2xl border border-slate-200 p-4">
+                    <div className="mb-3 text-sm font-medium text-slate-700">已删除项目</div>
+                    <div className="space-y-3">
+                      {fieldDrafts.filter((field) => !field.active).length ? (
+                        fieldDrafts
+                          .filter((field) => !field.active)
+                          .map((field) => (
+                            <div key={field.id} className="flex items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-3 py-3">
+                              <div>
+                                <div className="text-sm font-medium text-slate-700">{field.label}</div>
+                                <div className="mt-1 text-xs text-slate-500">{field.type === "number" ? "数字项目" : "文本项目"}</div>
+                              </div>
+                              <button
+                                type="button"
+                                className="rounded-xl border border-emerald-300 bg-emerald-50 px-3 py-2 text-sm font-medium text-emerald-700 hover:bg-emerald-100"
+                                onClick={() => handleRestoreFieldDraft(field)}
+                              >
+                                恢复
+                              </button>
+                            </div>
+                          ))
+                      ) : (
+                        <div className="rounded-2xl border border-dashed border-slate-200 px-4 py-6 text-center text-sm text-slate-400">
+                          暂无已删除项目
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-600">
+                    <p>删除项目时，如果当前表格里已经有该列的数据，系统会先提醒你。</p>
+                    <p className="mt-2">删除后的项目会先隐藏，不会立刻清空已有识别值；你也可以在这里恢复。</p>
+                  </div>
+
+                  <button
+                    type="button"
+                    className="w-full rounded-2xl bg-slate-900 px-4 py-3 text-sm font-medium text-white hover:bg-slate-800 disabled:bg-slate-400"
+                    onClick={() => void submitFieldDrafts()}
+                    disabled={isSavingFieldConfig}
+                  >
+                    {isSavingFieldConfig ? "保存中..." : "保存项目配置"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        ) : null}
 
         <section className="grid min-h-[calc(100vh-170px)] grid-cols-1 gap-4 xl:grid-cols-[420px_minmax(0,1fr)]">
           <div ref={uploadPanelRef} className="flex min-h-0 flex-col rounded-3xl border border-slate-200 bg-white shadow-sm">
@@ -1374,8 +1637,8 @@ export default function Home() {
                 <thead className="sticky top-0 z-10 bg-slate-900 text-white">
                   <tr>
                     <th className="border-b border-slate-700 px-3 py-3 text-left font-medium">来源图片</th>
-                    {editableColumns.map((column) => (
-                      <th key={column.key} className="border-b border-slate-700 px-3 py-3 text-left font-medium">
+                    {activeTableFields.map((column) => (
+                      <th key={column.id} className="border-b border-slate-700 px-3 py-3 text-left font-medium">
                         {column.label}
                       </th>
                     ))}
@@ -1386,7 +1649,7 @@ export default function Home() {
                     groupedRecords.map(([route, routeRecords]) => (
                       <Fragment key={route}>
                         <tr className="bg-slate-200">
-                          <td colSpan={editableColumns.length + 1} className="border-b border-slate-300 px-3 py-2 text-left font-semibold text-slate-800">
+                          <td colSpan={activeTableFields.length + 1} className="border-b border-slate-300 px-3 py-2 text-left font-semibold text-slate-800">
                             路线分组：{route} · {routeRecords.length} 条
                           </td>
                         </tr>
@@ -1463,12 +1726,12 @@ export default function Home() {
                                 ) : null}
                               </div>
                             </td>
-                            {editableColumns.map((column) => (
-                              <td key={column.key} className="border-b border-slate-200 px-2 py-2 align-top">
+                            {activeTableFields.map((column) => (
+                              <td key={column.id} className="border-b border-slate-200 px-2 py-2 align-top">
                                 <input
-                                  type={column.type || "text"}
-                                  value={record[column.key] ?? ""}
-                                  onChange={(event) => updateRecord(record.id, column.key, event.target.value)}
+                                  type={column.type === "number" ? "number" : "text"}
+                                  value={String(getRecordFieldValue(record, column) ?? "")}
+                                  onChange={(event) => updateRecord(record.id, column, event.target.value)}
                                   className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 outline-none focus:border-slate-500"
                                 />
                               </td>
@@ -1479,7 +1742,7 @@ export default function Home() {
                     ))
                   ) : (
                     <tr>
-                      <td colSpan={editableColumns.length + 1} className="px-4 py-16 text-center text-slate-500">
+                      <td colSpan={activeTableFields.length + 1} className="px-4 py-16 text-center text-slate-500">
                         {routeFilter ? "没有找到匹配该路线的记录。" : "上传图片并点击“开始 AI 填表”后，结果会出现在这里。"}
                       </td>
                     </tr>
@@ -1614,6 +1877,7 @@ export default function Home() {
             open
             imageName={annotationImageName}
             imageSrc={annotationImageSrc}
+            fieldDefinitions={activeTableFields}
             initialSeed={annotationDraft.seed}
             initialBoxes={annotationDraft.boxes}
             initialFieldAggregations={annotationDraft.fieldAggregations}

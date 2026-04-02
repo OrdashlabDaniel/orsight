@@ -3,37 +3,24 @@ import sharp from "sharp";
 
 import { getAuthUserOrSkip } from "@/lib/auth-server";
 import type { FieldAggregation, TrainingField } from "@/lib/training";
+import {
+  DEFAULT_TABLE_FIELDS,
+  getActiveTableFields,
+  getFieldLabelMap,
+  getFieldTypeMap,
+  isBuiltInFieldId,
+  normalizeTableFields,
+  type TableFieldDefinition,
+} from "@/lib/table-fields";
+import { loadTableFields } from "@/lib/table-fields-store";
 
 const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || "https://api.openai.com/v1";
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const PREVIEW_MODEL = process.env.OPENAI_PREVIEW_MODEL || process.env.OPENAI_PRIMARY_MODEL || "gpt-5-mini";
 const OPENAI_REASONING_EFFORT = process.env.OPENAI_REASONING_EFFORT || "minimal";
 
-const ALLOWED_FIELDS = new Set<TrainingField>([
-  "date",
-  "route",
-  "driver",
-  "taskCode",
-  "total",
-  "unscanned",
-  "exceptions",
-  "waybillStatus",
-  "stationTeam",
-]);
-
-const FIELD_CN: Record<TrainingField, string> = {
-  date: "日期",
-  route: "抽查路线",
-  driver: "抽查司机",
-  taskCode: "任务编码",
-  total: "运单数量",
-  unscanned: "未收数量",
-  exceptions: "错扫数量",
-  waybillStatus: "响应更新状态",
-  stationTeam: "站点车队",
-};
-
-const NUMERIC_FIELDS: TrainingField[] = ["total", "unscanned", "exceptions"];
+const DEFAULT_FIELD_LABELS = getFieldLabelMap(DEFAULT_TABLE_FIELDS);
+const DEFAULT_FIELD_TYPES = getFieldTypeMap(DEFAULT_TABLE_FIELDS);
 
 type BoxPayload = {
   field?: unknown;
@@ -43,58 +30,73 @@ type BoxPayload = {
   height?: unknown;
 };
 
-function normalizeNumber(v: unknown): number | null {
-  if (typeof v === "number" && Number.isFinite(v)) return v;
-  if (typeof v === "string" && v.trim() !== "") {
-    const n = Number(v);
-    if (Number.isFinite(n)) return n;
+type PreviewRequestBody = {
+  imageDataUrl?: unknown;
+  boxes?: unknown;
+  fieldAggregations?: unknown;
+  tableFields?: unknown;
+};
+
+function normalizeNumber(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
   }
   return null;
 }
 
-function normalizeBoxes(raw: unknown): Array<{
-  field: TrainingField;
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-}> {
+function normalizeText(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function normalizeBoxes(
+  raw: unknown,
+  allowedFieldIds: Set<string>,
+): Array<{ field: TrainingField; x: number; y: number; width: number; height: number }> {
   if (!Array.isArray(raw)) return [];
   const out: Array<{ field: TrainingField; x: number; y: number; width: number; height: number }> = [];
   for (const item of raw) {
     if (!item || typeof item !== "object") continue;
-    const b = item as BoxPayload;
-    const field = typeof b.field === "string" ? b.field : "";
-    if (!ALLOWED_FIELDS.has(field as TrainingField)) continue;
-    const x = normalizeNumber(b.x);
-    const y = normalizeNumber(b.y);
-    const width = normalizeNumber(b.width);
-    const height = normalizeNumber(b.height);
+    const box = item as BoxPayload;
+    const field = normalizeText(box.field);
+    if (!field || !allowedFieldIds.has(field)) continue;
+    const x = normalizeNumber(box.x);
+    const y = normalizeNumber(box.y);
+    const width = normalizeNumber(box.width);
+    const height = normalizeNumber(box.height);
     if (x === null || y === null || width === null || height === null) continue;
-    out.push({ field: field as TrainingField, x, y, width, height });
+    out.push({ field, x, y, width, height });
   }
   return out;
 }
 
-function normalizeAggregations(raw: unknown): Partial<Record<TrainingField, FieldAggregation>> {
+function normalizeAggregations(
+  raw: unknown,
+  allowedFieldIds: Set<string>,
+): Partial<Record<TrainingField, FieldAggregation>> {
   const allowed = new Set<FieldAggregation>(["sum", "join_comma", "join_newline", "first"]);
   if (!raw || typeof raw !== "object") return {};
   const out: Partial<Record<TrainingField, FieldAggregation>> = {};
-  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
-    if (!ALLOWED_FIELDS.has(k as TrainingField)) continue;
-    if (typeof v === "string" && allowed.has(v as FieldAggregation)) {
-      out[k as TrainingField] = v as FieldAggregation;
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (!allowedFieldIds.has(key)) continue;
+    if (typeof value === "string" && allowed.has(value as FieldAggregation)) {
+      out[key] = value as FieldAggregation;
     }
   }
   return out;
 }
 
-function inferAgg(field: TrainingField, count: number): FieldAggregation {
-  if (count <= 1) return "first";
-  return NUMERIC_FIELDS.includes(field) ? "sum" : "join_comma";
+function inferAggregation(
+  field: TrainingField,
+  boxCount: number,
+  fieldTypeMap: Record<string, "text" | "number">,
+): FieldAggregation {
+  if (boxCount <= 1) return "first";
+  return fieldTypeMap[field] === "number" ? "sum" : "join_comma";
 }
 
-function describeAgg(mode: FieldAggregation): string {
+function describeAggregation(mode: FieldAggregation): string {
   switch (mode) {
     case "sum":
       return "数字相加：每个子区域读出一个数（读不出视为 0），再求和作为该字段值";
@@ -110,108 +112,129 @@ function describeAgg(mode: FieldAggregation): string {
 }
 
 function parseDataUrlToBuffer(dataUrl: string): Buffer | null {
-  const t = dataUrl.trim();
-  const i = t.indexOf("base64,");
-  if (i < 0) {
-    return null;
-  }
+  const trimmed = dataUrl.trim();
+  const index = trimmed.indexOf("base64,");
+  if (index < 0) return null;
   try {
-    return Buffer.from(t.slice(i + "base64,".length), "base64");
+    return Buffer.from(trimmed.slice(index + "base64,".length), "base64");
   } catch {
     return null;
   }
 }
 
-/** 按位图 0~1 坐标裁剪；返回与 boxes 同序的 PNG data URL（仅含框内像素，不再附整图）。 */
 async function cropsToPngDataUrls(
   imageBuffer: Buffer,
   boxes: Array<{ field: TrainingField; x: number; y: number; width: number; height: number }>,
 ): Promise<string[]> {
   const meta = await sharp(imageBuffer).metadata();
-  const iw = meta.width ?? 0;
-  const ih = meta.height ?? 0;
-  if (!iw || !ih) {
+  const imageWidth = meta.width ?? 0;
+  const imageHeight = meta.height ?? 0;
+  if (!imageWidth || !imageHeight) {
     throw new Error("无法读取图片宽高");
   }
 
   const out: string[] = [];
-  for (const b of boxes) {
-    let left = Math.floor(b.x * iw);
-    let top = Math.floor(b.y * ih);
-    let width = Math.ceil(b.width * iw);
-    let height = Math.ceil(b.height * ih);
-    left = Math.max(0, Math.min(iw - 1, left));
-    top = Math.max(0, Math.min(ih - 1, top));
-    width = Math.max(1, Math.min(iw - left, width));
-    height = Math.max(1, Math.min(ih - top, height));
+  for (const box of boxes) {
+    let left = Math.floor(box.x * imageWidth);
+    let top = Math.floor(box.y * imageHeight);
+    let width = Math.ceil(box.width * imageWidth);
+    let height = Math.ceil(box.height * imageHeight);
 
-    const cropBuf = await sharp(imageBuffer)
+    left = Math.max(0, Math.min(imageWidth - 1, left));
+    top = Math.max(0, Math.min(imageHeight - 1, top));
+    width = Math.max(1, Math.min(imageWidth - left, width));
+    height = Math.max(1, Math.min(imageHeight - top, height));
+
+    const cropBuffer = await sharp(imageBuffer)
       .extract({ left, top, width, height })
       .png()
       .toBuffer();
-    out.push(`data:image/png;base64,${cropBuf.toString("base64")}`);
+    out.push(`data:image/png;base64,${cropBuffer.toString("base64")}`);
   }
   return out;
 }
 
 function buildCropInstructionText(
   boxes: Array<{ field: TrainingField; x: number; y: number; width: number; height: number }>,
-  aggs: Partial<Record<TrainingField, FieldAggregation>>,
+  aggregations: Partial<Record<TrainingField, FieldAggregation>>,
+  tableFields: TableFieldDefinition[],
+  fieldLabels: Record<string, string>,
+  fieldTypeMap: Record<string, "text" | "number">,
 ): string {
   const byField = new Map<TrainingField, typeof boxes>();
-  for (const b of boxes) {
-    const list = byField.get(b.field) || [];
-    list.push(b);
-    byField.set(b.field, list);
+  for (const box of boxes) {
+    const list = byField.get(box.field) || [];
+    list.push(box);
+    byField.set(box.field, list);
   }
 
+  const customFields = tableFields.filter((field) => !isBuiltInFieldId(field.id));
+  const builtInKeys = tableFields.filter((field) => isBuiltInFieldId(field.id)).map((field) => field.id);
+  const boxedCustomFields = customFields.filter((field) => byField.has(field.id));
+
   const lines: string[] = [
-    `下面会附上 ${boxes.length} 张**裁剪小图**（PNG），顺序固定：第 1 张对应第 1 个框，以此类推。`,
-    `每张图里**只有**原截图上该矩形区域内的像素，图外没有任何内容；你必须只根据这些小图做 OCR，禁止臆造框外文字（例如其它位置的司机编号、站点车队）。`,
+    `下面会附上 ${boxes.length} 张裁剪小图（PNG），顺序固定：第 1 张对应第 1 个框，以此类推。`,
+    "每张图里只包含原图中该矩形框内的像素，禁止臆造框外文字。",
     "",
     "字段与图片对应关系：",
   ];
 
-  boxes.forEach((b, i) => {
-    lines.push(`图${i + 1} → 【${FIELD_CN[b.field]}】（JSON 键名 ${b.field}）`);
+  boxes.forEach((box, index) => {
+    lines.push(`图${index + 1} -> 【${fieldLabels[box.field] || DEFAULT_FIELD_LABELS[box.field] || box.field}】（JSON 键名 ${box.field}）`);
   });
 
   lines.push("", "同字段多张小图时的合并规则：");
-  for (const [field, list] of byField) {
-    if (list.length <= 1) {
-      continue;
-    }
-    const indices: number[] = [];
-    boxes.forEach((b, idx) => {
-      if (b.field === field) {
-        indices.push(idx + 1);
-      }
-    });
-    const mode = aggs[field] ?? inferAgg(field, list.length);
+  for (const [field, fieldBoxes] of byField) {
+    if (fieldBoxes.length <= 1) continue;
+    const indices = boxes
+      .map((box, index) => (box.field === field ? index + 1 : -1))
+      .filter((index) => index > 0);
+    const mode = aggregations[field] ?? inferAggregation(field, fieldBoxes.length, fieldTypeMap);
     lines.push(
-      `- ${field}（${FIELD_CN[field]}）：对应 图${indices.join("、图")}；${describeAgg(mode)}`,
+      `- ${field}（${fieldLabels[field] || DEFAULT_FIELD_LABELS[field] || field}）：对应 图${indices.join("、图")}；${describeAggregation(mode)}`,
     );
   }
 
   lines.push(
     "",
-    "请输出一个 JSON 对象，键包括（无对应小图的键可省略或 null）：",
-    "date, route, driver, taskCode, total, totalSourceLabel, unscanned, exceptions, waybillStatus, stationTeam, previewNote",
-    "数字字段用整数或 null；文本用字符串。previewNote 可说明读数不确定之处。",
+    "请输出一个 JSON 对象。",
+    `内置字段可直接作为顶层键输出：${builtInKeys.join(", ")}。`,
+    "若某个字段在这些小图里读不出来，请输出 null、空字符串，或直接省略。",
+    "previewNote 可选，用来说明哪些字段还不确定。",
   );
+
+  if (boxedCustomFields.length > 0) {
+    lines.push(
+      `自定义字段请统一写入 customFieldValues 对象，键必须严格使用字段 id。当前参与试填的自定义字段有：${boxedCustomFields
+        .map((field) => `${field.id}（${field.label}）`)
+        .join("、")}。`,
+    );
+  }
 
   return lines.join("\n");
 }
 
-function parsePreviewJson(content: string): {
-  record: Record<string, unknown>;
-  previewNote: string;
-} {
+function parsePreviewJson(content: string): { record: Record<string, unknown>; previewNote: string } {
   const parsed = JSON.parse(content) as Record<string, unknown>;
   const previewNote = typeof parsed.previewNote === "string" ? parsed.previewNote.trim() : "";
   const record = { ...parsed };
   delete record.previewNote;
   return { record, previewNote };
+}
+
+function normalizeCustomFieldPreviewValue(
+  field: TableFieldDefinition,
+  value: unknown,
+): string | number | "" {
+  if (field.type === "number") {
+    return normalizeNumber(value) ?? "";
+  }
+  const text = normalizeText(value);
+  if (text) return text;
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return String(value);
+  }
+  return "";
 }
 
 export async function POST(request: Request) {
@@ -224,24 +247,32 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "未配置 OPENAI_API_KEY。" }, { status: 503 });
     }
 
-    const body = (await request.json()) as {
-      imageDataUrl?: unknown;
-      boxes?: unknown;
-      fieldAggregations?: unknown;
-    };
-
+    const body = (await request.json()) as PreviewRequestBody;
     const imageDataUrl = typeof body.imageDataUrl === "string" ? body.imageDataUrl.trim() : "";
     if (!imageDataUrl.startsWith("data:") || imageDataUrl.length > 14 * 1024 * 1024) {
       return NextResponse.json({ error: "图片无效或过大。" }, { status: 400 });
     }
 
-    const boxes = normalizeBoxes(body.boxes);
+    const requestedFields = Array.isArray(body.tableFields)
+      ? normalizeTableFields(body.tableFields)
+      : await loadTableFields();
+    const activeTableFields = getActiveTableFields(requestedFields.length ? requestedFields : DEFAULT_TABLE_FIELDS);
+    const fieldLabels = {
+      ...DEFAULT_FIELD_LABELS,
+      ...getFieldLabelMap(activeTableFields),
+    };
+    const fieldTypeMap = {
+      ...DEFAULT_FIELD_TYPES,
+      ...getFieldTypeMap(activeTableFields),
+    };
+    const allowedFieldIds = new Set(activeTableFields.map((field) => field.id));
+
+    const boxes = normalizeBoxes(body.boxes, allowedFieldIds);
     if (boxes.length === 0) {
       return NextResponse.json({ error: "请至少提供一个有效字段框。" }, { status: 400 });
     }
 
-    const fieldAggregations = normalizeAggregations(body.fieldAggregations);
-
+    const fieldAggregations = normalizeAggregations(body.fieldAggregations, allowedFieldIds);
     const imageBuffer = parseDataUrlToBuffer(imageDataUrl);
     if (!imageBuffer || imageBuffer.length === 0) {
       return NextResponse.json({ error: "无法解析图片数据。" }, { status: 400 });
@@ -250,19 +281,23 @@ export async function POST(request: Request) {
     let cropUrls: string[];
     try {
       cropUrls = await cropsToPngDataUrls(imageBuffer, boxes);
-    } catch (e) {
+    } catch (error) {
       return NextResponse.json(
-        { error: e instanceof Error ? e.message : "裁剪标注区域失败。" },
+        { error: error instanceof Error ? error.message : "裁剪标注区域失败。" },
         { status: 400 },
       );
     }
 
-    const userText = buildCropInstructionText(boxes, fieldAggregations);
+    const userText = buildCropInstructionText(
+      boxes,
+      fieldAggregations,
+      activeTableFields,
+      fieldLabels,
+      fieldTypeMap,
+    );
 
-    const systemText = `你是 OrSight 训练标注预览助手。用户只会发来多张**已经裁剪好**的小图（每图仅含一个矩形框内的像素）和文字说明。
-你必须只根据这些小图里的可见像素做 OCR 并按要求合并；**绝对禁止**引用未出现在这些小图里的任何文字（例如整屏其它位置的司机编号、站点代码）。
-抽查路线 (route)：只输出**该小图内**可见的路线文本（如 IAH01-030-C），不要用记忆中或其它字段的常见格式替换。
-输出合法 JSON。`;
+    const systemText = `你是 OrSight 训练标注预览助手。用户会发来多张已经裁剪好的小图，每张图只包含一个标注框内的像素。
+你必须只根据这些小图做 OCR，并按字段说明合并结果。禁止引用小图之外的信息。只返回合法 JSON。`;
 
     const userContent: Array<
       | { type: "text"; text: string }
@@ -272,7 +307,7 @@ export async function POST(request: Request) {
       userContent.push({ type: "image_url", image_url: { url } });
     }
 
-    const res = await fetch(`${OPENAI_BASE_URL}/chat/completions`, {
+    const response = await fetch(`${OPENAI_BASE_URL}/chat/completions`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -284,20 +319,17 @@ export async function POST(request: Request) {
         response_format: { type: "json_object" },
         messages: [
           { role: "system", content: systemText },
-          {
-            role: "user",
-            content: userContent,
-          },
+          { role: "user", content: userContent },
         ],
       }),
     });
 
-    if (!res.ok) {
-      const t = await res.text();
-      return NextResponse.json({ error: `模型错误 ${res.status}: ${t.slice(0, 400)}` }, { status: 502 });
+    if (!response.ok) {
+      const text = await response.text();
+      return NextResponse.json({ error: `模型错误 ${response.status}: ${text.slice(0, 400)}` }, { status: 502 });
     }
 
-    const payload = (await res.json()) as {
+    const payload = (await response.json()) as {
       choices?: Array<{ message?: { content?: string } }>;
     };
     const content = payload.choices?.[0]?.message?.content;
@@ -305,31 +337,48 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "模型未返回内容。" }, { status: 502 });
     }
 
-    let record: Record<string, unknown>;
-    let previewNote: string;
+    let parsedRecord: Record<string, unknown>;
+    let previewNote = "";
     try {
-      const p = parsePreviewJson(content);
-      record = p.record;
-      previewNote = p.previewNote;
+      const parsed = parsePreviewJson(content);
+      parsedRecord = parsed.record;
+      previewNote = parsed.previewNote;
     } catch {
       return NextResponse.json({ error: "模型返回的 JSON 无法解析。" }, { status: 502 });
     }
 
-    const out: Record<string, string | number | ""> = {};
-    if (typeof record.date === "string") out.date = record.date;
-    if (typeof record.route === "string") out.route = record.route;
-    if (typeof record.driver === "string") out.driver = record.driver;
-    if (typeof record.taskCode === "string") out.taskCode = record.taskCode;
-    if (typeof record.waybillStatus === "string") out.waybillStatus = record.waybillStatus;
-    if (typeof record.stationTeam === "string") out.stationTeam = record.stationTeam;
-    if (typeof record.totalSourceLabel === "string") out.totalSourceLabel = record.totalSourceLabel;
+    const boxedFields = new Set(boxes.map((box) => box.field));
+    const out: Record<string, unknown> = {};
 
-    const tn = normalizeNumber(record.total);
-    out.total = tn !== null ? tn : "";
-    const un = normalizeNumber(record.unscanned);
-    out.unscanned = un !== null ? un : "";
-    const ex = normalizeNumber(record.exceptions);
-    out.exceptions = ex !== null ? ex : "";
+    const textBuiltIns = ["date", "route", "driver", "taskCode", "waybillStatus", "stationTeam", "totalSourceLabel"];
+    for (const key of textBuiltIns) {
+      if (boxedFields.has(key) || key in parsedRecord) {
+        out[key] = normalizeText(parsedRecord[key]);
+      }
+    }
+
+    for (const key of ["total", "unscanned", "exceptions"]) {
+      if (boxedFields.has(key) || key in parsedRecord) {
+        out[key] = normalizeNumber(parsedRecord[key]) ?? "";
+      }
+    }
+
+    const rawCustomFieldValues =
+      parsedRecord.customFieldValues && typeof parsedRecord.customFieldValues === "object"
+        ? (parsedRecord.customFieldValues as Record<string, unknown>)
+        : {};
+    const customFieldValues: Record<string, string | number | ""> = {};
+    for (const field of activeTableFields.filter((item) => !isBuiltInFieldId(item.id))) {
+      if (!boxedFields.has(field.id) && !(field.id in parsedRecord) && !(field.id in rawCustomFieldValues)) {
+        continue;
+      }
+      const rawValue =
+        rawCustomFieldValues[field.id] !== undefined ? rawCustomFieldValues[field.id] : parsedRecord[field.id];
+      customFieldValues[field.id] = normalizeCustomFieldPreviewValue(field, rawValue);
+    }
+    if (Object.keys(customFieldValues).length > 0) {
+      out.customFieldValues = customFieldValues;
+    }
 
     return NextResponse.json({
       record: out,

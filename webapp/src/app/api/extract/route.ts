@@ -23,6 +23,13 @@ import {
   type TrainingExample,
   type TrainingField,
 } from "@/lib/training";
+import {
+  getActiveTableFields,
+  getFieldLabelMap,
+  isBuiltInFieldId,
+  type TableFieldDefinition,
+} from "@/lib/table-fields";
+import { loadTableFields } from "@/lib/table-fields-store";
 
 const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || "https://api.openai.com/v1";
 const OPENAI_PRIMARY_MODEL = process.env.OPENAI_PRIMARY_MODEL || process.env.OPENAI_MODEL || "gpt-5-mini";
@@ -42,15 +49,19 @@ type ExtractVisionContext = {
   examples: TrainingExample[];
   visualPack: Awaited<ReturnType<typeof buildVisualReferencePack>>;
   imageGuidance: Array<{ example: TrainingExample; fingerprint: number[] }>;
+  tableFields: TableFieldDefinition[];
 };
 
 async function buildExtractVisionContext(): Promise<ExtractVisionContext> {
-  const examples = await loadTrainingExamples();
+  const [examples, rawTableFields] = await Promise.all([loadTrainingExamples(), loadTableFields()]);
+  const tableFields = getActiveTableFields(rawTableFields);
   const [visualPack, imageGuidance] = await Promise.all([
-    buildVisualReferencePack(examples),
+    buildVisualReferencePack(examples, {
+      fieldLabels: getFieldLabelMap(tableFields),
+    }),
     buildTrainingImageGuidance(examples),
   ]);
-  return { examples, visualPack, imageGuidance };
+  return { examples, visualPack, imageGuidance, tableFields };
 }
 
 function mergeParallelRefineReasons(base: PodRecord, ...refined: PodRecord[]): string | null {
@@ -104,6 +115,14 @@ function buildAggregationBaseRecord(records: PodRecord[]): PodRecord {
     exceptions: firstNonEmptyValue(records, (record) => record.exceptions) as PodRecord["exceptions"],
     waybillStatus: String(firstNonEmptyValue(records, (record) => record.waybillStatus) || ""),
     stationTeam: String(firstNonEmptyValue(records, (record) => record.stationTeam) || ""),
+    customFieldValues: records.reduce<Record<string, string | number | "">>((acc, record) => {
+      for (const [key, value] of Object.entries(record.customFieldValues || {})) {
+        if (!(key in acc) || acc[key] === "") {
+          acc[key] = value;
+        }
+      }
+      return acc;
+    }, {}),
     reviewRequired: records.some((record) => Boolean(record.reviewRequired)),
     reviewReason: mergeReviewReasonParts(records),
     mergedSourceCount: first.mergedSourceCount,
@@ -128,6 +147,7 @@ type RawModelRecord = {
   exceptions?: unknown;
   waybillStatus?: unknown;
   stationTeam?: unknown;
+  customFieldValues?: unknown;
   reviewRequired?: unknown;
   reviewReason?: unknown;
 };
@@ -158,6 +178,53 @@ const TRAINING_FIELD_CN: Record<TrainingField, string> = {
   waybillStatus: "响应更新状态",
   stationTeam: "站点车队",
 };
+
+function normalizeCustomFieldValues(value: unknown): Record<string, string | number | ""> | undefined {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+
+  const out: Record<string, string | number | ""> = {};
+  for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
+    const normalizedKey = normalizeText(key);
+    if (!normalizedKey) {
+      continue;
+    }
+    const asNumber = normalizeNumber(raw);
+    if (typeof asNumber === "number") {
+      out[normalizedKey] = asNumber;
+      continue;
+    }
+    const asText = normalizeText(raw);
+    if (asText) {
+      out[normalizedKey] = asText;
+    }
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function buildDynamicFieldPrompt(tableFields: TableFieldDefinition[]): string {
+  if (!tableFields.length) {
+    return "";
+  }
+
+  const activeCustomFields = tableFields.filter((field) => !isBuiltInFieldId(field.id));
+  const lines = ["", "【当前表格项目配置】"];
+
+  for (const field of tableFields) {
+    lines.push(`- 字段 id: ${field.id}；当前显示名：「${field.label}」；类型：${field.type}`);
+  }
+
+  if (activeCustomFields.length > 0) {
+    lines.push(
+      `存在自定义表格项目时，请把识别结果写入 customFieldValues 对象；键必须严格使用字段 id。当前自定义字段有：${activeCustomFields
+        .map((field) => `${field.id}（${field.label}）`)
+        .join("、")}。`,
+    );
+  }
+
+  return lines.join("\n");
+}
 
 type FingerprintedTrainingExample = {
   example: TrainingExample;
@@ -471,6 +538,7 @@ function mergeBoxGuidedRecord(
   boxedFields: Set<TrainingField>,
 ): PodRecord {
   const next = { ...base };
+  const customFieldValues = normalizeCustomFieldValues(parsed.customFieldValues) || {};
 
   if (boxedFields.has("date")) {
     const value = normalizeText(parsed.date);
@@ -510,6 +578,17 @@ function mergeBoxGuidedRecord(
 
   if (boxedFields.has("stationTeam")) {
     next.stationTeam = normalizeText(parsed.stationTeam) || "";
+  }
+
+  for (const field of boxedFields) {
+    if (isBuiltInFieldId(field)) {
+      continue;
+    }
+    const value = customFieldValues[field];
+    next.customFieldValues = {
+      ...(next.customFieldValues || {}),
+      [field]: value ?? "",
+    };
   }
 
   if (boxedFields.has("total")) {
@@ -1212,7 +1291,7 @@ async function callVisionModel(
   const bytes = Buffer.from(await file.arrayBuffer());
   const dataUrl = `data:${file.type || "image/jpeg"};base64,${bytes.toString("base64")}`;
 
-  const baseText = `${visionPrompt}${visualPack.hintText}`;
+  const baseText = `${visionPrompt}${buildDynamicFieldPrompt(ctx.tableFields)}${visualPack.hintText}`;
 
   const userContent: OpenAIMessageContent[] = [{ type: "text", text: baseText }];
   for (const ref of visualPack.referenceImages) {
@@ -1395,6 +1474,7 @@ function mapRecord(imageName: string, raw: RawModelRecord, index: number): PodRe
     exceptions: normalizeNumber(raw.exceptions),
     waybillStatus: normalizeText(raw.waybillStatus),
     stationTeam: normalizeText(raw.stationTeam),
+    customFieldValues: normalizeCustomFieldValues(raw.customFieldValues),
     reviewRequired: Boolean(raw.reviewRequired),
     reviewReason: normalizeText(raw.reviewReason) || null,
   };

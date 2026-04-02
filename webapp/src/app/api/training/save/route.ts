@@ -26,6 +26,7 @@ type SaveTrainingPayload = {
     exceptions?: unknown;
     waybillStatus?: unknown;
     stationTeam?: unknown;
+    customFieldValues?: unknown;
   };
   boxes?: unknown;
   fieldAggregations?: unknown;
@@ -95,27 +96,35 @@ function normalizeBoxes(value: unknown): TrainingBox[] {
 
 const AGGREGATION_VALUES = new Set<FieldAggregation>(["sum", "join_comma", "join_newline", "first"]);
 
-const TRAINING_FIELD_KEYS = new Set<string>([
-  "date",
-  "route",
-  "driver",
-  "taskCode",
-  "total",
-  "unscanned",
-  "exceptions",
-  "waybillStatus",
-  "stationTeam",
-]);
-
 function normalizeFieldAggregations(raw: unknown): Partial<Record<TrainingField, FieldAggregation>> | undefined {
   if (!raw || typeof raw !== "object") {
     return undefined;
   }
   const out: Partial<Record<TrainingField, FieldAggregation>> = {};
   for (const [key, val] of Object.entries(raw as Record<string, unknown>)) {
-    if (!TRAINING_FIELD_KEYS.has(key)) continue;
     if (typeof val !== "string" || !AGGREGATION_VALUES.has(val as FieldAggregation)) continue;
     out[key as TrainingField] = val as FieldAggregation;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function normalizeCustomFieldValues(raw: unknown): Record<string, string | number | ""> | undefined {
+  if (!raw || typeof raw !== "object") {
+    return undefined;
+  }
+  const out: Record<string, string | number | ""> = {};
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    const normalizedKey = normalizeText(key);
+    if (!normalizedKey) continue;
+    const num = normalizeNumber(value);
+    if (num !== null) {
+      out[normalizedKey] = num;
+      continue;
+    }
+    const text = normalizeText(value);
+    if (text) {
+      out[normalizedKey] = text;
+    }
   }
   return Object.keys(out).length > 0 ? out : undefined;
 }
@@ -150,6 +159,7 @@ export async function POST(request: Request) {
         exceptions: normalizeNumber(output?.exceptions) || 0,
         waybillStatus: normalizeText(output?.waybillStatus) || undefined,
         stationTeam: normalizeText(output?.stationTeam) || undefined,
+        customFieldValues: normalizeCustomFieldValues(output?.customFieldValues),
       },
       boxes: normalizeBoxes(payload.boxes),
       fieldAggregations: normalizeFieldAggregations(payload.fieldAggregations),
@@ -166,6 +176,7 @@ export async function POST(request: Request) {
       example.output.route ||
       example.output.driver ||
       example.output.taskCode ||
+      (example.output.customFieldValues && Object.keys(example.output.customFieldValues).length > 0) ||
       example.notes
     ) {
       nextExamples = await upsertTrainingExample(example);

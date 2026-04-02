@@ -92,6 +92,12 @@ export async function POST(request: Request) {
       rulesToSave.workingRules = current.workingRules;
     }
 
+    if (Array.isArray(payload.tableFields)) {
+      rulesToSave.tableFields = payload.tableFields;
+    } else if (current.tableFields !== undefined) {
+      rulesToSave.tableFields = current.tableFields;
+    }
+
     await saveGlobalRules(rulesToSave);
 
     return NextResponse.json({ ok: true });

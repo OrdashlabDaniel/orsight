@@ -12,6 +12,11 @@ import {
   type WorkbenchAnnotationBox,
 } from "@/components/TrainingAnnotationWorkbench";
 import type { AgentAsset, AgentThreadTurn } from "@/lib/agent-context-types";
+import {
+  DEFAULT_TABLE_FIELDS,
+  getActiveTableFields,
+  type TableFieldDefinition,
+} from "@/lib/table-fields";
 
 function formatTurnForChatApi(turn: AgentThreadTurn): string {
   let s = turn.content;
@@ -50,6 +55,7 @@ type TrainingStatusItem = {
       exceptions: number;
       waybillStatus?: string;
       stationTeam?: string;
+      customFieldValues?: Record<string, string | number | "">;
     };
     boxes?: WorkbenchAnnotationBox[];
     fieldAggregations?: Partial<Record<AnnotationField, FieldAggregation>>;
@@ -65,7 +71,7 @@ type TrainingStatusResponse = {
 
 export default function TrainingMode() {
   const [setupField, setSetupField] = useState("");
-  const taskCodeOnboarding = setupField === "taskCode";
+  const [tableFields, setTableFields] = useState<TableFieldDefinition[]>(DEFAULT_TABLE_FIELDS);
   const [uploads, setUploads] = useState<UploadItem[]>([]);
   const [selectedUploadId, setSelectedUploadId] = useState<string | null>(null);
   
@@ -100,21 +106,42 @@ export default function TrainingMode() {
   const [agentChatLoading, setAgentChatLoading] = useState(false);
   const [isSavingRules, setIsSavingRules] = useState(false);
 
+  const activeTableFields = getActiveTableFields(tableFields);
+  const setupFieldDefinition = activeTableFields.find((field) => field.id === setupField) || null;
+  const isFieldOnboarding = Boolean(setupFieldDefinition);
+
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     setSetupField(params.get("setupField") || "");
   }, []);
 
   useEffect(() => {
-    if (!taskCodeOnboarding) {
+    void loadTableFieldConfig();
+  }, []);
+
+  useEffect(() => {
+    if (!isFieldOnboarding) {
       return;
     }
     uploadPanelRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-  }, [taskCodeOnboarding]);
+  }, [isFieldOnboarding]);
 
   useEffect(() => {
     void loadGlobalRules();
   }, []);
+
+  async function loadTableFieldConfig() {
+    try {
+      const res = await fetch("/api/table-fields");
+      const data = (await res.json()) as { error?: string; tableFields?: TableFieldDefinition[] };
+      if (!res.ok) {
+        throw new Error(data.error || "表格项目配置读取失败。");
+      }
+      setTableFields(data.tableFields?.length ? data.tableFields : DEFAULT_TABLE_FIELDS);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "表格项目配置读取失败。");
+    }
+  }
 
   async function loadGlobalRules() {
     try {
@@ -396,7 +423,7 @@ export default function TrainingMode() {
       });
       setNoticeMessage(`已加入 ${nextUploads.length} 张待标注图片。`);
       setErrorMessage("");
-      if (taskCodeOnboarding && nextUploads[0]) {
+      if (isFieldOnboarding && nextUploads[0]) {
         setSelectedUploadId(nextUploads[0].id);
         void openAnnotationPanel(nextUploads[0]);
       }
@@ -487,6 +514,7 @@ export default function TrainingMode() {
         waybillStatus: existingExample?.output.waybillStatus || "",
         stationTeam: existingExample?.output.stationTeam || "",
         totalSourceLabel: existingExample?.output.totalSourceLabel || "",
+        customFieldValues: { ...(existingExample?.output.customFieldValues || {}) },
       },
       boxes: rawBoxes.map((b) => ({
         ...b,
@@ -550,11 +578,12 @@ export default function TrainingMode() {
           <p className="mt-2 text-sm text-slate-600">
             在此模式下，您可以上传图片并手动标注字段，这些图片将长期存入云端训练池，作为 AI 识别的引导示例。
           </p>
-          {taskCodeOnboarding ? (
+          {setupFieldDefinition ? (
             <div className="mt-4 rounded-2xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-800">
-              <div className="font-medium">当前正在扩展新字段：任务编码</div>
+              <div className="font-medium">当前正在扩展新表格项目：{setupFieldDefinition.label}</div>
               <div className="mt-1">
-                请先上传一张范例图片。上传后系统会自动打开标注工作台，并默认选中“任务编码”，你只需要框出任务编号所在位置，并在右侧填写最终要写入表格的任务编码。
+                请先上传一张范例图片。上传后系统会自动打开标注工作台，并默认选中“{setupFieldDefinition.label}”。
+                你只需要框出这个表格项目所在的位置，并在右侧填写最终要写入表格的内容。
               </div>
             </div>
           ) : null}
@@ -771,6 +800,7 @@ export default function TrainingMode() {
                                 exceptions: 0,
                                 waybillStatus: "",
                                 stationTeam: "",
+                                customFieldValues: {},
                               },
                                 boxes: [],
                               }),
@@ -928,11 +958,12 @@ export default function TrainingMode() {
             open
             imageName={annotationImageName}
             imageSrc={annotationImageSrc}
+            fieldDefinitions={activeTableFields}
             initialSeed={annotationDraft.seed}
             initialBoxes={annotationDraft.boxes}
             initialFieldAggregations={annotationDraft.fieldAggregations}
             initialNotes={annotationDraft.notes}
-            initialField={taskCodeOnboarding ? "taskCode" : undefined}
+            initialField={setupFieldDefinition?.id || undefined}
             onClose={closeRecordPopup}
             onNotice={setNoticeMessage}
             onError={setErrorMessage}

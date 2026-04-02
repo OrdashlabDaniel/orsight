@@ -11,6 +11,7 @@ export type PodRecord = {
   waybillStatus?: string;
   stationTeam?: string;
   totalSourceLabel?: string;
+  customFieldValues?: Record<string, string | number | "">;
   reviewRequired?: boolean;
   reviewReason?: string | null;
   /** 仅跨图合并行：由多张图合并为一条时，为合并前的条数（≥2） */
@@ -262,6 +263,19 @@ export function toExcelRows(records: PodRecord) {
   ];
 }
 
+function mergeCustomFieldValues(
+  current: Record<string, string | number | ""> | undefined,
+  next: Record<string, string | number | ""> | undefined,
+) {
+  if (!current && !next) {
+    return undefined;
+  }
+  return {
+    ...(current || {}),
+    ...(next || {}),
+  };
+}
+
 function mergeTextList(currentValue: string, nextValue: string, separator: string): string {
   const values = new Set(
     [currentValue, nextValue]
@@ -282,6 +296,7 @@ function mergeDuplicateRecordGroup(group: PodRecord[]): PodRecord {
     base.taskCode = base.taskCode || next.taskCode;
     base.stationTeam = base.stationTeam || next.stationTeam;
     base.waybillStatus = base.waybillStatus || next.waybillStatus;
+    base.customFieldValues = mergeCustomFieldValues(base.customFieldValues, next.customFieldValues);
   }
   base.mergedSourceCount = group.length;
   return base;
@@ -300,6 +315,7 @@ export function organizeRecords(records: PodRecord[]): OrganizedRecordsResult {
       waybillStatus: record.waybillStatus,
       totalSourceLabel: record.totalSourceLabel || "",
       stationTeam: record.stationTeam || "",
+      customFieldValues: record.customFieldValues || {},
     });
 
   const byBizKey = new Map<string, PodRecord[]>();

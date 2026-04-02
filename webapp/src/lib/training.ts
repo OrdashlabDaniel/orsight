@@ -4,19 +4,11 @@ import sharp from "sharp";
 
 import type { AgentAsset, AgentThreadTurn } from "./agent-context-types";
 import { getSupabaseAdmin, isSupabaseConfigured } from "./supabase";
+import type { TableFieldDefinition } from "./table-fields";
 
 export type { AgentAsset, AgentThreadTurn } from "./agent-context-types";
 
-export type TrainingField =
-  | "date"
-  | "route"
-  | "driver"
-  | "taskCode"
-  | "total"
-  | "unscanned"
-  | "exceptions"
-  | "waybillStatus"
-  | "stationTeam";
+export type TrainingField = string;
 
 /** 同一字段多框时，如何合并写入表格 */
 export type FieldAggregation = "sum" | "join_comma" | "join_newline" | "first";
@@ -51,6 +43,7 @@ export type TrainingExample = {
     exceptions: number;
     waybillStatus?: string;
     stationTeam?: string;
+    customFieldValues?: Record<string, string | number | "">;
   };
   boxes?: TrainingBox[];
   /** 按字段指定多框合并方式；未指定的字段按默认策略推断 */
@@ -69,6 +62,7 @@ export type GlobalRules = {
     name: string;
     content: string;
   }>;
+  tableFields?: TableFieldDefinition[];
   /** 训练页「与 AI 对话」历史，随全局规则一并持久化 */
   guidanceHistory?: GuidanceTurn[];
   /** 填表 Agent：单一对话流（文字 + 附图 + 文档摘录），用于继续优化规则 */
@@ -106,6 +100,7 @@ export async function loadGlobalRules(): Promise<GlobalRules> {
       guidanceHistory: Array.isArray(row.guidanceHistory) ? row.guidanceHistory : undefined,
       agentThread: Array.isArray(row.agentThread) ? row.agentThread : undefined,
       workingRules: typeof row.workingRules === "string" ? row.workingRules : undefined,
+      tableFields: Array.isArray(row.tableFields) ? (row.tableFields as TableFieldDefinition[]) : undefined,
     };
   } catch (error) {
     console.error("Exception loading global rules:", error);
@@ -393,7 +388,7 @@ const TRAINING_FIELD_LABELS: Record<string, string> = {
   stationTeam: "站点车队",
 };
 
-const TRAINING_FIELD_COLORS: Record<TrainingField, string> = {
+const TRAINING_FIELD_COLORS: Record<string, string> = {
   date: "#2563eb",
   route: "#7c3aed",
   driver: "#0891b2",
@@ -405,11 +400,11 @@ const TRAINING_FIELD_COLORS: Record<TrainingField, string> = {
   stationTeam: "#0f766e",
 };
 
-const NUMERIC_TRAINING_FIELDS: TrainingField[] = ["total", "unscanned", "exceptions"];
+const NUMERIC_TRAINING_FIELDS = new Set<TrainingField>(["total", "unscanned", "exceptions"]);
 
 function inferFieldAggregation(field: TrainingField, boxCount: number): FieldAggregation {
   if (boxCount <= 1) return "first";
-  return NUMERIC_TRAINING_FIELDS.includes(field) ? "sum" : "join_comma";
+  return NUMERIC_TRAINING_FIELDS.has(field) ? "sum" : "join_comma";
 }
 
 function describeAggregation(mode: FieldAggregation): string {
@@ -525,6 +520,7 @@ function parseDataUrl(dataUrl: string): { mimeType: string; buffer: Buffer } | n
 async function buildAnnotatedTrainingImageDataUrl(
   example: TrainingExample,
   originalDataUrl: string,
+  fieldLabels?: Record<string, string>,
 ): Promise<string> {
   const parsed = parseDataUrl(originalDataUrl);
   if (!parsed) {
@@ -555,7 +551,7 @@ async function buildAnnotatedTrainingImageDataUrl(
     const y = Math.max(0, Math.round(box.y * height));
     const w = Math.max(1, Math.round(box.width * width));
     const h = Math.max(1, Math.round(box.height * height));
-    const label = escapeSvgText(TRAINING_FIELD_LABELS[box.field] || box.field);
+    const label = escapeSvgText(fieldLabels?.[box.field] || TRAINING_FIELD_LABELS[box.field] || box.field);
     const labelWidth = Math.max(88, label.length * (fontSize * 0.95));
     const labelY = Math.max(0, y - labelHeight);
 
@@ -588,7 +584,7 @@ async function buildAnnotatedTrainingImageDataUrl(
  */
 export async function buildVisualReferencePack(
   examples: TrainingExample[],
-  options?: { maxImages?: number; maxBoxHintExamples?: number },
+  options?: { maxImages?: number; maxBoxHintExamples?: number; fieldLabels?: Record<string, string> },
 ): Promise<{
   hintText: string;
   referenceImages: Array<{ imageName: string; caption: string; dataUrl: string }>;
@@ -610,7 +606,7 @@ export async function buildVisualReferencePack(
       if (referenceImages.length >= effectiveMaxImages) break;
       const originalDataUrl = await getTrainingImageDataUrl(ex.imageName);
       if (!originalDataUrl) continue;
-      const dataUrl = await buildAnnotatedTrainingImageDataUrl(ex, originalDataUrl);
+      const dataUrl = await buildAnnotatedTrainingImageDataUrl(ex, originalDataUrl, options?.fieldLabels);
       const summary = [
         `date=${ex.output.date}`,
         `route=${ex.output.route}`,
@@ -622,6 +618,11 @@ export async function buildVisualReferencePack(
         `exceptions=${ex.output.exceptions}`,
         ex.output.waybillStatus ? `waybillStatus=${ex.output.waybillStatus}` : "",
         ex.output.stationTeam ? `stationTeam=${ex.output.stationTeam}` : "",
+        ...(ex.output.customFieldValues
+          ? Object.entries(ex.output.customFieldValues)
+              .filter(([, value]) => value !== "" && value !== undefined && value !== null)
+              .map(([key, value]) => `${options?.fieldLabels?.[key] || key}=${value}`)
+          : []),
       ]
         .filter(Boolean)
         .join("；");
