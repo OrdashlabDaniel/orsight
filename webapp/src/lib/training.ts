@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import sharp from "sharp";
 
 import type { AgentAsset, AgentThreadTurn } from "./agent-context-types";
 import { getSupabaseAdmin, isSupabaseConfigured } from "./supabase";
@@ -389,6 +390,17 @@ const TRAINING_FIELD_LABELS: Record<string, string> = {
   stationTeam: "站点车队",
 };
 
+const TRAINING_FIELD_COLORS: Record<TrainingField, string> = {
+  date: "#2563eb",
+  route: "#7c3aed",
+  driver: "#0891b2",
+  total: "#16a34a",
+  unscanned: "#ea580c",
+  exceptions: "#dc2626",
+  waybillStatus: "#475569",
+  stationTeam: "#0f766e",
+};
+
 const NUMERIC_TRAINING_FIELDS: TrainingField[] = ["total", "unscanned", "exceptions"];
 
 function inferFieldAggregation(field: TrainingField, boxCount: number): FieldAggregation {
@@ -411,6 +423,8 @@ function describeAggregation(mode: FieldAggregation): string {
   }
 }
 
+// Legacy text-rule generator kept only for rollback; extraction now uses annotated reference images instead.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function formatBoxHintsForExample(example: TrainingExample): string {
   if (!example.boxes?.length) {
     return "";
@@ -472,6 +486,8 @@ function resolveTrainingPromptExampleLimit(explicit?: number): number {
   return 12;
 }
 
+// Legacy text-rule generator kept only for rollback; extraction now uses annotated reference images instead.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function resolveTrainingBoxHintLimit(options?: { maxBoxHintExamples?: number }): number {
   if (options?.maxBoxHintExamples != null) {
     return Math.max(1, Math.min(24, options.maxBoxHintExamples));
@@ -480,6 +496,86 @@ function resolveTrainingBoxHintLimit(options?: { maxBoxHintExamples?: number }):
   const n = raw ? Number.parseInt(raw, 10) : NaN;
   if (Number.isFinite(n)) return Math.max(1, Math.min(24, n));
   return 8;
+}
+
+function escapeSvgText(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+function parseDataUrl(dataUrl: string): { mimeType: string; buffer: Buffer } | null {
+  const matched = dataUrl.match(/^data:(.+);base64,(.+)$/);
+  if (!matched) {
+    return null;
+  }
+  return {
+    mimeType: matched[1],
+    buffer: Buffer.from(matched[2], "base64"),
+  };
+}
+
+async function buildAnnotatedTrainingImageDataUrl(
+  example: TrainingExample,
+  originalDataUrl: string,
+): Promise<string> {
+  const parsed = parseDataUrl(originalDataUrl);
+  if (!parsed) {
+    return originalDataUrl;
+  }
+
+  const boxes = (example.boxes || []).filter((box) => box.coordSpace === "image");
+  if (boxes.length === 0) {
+    return originalDataUrl;
+  }
+
+  const image = sharp(parsed.buffer);
+  const metadata = await image.metadata();
+  if (!metadata.width || !metadata.height) {
+    return originalDataUrl;
+  }
+
+  const width = metadata.width;
+  const height = metadata.height;
+  const fontSize = Math.max(16, Math.round(Math.min(width, height) * 0.022));
+  const strokeWidth = Math.max(3, Math.round(Math.min(width, height) * 0.004));
+  const labelHeight = fontSize + 12;
+  const overlayParts: string[] = [];
+
+  for (const box of boxes) {
+    const color = TRAINING_FIELD_COLORS[box.field] || "#2563eb";
+    const x = Math.max(0, Math.round(box.x * width));
+    const y = Math.max(0, Math.round(box.y * height));
+    const w = Math.max(1, Math.round(box.width * width));
+    const h = Math.max(1, Math.round(box.height * height));
+    const label = escapeSvgText(TRAINING_FIELD_LABELS[box.field] || box.field);
+    const labelWidth = Math.max(88, label.length * (fontSize * 0.95));
+    const labelY = Math.max(0, y - labelHeight);
+
+    overlayParts.push(
+      `<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="8" ry="8" fill="none" stroke="${color}" stroke-width="${strokeWidth}" />`,
+    );
+    overlayParts.push(
+      `<rect x="${x}" y="${labelY}" width="${labelWidth}" height="${labelHeight}" rx="8" ry="8" fill="${color}" fill-opacity="0.92" />`,
+    );
+    overlayParts.push(
+      `<text x="${x + 10}" y="${labelY + labelHeight - 8}" font-size="${fontSize}" font-family="Arial, sans-serif" font-weight="700" fill="#ffffff">${label}</text>`,
+    );
+  }
+
+  const overlaySvg = Buffer.from(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}">${overlayParts.join("")}</svg>`,
+    "utf8",
+  );
+  const annotated = await image
+    .composite([{ input: overlaySvg, top: 0, left: 0 }])
+    .png()
+    .toBuffer();
+
+  return `data:image/png;base64,${annotated.toString("base64")}`;
 }
 
 /**
@@ -497,34 +593,42 @@ export async function buildVisualReferencePack(
   const maxImages =
     maxImagesRaw === "0" || maxImagesRaw === "false"
       ? 0
-      : Math.max(0, Number.parseInt(maxImagesRaw || "2", 10) || 2);
-  const maxBoxHintExamples = resolveTrainingBoxHintLimit(options);
+      : Math.max(0, Number.parseInt(maxImagesRaw || "4", 10) || 4);
   const effectiveMaxImages = options?.maxImages ?? maxImages;
-
-  const withBoxes = examples.filter((e) => e.boxes && e.boxes.length > 0);
-  const sorted = sortTrainingExamplesForGuidance(withBoxes);
-
-  const hintParts: string[] = [];
-  for (const ex of sorted.slice(0, maxBoxHintExamples)) {
-    const block = formatBoxHintsForExample(ex);
-    if (block) hintParts.push(block);
-  }
-
-  let hintText = "";
-  if (hintParts.length > 0) {
-    hintText = `\n\n【训练池 · 字段区域指导（操作员标注，与下文「训练参考截图」一致）】\n以下矩形表示在**同类界面**上各字段常出现的语义区域与读数习惯。你必须先在该区域内识别字段标签/项目名称，再读取与该标签直接对应的值；坐标百分比只用于缩小查找范围，不能脱离标签语义机械映射数字。若版式与参考差异过大，以当前图像素和可见标签为准并设 reviewRequired。\n\n${hintParts.join("\n\n")}\n`;
-  }
+  const annotatedExamples = examples.filter((e) => e.boxes && e.boxes.length > 0);
+  const sorted = sortTrainingExamplesForGuidance(
+    annotatedExamples.length > 0 ? annotatedExamples : examples,
+  );
 
   const referenceImages: Array<{ imageName: string; caption: string; dataUrl: string }> = [];
   if (effectiveMaxImages > 0) {
     for (const ex of sorted) {
       if (referenceImages.length >= effectiveMaxImages) break;
-      const dataUrl = await getTrainingImageDataUrl(ex.imageName);
-      if (!dataUrl) continue;
-      const caption = `【训练参考截图：${ex.imageName}】与上文训练池区域指导对应；用于归纳同类设备的字段布局与标签习惯。禁止抄写本图上的文字/数字到输出；最终每条字段只能来自最后一张「当前待识别图片」的可见像素。`;
+      const originalDataUrl = await getTrainingImageDataUrl(ex.imageName);
+      if (!originalDataUrl) continue;
+      const dataUrl = await buildAnnotatedTrainingImageDataUrl(ex, originalDataUrl);
+      const summary = [
+        `date=${ex.output.date}`,
+        `route=${ex.output.route}`,
+        `driver=${ex.output.driver}`,
+        `total=${ex.output.total}`,
+        ex.output.totalSourceLabel ? `totalSourceLabel=${ex.output.totalSourceLabel}` : "",
+        `unscanned=${ex.output.unscanned}`,
+        `exceptions=${ex.output.exceptions}`,
+        ex.output.waybillStatus ? `waybillStatus=${ex.output.waybillStatus}` : "",
+        ex.output.stationTeam ? `stationTeam=${ex.output.stationTeam}` : "",
+      ]
+        .filter(Boolean)
+        .join("；");
+      const caption = `【人工标注参考图：${ex.imageName}】这是一张已人工确认的样本图，方框只用于帮助你先看懂同类界面的字段位置与含义。该样本的正确结果是：${summary}。禁止把这张样本图的数字直接抄到最终结果；最终输出只能来自最后一张「当前待识别图片」的可见像素。`;
       referenceImages.push({ imageName: ex.imageName, caption, dataUrl });
     }
   }
+
+  const hintText =
+    referenceImages.length > 0
+      ? "\n\n【人工标注参考图】先看下面这些已标注样本图，理解同类界面的字段含义与布局；不要把样本值抄入当前结果。\n"
+      : "";
 
   return { hintText, referenceImages };
 }

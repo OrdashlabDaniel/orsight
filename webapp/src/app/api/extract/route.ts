@@ -14,14 +14,10 @@ import {
   visionPrompt,
 } from "@/lib/pod";
 import {
-  buildAgentThreadReferenceImages,
-  buildTrainingPromptSection,
   buildVisualReferencePack,
   type FieldAggregation,
   getTrainingImageDataUrl,
   loadTrainingExamples,
-  loadGlobalRules,
-  type GlobalRules,
   type TrainingBox,
   type TrainingExample,
   type TrainingField,
@@ -43,21 +39,14 @@ function getConsistencyAttemptCount(): number {
 
 type ExtractVisionContext = {
   examples: TrainingExample[];
-  globalRules: GlobalRules;
   visualPack: Awaited<ReturnType<typeof buildVisualReferencePack>>;
-  agentRefs: Awaited<ReturnType<typeof buildAgentThreadReferenceImages>>;
   imageGuidance: Array<{ example: TrainingExample; fingerprint: number[] }>;
 };
 
 async function buildExtractVisionContext(): Promise<ExtractVisionContext> {
   const examples = await loadTrainingExamples();
-  const globalRules = await loadGlobalRules();
-  const [visualPack, agentRefs, imageGuidance] = await Promise.all([
-    buildVisualReferencePack(examples),
-    buildAgentThreadReferenceImages(globalRules.agentThread),
-    buildTrainingImageGuidance(examples),
-  ]);
-  return { examples, globalRules, visualPack, agentRefs, imageGuidance };
+  const visualPack = await buildVisualReferencePack(examples);
+  return { examples, visualPack, imageGuidance: [] };
 }
 
 function mergeParallelRefineReasons(base: PodRecord, ...refined: PodRecord[]): string | null {
@@ -214,6 +203,8 @@ async function imageFingerprintFromBuffer(bytes: Buffer): Promise<number[]> {
   return Array.from(raw, (value) => value / 255);
 }
 
+// Legacy training-pool rule path kept only for rollback; current extraction flow no longer calls it.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 async function buildTrainingImageGuidance(examples: TrainingExample[]): Promise<FingerprintedTrainingExample[]> {
   const candidates = examples.filter(hasImageCoordBoxes);
   const loaded = await Promise.all(
@@ -244,6 +235,8 @@ function fingerprintDistance(left: number[], right: number[]): number {
   return total / n;
 }
 
+// Legacy training-pool rule path kept only for rollback; current extraction flow no longer calls it.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 async function selectMostSimilarTrainingExamples(
   file: File,
   ctx: ExtractVisionContext,
@@ -1023,6 +1016,8 @@ async function refinePODExceptionsFromTrainingCrop(
   };
 }
 
+// Legacy training-pool rule path kept only for rollback; current extraction flow no longer calls it.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 async function runPODTrainingRefinesParallel(
   file: File,
   examples: TrainingExample[],
@@ -1091,11 +1086,11 @@ async function callVisionModel(
     throw new Error("Missing OPENAI_API_KEY. Please configure the AI model first.");
   }
 
-  const { examples, globalRules, visualPack, agentRefs } = ctx;
+  const { visualPack } = ctx;
   const bytes = Buffer.from(await file.arrayBuffer());
   const dataUrl = `data:${file.type || "image/jpeg"};base64,${bytes.toString("base64")}`;
 
-  const baseText = `${visionPrompt}${buildTrainingPromptSection(examples, globalRules)}${visualPack.hintText}`;
+  const baseText = `${visionPrompt}${visualPack.hintText}`;
 
   const userContent: OpenAIMessageContent[] = [{ type: "text", text: baseText }];
   for (const ref of visualPack.referenceImages) {
@@ -1103,14 +1098,9 @@ async function callVisionModel(
     userContent.push({ type: "image_url", image_url: { url: ref.dataUrl } });
   }
 
-  for (const ref of agentRefs) {
-    userContent.push({ type: "text", text: ref.caption });
-    userContent.push({ type: "image_url", image_url: { url: ref.dataUrl } });
-  }
-
   userContent.push({
     type: "text",
-    text: "\n【当前待识别图片】仅根据下面这一张图输出 JSON 中的 records；上文训练参考图、Agent 参考图与坐标说明只用于理解布局规律，不得把参考图中的文字抄进结果。\n",
+    text: "\n【当前待识别图片】仅根据下面这一张图输出 JSON 中的 records；上面的人工标注参考图只用于帮助你先理解同类界面，不得把参考图中的文字或数字抄进结果。\n",
   });
   userContent.push({ type: "image_url", image_url: { url: dataUrl } });
 
@@ -1337,7 +1327,7 @@ function markSourceMismatchForReview(records: PodRecord[], validLabels: Set<stri
         reviewRequired: true,
         reviewReason: appendReviewReason(
           record.reviewReason,
-          `运单数量来源异常：当前来源为“${record.totalSourceLabel}”，不在训练池已知的合法来源中，必须人工检查。`,
+          `运单数量来源异常：当前来源为“${record.totalSourceLabel}”，不是系统允许的安全来源标签，必须人工检查。`,
         ),
       };
     }
@@ -1681,36 +1671,10 @@ export async function POST(request: Request) {
 
     const visionCtx = await buildExtractVisionContext();
     const examples = visionCtx.examples;
-    const validLabels = new Set<string>();
-    for (const ex of examples) {
-      if (ex.output.totalSourceLabel) {
-        validLabels.add(normalizeSafeTotalSourceLabel(ex.output.totalSourceLabel));
-      }
-    }
-    // Also add some default valid labels just in case
-    validLabels.add("应领件数");
-    validLabels.add("应收件数");
-    validLabels.add("运单数量");
-
+    const validLabels = new Set(["应领件数", "应收件数", "运单数量"]);
     for (const file of files) {
       const consistencyResult = await runConsistencyCheck(file, model, visionCtx);
       let workingRecords = consistencyResult.records;
-      const similarExamples = await selectMostSimilarTrainingExamples(file, visionCtx);
-
-      if (consistencyResult.imageType === "POD" && similarExamples.length > 0) {
-        const refined = await runPODTrainingRefinesParallel(file, similarExamples, workingRecords, model);
-        workingRecords = refined.records;
-        if (refined.usage) {
-          consistencyResult.usage = mergeRefineUsage(
-            {
-              prompt_tokens: consistencyResult.usage?.prompt_tokens || 0,
-              completion_tokens: consistencyResult.usage?.completion_tokens || 0,
-              total_tokens: consistencyResult.usage?.total_tokens || 0,
-            },
-            refined.usage,
-          );
-        }
-      }
 
       workingRecords = workingRecords.map(repairRouteVersusStationTeamRecord);
       const sourceCheckedRecords = markSourceMismatchForReview(workingRecords, validLabels);
