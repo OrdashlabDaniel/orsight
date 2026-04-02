@@ -593,7 +593,7 @@ export default function Home() {
 
   function handleAddTaskCodeField() {
     const confirmed = window.confirm(
-      "确认要为填表结果新增“任务编码”栏吗？确认后会自动跳转到训练模式，请上传范例图片并框选任务编码的位置。",
+      "确认要新增表格项目吗？确认后会自动跳转到训练模式，请上传范例图片并标注这个新项目对应的位置。",
     );
     if (!confirmed) {
       return;
@@ -1055,7 +1055,7 @@ export default function Home() {
                 className="rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-xs font-medium text-blue-700 hover:bg-blue-100"
                 onClick={handleAddTaskCodeField}
               >
-                添加任务编码并去标注
+                新增表格项目
               </button>
               <Link href="/training" className="font-medium text-slate-700 hover:text-slate-900 hover:underline">
                 切换到训练模式
