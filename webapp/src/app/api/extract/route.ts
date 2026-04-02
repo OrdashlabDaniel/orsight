@@ -66,6 +66,49 @@ function mergeParallelRefineReasons(base: PodRecord, ...refined: PodRecord[]): s
   return parts.size ? Array.from(parts).join(" | ") : null;
 }
 
+function mergeReviewReasonParts(records: PodRecord[]): string | null {
+  const parts = new Set<string>();
+  for (const record of records) {
+    for (const value of (record.reviewReason || "").split("|").map((item) => item.trim()).filter(Boolean)) {
+      parts.add(value);
+    }
+  }
+  return parts.size > 0 ? Array.from(parts).join(" | ") : null;
+}
+
+function firstNonEmptyValue<T>(records: PodRecord[], pick: (record: PodRecord) => T | "" | undefined): T | "" {
+  for (const record of records) {
+    const value = pick(record);
+    if (value !== "" && value != null) {
+      return value;
+    }
+  }
+  return "";
+}
+
+function buildAggregationBaseRecord(records: PodRecord[]): PodRecord {
+  const [first] = records;
+  if (!first) {
+    throw new Error("Cannot build aggregation base from empty records.");
+  }
+
+  return {
+    ...first,
+    date: String(firstNonEmptyValue(records, (record) => record.date) || ""),
+    route: String(firstNonEmptyValue(records, (record) => record.route) || ""),
+    driver: String(firstNonEmptyValue(records, (record) => record.driver) || ""),
+    total: firstNonEmptyValue(records, (record) => record.total) as PodRecord["total"],
+    totalSourceLabel: String(firstNonEmptyValue(records, (record) => record.totalSourceLabel) || ""),
+    unscanned: firstNonEmptyValue(records, (record) => record.unscanned) as PodRecord["unscanned"],
+    exceptions: firstNonEmptyValue(records, (record) => record.exceptions) as PodRecord["exceptions"],
+    waybillStatus: String(firstNonEmptyValue(records, (record) => record.waybillStatus) || ""),
+    stationTeam: String(firstNonEmptyValue(records, (record) => record.stationTeam) || ""),
+    reviewRequired: records.some((record) => Boolean(record.reviewRequired)),
+    reviewReason: mergeReviewReasonParts(records),
+    mergedSourceCount: first.mergedSourceCount,
+  };
+}
+
 // We'll load this asynchronously now per request
 // const TRAINING_EXAMPLES = loadTrainingExamples();
 
@@ -309,9 +352,9 @@ async function runLiveAggregationRefine(
   ctx: ExtractVisionContext,
   records: PodRecord[],
   model: string,
-): Promise<{ records: PodRecord[]; usage?: OpenAIUsage }> {
-  if (!OPENAI_API_KEY || records.length !== 1) {
-    return { records };
+): Promise<{ records: PodRecord[]; usage?: OpenAIUsage; collapsed: boolean }> {
+  if (!OPENAI_API_KEY || records.length === 0) {
+    return { records, collapsed: false };
   }
 
   const similarExamples = await selectMostSimilarTrainingExamples(file, ctx, 3);
@@ -320,10 +363,14 @@ async function runLiveAggregationRefine(
     ctx.examples.map(pickLiveAggregationExample).find((example): example is TrainingExample => Boolean(example));
 
   if (!aggregationExample) {
-    return { records };
+    return { records, collapsed: false };
   }
 
-  return refinePODFromTrainingExampleBoxes(file, aggregationExample, records, model);
+  const refined = await refinePODFromTrainingExampleBoxes(file, aggregationExample, records, model);
+  return {
+    ...refined,
+    collapsed: records.length > 1 && refined.records.length === 1,
+  };
 }
 
 function inferFieldAggregation(field: TrainingField, boxCount: number): FieldAggregation {
@@ -494,7 +541,7 @@ async function refinePODFromTrainingExampleBoxes(
   records: PodRecord[],
   model: string,
 ): Promise<{ records: PodRecord[]; usage?: OpenAIUsage }> {
-  if (!OPENAI_API_KEY || records.length !== 1) return { records };
+  if (!OPENAI_API_KEY || records.length === 0) return { records };
 
   const boxes = imageCoordBoxes(example);
   if (boxes.length === 0) return { records };
@@ -551,7 +598,7 @@ async function refinePODFromTrainingExampleBoxes(
   }
 
   const boxedFields = new Set<TrainingField>(boxes.map((box) => box.field));
-  const [base] = records;
+  const base = buildAggregationBaseRecord(records);
   const next = mergeBoxGuidedRecord(base, parsed, boxedFields);
   return {
     records: [next],
@@ -1742,6 +1789,9 @@ export async function POST(request: Request) {
       if (consistencyResult.imageType === "POD") {
         const refined = await runLiveAggregationRefine(file, visionCtx, workingRecords, model);
         workingRecords = refined.records;
+        if (refined.collapsed) {
+          consistencyResult.issues = consistencyResult.issues.filter((issue) => !issue.route);
+        }
         if (refined.usage) {
           consistencyResult.usage = mergeRefineUsage(
             {
