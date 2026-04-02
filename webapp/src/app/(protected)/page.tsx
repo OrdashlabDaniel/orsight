@@ -140,6 +140,7 @@ export default function Home() {
   const [records, setRecords] = useState<PodRecord[]>([]);
   const [issues, setIssues] = useState<ExtractionIssue[]>([]);
   const [isExtracting, setIsExtracting] = useState(false);
+  const [isRetryingReviewAll, setIsRetryingReviewAll] = useState(false);
   const [retryingKeys, setRetryingKeys] = useState<string[]>([]);
   const [progress, setProgress] = useState<{ completed: number; total: number } | null>(null);
   const [trainingExamplesLoaded, setTrainingExamplesLoaded] = useState(0);
@@ -317,6 +318,25 @@ export default function Home() {
     return Array.from(groups.entries());
   }, [filteredRecordsResult.records]);
   const activePopupRecordId = viewingRecord?.id || annotatingRecord?.id || null;
+  const reviewRecords = useMemo(
+    () =>
+      organizedRecordsResult.records.filter((record) => {
+        if (record.reviewRequired) {
+          return true;
+        }
+        const sourceImageNames = record.imageName
+          .split(" | ")
+          .map((value) => value.trim())
+          .filter(Boolean);
+        return issues.some(
+          (issue) =>
+            issue.level === "error" &&
+            sourceImageNames.includes(issue.imageName) &&
+            (!issue.route || !record.route || issue.route === record.route),
+        );
+      }),
+    [organizedRecordsResult.records, issues],
+  );
 
   const totalWarnings = issues.filter((issue) => issue.level === "warning").length;
 
@@ -646,6 +666,66 @@ export default function Home() {
       setErrorMessage(error instanceof Error ? error.message : "再次识别失败。");
     } finally {
       setRetryingKeys((current) => current.filter((key) => key !== record.id));
+    }
+  }
+
+  async function retryAllReviewRecords() {
+    if (!reviewRecords.length) {
+      setErrorMessage("当前没有需要再次识别的待复核条目。");
+      return;
+    }
+
+    const sourceImageNames = Array.from(
+      new Set(reviewRecords.flatMap((record) => getSourceImageNames(record))),
+    );
+    const matchedUploads = uploads.filter((upload) => sourceImageNames.includes(upload.file.name));
+
+    if (!matchedUploads.length) {
+      setErrorMessage("找不到待复核条目对应的原始图片，无法批量再次识别。");
+      return;
+    }
+
+    const retryRecordIds = reviewRecords.map((record) => record.id);
+    setIsRetryingReviewAll(true);
+    setRetryingKeys((current) => Array.from(new Set([...current, ...retryRecordIds])));
+    setErrorMessage("");
+    setNoticeMessage("");
+    setSelectedUploadId(matchedUploads[0]?.id ?? null);
+
+    try {
+      const payload = await runParallelExtraction(
+        matchedUploads.map((upload) => upload.file),
+        3,
+        "review",
+      );
+
+      const nextRecords = [
+        ...records.filter((record) => !sourceImageNames.includes(record.imageName)),
+        ...(payload.records || []),
+      ];
+      const nextIssues = [
+        ...issues.filter((issue) => !sourceImageNames.includes(issue.imageName)),
+        ...(payload.issues || []),
+      ];
+
+      setRecords(nextRecords);
+      setIssues(nextIssues);
+      setTrainingExamplesLoaded(payload.trainingExamplesLoaded || 0);
+
+      const organized = organizeRecords(nextRecords);
+      const dedupeMessage =
+        organized.duplicateCount > 0
+          ? `，已合并 ${organized.duplicateCount} 条跨图重复（不同截图中日期、路线、司机与收取数据完全一致）`
+          : "";
+      setNoticeMessage(
+        `已使用 ${payload.modelUsed || reviewModelName} 批量再次识别 ${matchedUploads.length} 张待复核图片${dedupeMessage}。`,
+      );
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "批量再次识别失败。");
+    } finally {
+      setIsRetryingReviewAll(false);
+      setRetryingKeys((current) => current.filter((key) => !retryRecordIds.includes(key)));
+      setProgress(null);
     }
   }
 
@@ -1217,6 +1297,15 @@ export default function Home() {
                   )}
                 </div>
                 <div className="flex flex-wrap gap-2">
+                  <button
+                    className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-2 text-sm font-medium text-amber-700 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-50"
+                    onClick={() => void retryAllReviewRecords()}
+                    disabled={!reviewRecords.length || isExtracting || isRetryingReviewAll}
+                  >
+                    {isRetryingReviewAll
+                      ? `待复核批量重识别中...`
+                      : `一键重识别待复核（${reviewRecords.length}）`}
+                  </button>
                   <button
                     className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-medium hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
                     onClick={copyTable}

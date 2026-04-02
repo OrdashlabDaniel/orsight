@@ -143,6 +143,43 @@ function appendReviewReason(currentReason: string | null | undefined, nextReason
   return Array.from(new Set(parts)).join(" | ");
 }
 
+const TOTAL_REVIEW_REASON_PATTERNS = [
+  "运单数量来源缺失",
+  "运单数量来源异常",
+  "应领件数区域未被清晰识别",
+  "运单数量与应领件数不一致",
+  "运单数量疑似取自实领件数或已领",
+  "运单数量识别结果异常偏大",
+];
+
+function clearResolvedTotalReviewFlags(record: PodRecord): PodRecord {
+  if (!record.reviewRequired || !record.reviewReason) {
+    return record;
+  }
+
+  const remainingReasons = record.reviewReason
+    .split(" | ")
+    .map((value) => value.trim())
+    .filter(Boolean)
+    .filter(
+      (reason) => !TOTAL_REVIEW_REASON_PATTERNS.some((pattern) => reason.includes(pattern)),
+    );
+
+  if (remainingReasons.length === 0) {
+    return {
+      ...record,
+      reviewRequired: false,
+      reviewReason: null,
+    };
+  }
+
+  return {
+    ...record,
+    reviewRequired: true,
+    reviewReason: remainingReasons.join(" | "),
+  };
+}
+
 function medianOf(nums: number[]): number {
   if (nums.length === 0) return 0;
   const s = [...nums].sort((a, b) => a - b);
@@ -362,7 +399,10 @@ function mergeBoxGuidedRecord(
 
   if (boxedFields.has("total")) {
     const total = normalizeNumber(parsed.total);
-    const label = normalizeText(parsed.totalSourceLabel);
+    const label =
+      normalizeSafeTotalSourceLabel(parsed.totalSourceLabel) ||
+      normalizeSafeTotalSourceLabel(base.totalSourceLabel) ||
+      normalizeSafeTotalSourceLabel("应领件数");
     next.total = typeof total === "number" ? total : "";
     next.totalSourceLabel = typeof total === "number" ? label : "";
     if (next.total === "") {
@@ -480,7 +520,7 @@ function medianFieldImageBox(examples: TrainingExample[], field: TrainingField):
 function mostCommonTotalSourceLabel(examples: TrainingExample[]): string {
   const counts = new Map<string, number>();
   for (const ex of examples) {
-    const l = ex.output.totalSourceLabel?.trim();
+    const l = normalizeSafeTotalSourceLabel(ex.output.totalSourceLabel);
     if (l) counts.set(l, (counts.get(l) || 0) + 1);
   }
   let best = "应领件数";
@@ -492,6 +532,31 @@ function mostCommonTotalSourceLabel(examples: TrainingExample[]): string {
     }
   }
   return best;
+}
+
+function compactLabelText(value: string): string {
+  return value.replace(/[\s:：()（）【】\[\]\-_.。,'"`]/g, "");
+}
+
+function normalizeSafeTotalSourceLabel(value: unknown): string {
+  const raw = normalizeText(value);
+  if (!raw) return "";
+  const compact = compactLabelText(raw);
+  if (compact.includes("应领")) return "应领件数";
+  if (compact.includes("应收")) return "应收件数";
+  if (compact.includes("运单") && compact.includes("数量")) return "运单数量";
+  return raw;
+}
+
+function isUnsafeTotalSourceLabel(value: unknown): boolean {
+  const compact = compactLabelText(normalizeText(value));
+  if (!compact) return false;
+  return (
+    compact.includes("实领") ||
+    compact.includes("已领") ||
+    compact.includes("司机领取") ||
+    compact.includes("领取量")
+  );
 }
 
 function clearFieldFromTrainingMismatch(
@@ -750,7 +815,7 @@ async function refinePODTotalFromTrainingCrop(
     };
   }
 
-  let label = normalizeText(parsed?.totalSourceLabel);
+  let label = normalizeSafeTotalSourceLabel(parsed?.totalSourceLabel);
   if (!label) label = fallbackLabel;
 
   const [rec] = records;
@@ -1237,6 +1302,8 @@ function recordSignature(record: PodRecord): string {
 
 function markSourceMismatchForReview(records: PodRecord[], validLabels: Set<string>) {
   return records.map((record) => {
+    const normalizedSourceLabel = normalizeSafeTotalSourceLabel(record.totalSourceLabel);
+
     if (record.total !== "" && !record.totalSourceLabel) {
       return {
         ...record,
@@ -1249,10 +1316,24 @@ function markSourceMismatchForReview(records: PodRecord[], validLabels: Set<stri
       };
     }
 
-    if (record.total !== "" && record.totalSourceLabel && validLabels.size > 0 && !validLabels.has(record.totalSourceLabel)) {
+    if (record.total !== "" && isUnsafeTotalSourceLabel(record.totalSourceLabel)) {
       return {
         ...record,
         total: "" as const,
+        totalSourceLabel: "",
+        reviewRequired: true,
+        reviewReason: appendReviewReason(
+          record.reviewReason,
+          `运单数量来源异常：当前来源“${record.totalSourceLabel}”语义更像实领/已领，不允许作为运单数量。`,
+        ),
+      };
+    }
+
+    if (record.total !== "" && normalizedSourceLabel && validLabels.size > 0 && !validLabels.has(normalizedSourceLabel)) {
+      return {
+        ...record,
+        total: "" as const,
+        totalSourceLabel: normalizedSourceLabel,
         reviewRequired: true,
         reviewReason: appendReviewReason(
           record.reviewReason,
@@ -1261,7 +1342,9 @@ function markSourceMismatchForReview(records: PodRecord[], validLabels: Set<stri
       };
     }
 
-    return record;
+    return normalizedSourceLabel && normalizedSourceLabel !== record.totalSourceLabel
+      ? { ...record, totalSourceLabel: normalizedSourceLabel }
+      : record;
   });
 }
 
@@ -1404,14 +1487,52 @@ function applyCounterVerification(
   const nextRecords = records.map((record) => {
     let nextRecord = record;
 
-    const sourceLabelNorm = nextRecord.totalSourceLabel?.trim() ?? "";
+    const sourceLabelNorm = normalizeSafeTotalSourceLabel(nextRecord.totalSourceLabel);
     const totalLabelTrusted =
       validLabels.size > 0 && sourceLabelNorm !== "" && validLabels.has(sourceLabelNorm);
+    const hasReliableExpectedCount = expectedCountVisible && expectedCount !== null;
+
+    if (hasReliableExpectedCount) {
+      const previousTotal = nextRecord.total;
+      const totalNeedsCorrection = previousTotal === "" || previousTotal !== expectedCount;
+      const labelNeedsCorrection =
+        sourceLabelNorm === "" ||
+        isUnsafeTotalSourceLabel(nextRecord.totalSourceLabel) ||
+        (validLabels.size > 0 && !validLabels.has(sourceLabelNorm));
+
+      if (totalNeedsCorrection || labelNeedsCorrection) {
+        nextRecord = clearResolvedTotalReviewFlags({
+          ...nextRecord,
+          total: expectedCount,
+          totalSourceLabel: "应领件数",
+        });
+
+        if (previousTotal === "") {
+          issues.push({
+            imageName: fileName,
+            route: record.route,
+            level: "warning",
+            code: "total_filled_from_expected",
+            message: `固定计数器识别到应领件数 ${expectedCount}，已自动回填运单数量。`,
+          });
+        } else if (previousTotal !== expectedCount) {
+          issues.push({
+            imageName: fileName,
+            route: record.route,
+            level: "warning",
+            code: "total_corrected_from_expected",
+            message: `运单数量原为 ${previousTotal}，与应领件数 ${expectedCount} 不一致，已按应领件数自动纠正。`,
+          });
+        }
+      }
+
+      return nextRecord;
+    }
 
     // 固定裁剪区读不到应领件数时，若运单数量已由主模型/训练池裁剪给出且来源标签在训练池合法列表中，则保留，避免误清空
     if (
       nextRecord.total !== "" &&
-      (!expectedCountVisible || expectedCount === null) &&
+      !hasReliableExpectedCount &&
       !totalLabelTrusted
     ) {
       nextRecord = {
@@ -1429,26 +1550,6 @@ function applyCounterVerification(
         level: "error",
         code: "expected_count_unreadable",
         message: "应领件数区域看不清或未识别到，运单数量不能自动确认。",
-      });
-    }
-
-    if (nextRecord.total !== "" && expectedCount !== null && nextRecord.total !== expectedCount) {
-      const prevTotal = nextRecord.total;
-      nextRecord = {
-        ...nextRecord,
-        total: "" as const,
-        reviewRequired: true,
-        reviewReason: appendReviewReason(
-          nextRecord.reviewReason,
-          `运单数量与应领件数不一致：当前为 ${prevTotal}，应领件数为 ${expectedCount}。`,
-        ),
-      };
-      issues.push({
-        imageName: fileName,
-        route: record.route,
-        level: "error",
-        code: "total_conflicts_expected",
-        message: `运单数量与应领件数不一致：当前为 ${prevTotal}，应领件数为 ${expectedCount}。`,
       });
     }
 
@@ -1474,15 +1575,6 @@ function applyCounterVerification(
         code: "total_matches_wrong_counter",
         message: "运单数量疑似取自实领件数或已领，而不是应领件数。",
       });
-    }
-
-    // 主模型与训练裁剪均未给出运单数量时，若固定裁剪区能稳定读到应领件数，则补全（标签与训练池默认一致）
-    if (nextRecord.total === "" && expectedCount !== null && expectedCountVisible) {
-      nextRecord = {
-        ...nextRecord,
-        total: expectedCount,
-        totalSourceLabel: nextRecord.totalSourceLabel || "应领件数",
-      };
     }
 
     return nextRecord;
@@ -1592,7 +1684,7 @@ export async function POST(request: Request) {
     const validLabels = new Set<string>();
     for (const ex of examples) {
       if (ex.output.totalSourceLabel) {
-        validLabels.add(ex.output.totalSourceLabel);
+        validLabels.add(normalizeSafeTotalSourceLabel(ex.output.totalSourceLabel));
       }
     }
     // Also add some default valid labels just in case
