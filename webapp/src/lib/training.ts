@@ -439,7 +439,7 @@ function formatBoxHintsForExample(example: TrainingExample): string {
             ? "旧版容器坐标（仅供参考）"
             : "坐标（旧数据可能为容器比例）";
       lines.push(
-        `  - ${label}${idx}：${valHint}；${coordNote} 矩形 x∈[${(b.x * 100).toFixed(1)}%, ${(x2 * 100).toFixed(1)}%]，y∈[${(b.y * 100).toFixed(1)}%, ${(y2 * 100).toFixed(1)}%]（原点左上）`,
+        `  - ${label}${idx}：${valHint}；${coordNote} 矩形 x∈[${(b.x * 100).toFixed(1)}%, ${(x2 * 100).toFixed(1)}%]，y∈[${(b.y * 100).toFixed(1)}%, ${(y2 * 100).toFixed(1)}%]（原点左上）。这些坐标只用于缩小搜索范围，真正取值必须依据该区域内可见的字段标签与其相邻值的语义关系，禁止仅凭坐标位置硬套数字。`,
       );
     });
     if (list.length > 1) {
@@ -512,7 +512,7 @@ export async function buildVisualReferencePack(
 
   let hintText = "";
   if (hintParts.length > 0) {
-    hintText = `\n\n【训练池 · 字段区域指导（操作员标注，与下文「训练参考截图」一致）】\n以下矩形表示在**同类界面**上各字段的语义位置与读数习惯。你必须按相同语义去当前待识别图中找对应区域取值；坐标百分比随设备/分辨率会偏移，禁止把数字机械映射到完全不同的版式上。若版式与参考差异过大，以当前图像素为准并设 reviewRequired。\n\n${hintParts.join("\n\n")}\n`;
+    hintText = `\n\n【训练池 · 字段区域指导（操作员标注，与下文「训练参考截图」一致）】\n以下矩形表示在**同类界面**上各字段常出现的语义区域与读数习惯。你必须先在该区域内识别字段标签/项目名称，再读取与该标签直接对应的值；坐标百分比只用于缩小查找范围，不能脱离标签语义机械映射数字。若版式与参考差异过大，以当前图像素和可见标签为准并设 reviewRequired。\n\n${hintParts.join("\n\n")}\n`;
   }
 
   const referenceImages: Array<{ imageName: string; caption: string; dataUrl: string }> = [];

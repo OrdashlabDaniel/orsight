@@ -351,8 +351,8 @@ async function refinePODRouteFromTrainingCrop(
   const dataUrl = await cropRegionToDataUrl(bytes, box);
   if (!dataUrl) return { records };
 
-  const prompt = `图中仅为签退/POD 类屏幕的一小块裁剪，对应「快递员路线 / 抽查路线」文本区域。请只 OCR 图中可见的路线编码（典型形如 IAH01-030-C，含 IAH 后两位区域数字）。
-不要输出站点车队样式（如单独的 IAH-BAA、IAH-FGI 等三字母段）。若图中没有此类路线编码，输出 {"route":null}。
+  const prompt = `图中仅为签退/POD 类屏幕的一小块裁剪，对应任务列表里的「快递员路线 / 抽查路线」区域。请先根据当前裁剪图里可见的任务项、路线字段或与任务同行的语义关系，再读取路线编码（典型形如 IAH01-030-C，含 IAH 后两位区域数字）。
+不要因为它“看起来在常见位置”就输出路线；不要输出站点车队样式（如单独的 IAH-BAA、IAH-FGI 等三字母段）。若图中没有可明确对应任务路线的编码，输出 {"route":null}。
 只输出一个 JSON 对象，不要其它文字。`;
 
   const body = {
@@ -448,7 +448,8 @@ async function refinePODTotalFromTrainingCrop(
 
   const fallbackLabel = mostCommonTotalSourceLabel(examples);
   const prompt = `图中仅为签退/POD 屏幕上一小块裁剪，对应训练池中标注的「运单数量」相关区域（常见标签：应领件数、应收件数、运单数量等）。
-请只根据图中**可见像素**读取与上述标签直接对应的**一个非负整数**；若图中有标签文字，请一并读出（尽量与图中文字一致）。
+请先在当前裁剪图中确认**可见的字段标签**，再读取与该标签直接对应的**一个非负整数**；如果只看到数字、看不到能证明它属于 total 的标签语义，必须返回 null。若图中有标签文字，请一并读出（尽量与图中文字一致）。
+绝对不要把“实领件数”“已领”“司机领取量”等标签旁边的数字当作 total。
 若无法读出整数，输出 {"total":null,"totalSourceLabel":null}。
 只输出一个 JSON 对象，键为 total（整数或 null）、totalSourceLabel（字符串或 null）。不要输出其它文字。`;
 
@@ -540,8 +541,9 @@ async function refinePODUnscannedFromTrainingCrop(
   const dataUrl = await cropRegionToDataUrl(bytes, box);
   if (!dataUrl) return { records };
 
-  const prompt = `图中仅为签退/POD 屏幕上一小块裁剪，对应「未领取」「未收」或未收数量相关数字。
-只输出 JSON：{"unscanned": <非负整数>} 或 {"unscanned":null}。不要猜测图中没有的数字。`;
+  const prompt = `图中仅为签退/POD 屏幕上一小块裁剪。请先确认当前裁剪图里是否看得见「未领取」「未收」等明确表示未收数量的字段标签，再读取与该标签直接对应的数字。
+如果数字旁边的标签不是未收语义，或者看不到标签语义，只输出 {"unscanned":null}。不要仅凭坐标或数字位置猜测。
+只输出 JSON：{"unscanned": <非负整数>} 或 {"unscanned":null}。`;
 
   const body = {
     model,
@@ -627,8 +629,9 @@ async function refinePODExceptionsFromTrainingCrop(
   const dataUrl = await cropRegionToDataUrl(bytes, box);
   if (!dataUrl) return { records };
 
-  const prompt = `图中仅为签退/POD 屏幕上一小块裁剪，对应「错扫」「错分」「误扫」等异常件数（不是未领取、不是角标装饰）。
-只输出 JSON：{"exceptions": <非负整数>} 或 {"exceptions":null}。若无此类列或读不出，输出 null。`;
+  const prompt = `图中仅为签退/POD 屏幕上一小块裁剪。请先确认当前裁剪图里是否看得见「错扫」「错分」「误扫」等异常件数字段标签，再读取与该标签直接对应的数字。
+不要把「未领取」「已退回」或无关角标数字当成错扫数量；若看不到异常件数字段标签，必须输出 null。
+只输出 JSON：{"exceptions": <非负整数>} 或 {"exceptions":null}。`;
 
   const body = {
     model,
@@ -879,12 +882,13 @@ async function callCounterVerifier(
   const verificationPrompt = `你只做计数字段核验。读取这张 POD 签退截图，并返回 JSON。
 
 要求：
-1. 第一张裁剪图只对应 应领件数 区域，读取 expectedCount。如果看不清就返回 null。
-2. 第二张裁剪图只对应 实领件数 区域，读取 actualCount。如果看不清就返回 null。
-3. 第三张裁剪图只对应 左下角已领 区域，读取 pickedUpCount。如果看不清就返回 null。
+1. 第一张裁剪图只在看得见“应领件数/应收件数/运单数量”等 total 合法标签时，才读取 expectedCount。如果标签看不清、只剩数字或语义不确定，就返回 null。
+2. 第二张裁剪图只在看得见“实领件数”等标签时，才读取 actualCount。如果看不清就返回 null。
+3. 第三张裁剪图只在看得见“已领”等标签时，才读取 pickedUpCount。如果看不清就返回 null。
 4. expectedCountVisible / actualCountVisible / pickedUpVisible 表示对应区域数字是否清晰可辨。
 5. 绝对不要猜数字。
 6. 不要把一张裁剪图中的数字借给另一张。
+7. 不能因为数字正好在常见位置就认定字段，必须以当前裁剪图里可见的标签语义为准。
 
 返回格式：
 {
