@@ -8,6 +8,7 @@ import {
   type PodRecord,
   isRouteFormatValid,
   isStationTeamCodeNotCourierRoute,
+  normalizeRouteValue,
   normalizeNumber,
   normalizeText,
   validateRecord,
@@ -45,8 +46,11 @@ type ExtractVisionContext = {
 
 async function buildExtractVisionContext(): Promise<ExtractVisionContext> {
   const examples = await loadTrainingExamples();
-  const visualPack = await buildVisualReferencePack(examples);
-  return { examples, visualPack, imageGuidance: [] };
+  const [visualPack, imageGuidance] = await Promise.all([
+    buildVisualReferencePack(examples),
+    buildTrainingImageGuidance(examples),
+  ]);
+  return { examples, visualPack, imageGuidance };
 }
 
 function mergeParallelRefineReasons(base: PodRecord, ...refined: PodRecord[]): string | null {
@@ -203,8 +207,6 @@ async function imageFingerprintFromBuffer(bytes: Buffer): Promise<number[]> {
   return Array.from(raw, (value) => value / 255);
 }
 
-// Legacy training-pool rule path kept only for rollback; current extraction flow no longer calls it.
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
 async function buildTrainingImageGuidance(examples: TrainingExample[]): Promise<FingerprintedTrainingExample[]> {
   const candidates = examples.filter(hasImageCoordBoxes);
   const loaded = await Promise.all(
@@ -235,8 +237,6 @@ function fingerprintDistance(left: number[], right: number[]): number {
   return total / n;
 }
 
-// Legacy training-pool rule path kept only for rollback; current extraction flow no longer calls it.
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
 async function selectMostSimilarTrainingExamples(
   file: File,
   ctx: ExtractVisionContext,
@@ -261,6 +261,69 @@ async function selectMostSimilarTrainingExamples(
   } catch {
     return ctx.examples;
   }
+}
+
+const LIVE_SUPPORTED_AGGREGATIONS = new Set<FieldAggregation>(["sum", "join_comma"]);
+
+function pickLiveAggregationExample(example: TrainingExample): TrainingExample | null {
+  const imageBoxes = imageCoordBoxes(example);
+  if (imageBoxes.length === 0) {
+    return null;
+  }
+
+  const boxesByField = new Map<TrainingField, TrainingBox[]>();
+  for (const box of imageBoxes) {
+    const list = boxesByField.get(box.field) || [];
+    list.push(box);
+    boxesByField.set(box.field, list);
+  }
+
+  const selectedFields = new Set<TrainingField>();
+  const selectedAggregations: Partial<Record<TrainingField, FieldAggregation>> = {};
+
+  for (const [field, boxes] of boxesByField) {
+    if (boxes.length <= 1) {
+      continue;
+    }
+    const mode = example.fieldAggregations?.[field] ?? inferFieldAggregation(field, boxes.length);
+    if (!LIVE_SUPPORTED_AGGREGATIONS.has(mode)) {
+      continue;
+    }
+    selectedFields.add(field);
+    selectedAggregations[field] = mode;
+  }
+
+  if (selectedFields.size === 0) {
+    return null;
+  }
+
+  return {
+    ...example,
+    boxes: imageBoxes.filter((box) => selectedFields.has(box.field)),
+    fieldAggregations: selectedAggregations,
+  };
+}
+
+async function runLiveAggregationRefine(
+  file: File,
+  ctx: ExtractVisionContext,
+  records: PodRecord[],
+  model: string,
+): Promise<{ records: PodRecord[]; usage?: OpenAIUsage }> {
+  if (!OPENAI_API_KEY || records.length !== 1) {
+    return { records };
+  }
+
+  const similarExamples = await selectMostSimilarTrainingExamples(file, ctx, 3);
+  const aggregationExample =
+    similarExamples.map(pickLiveAggregationExample).find((example): example is TrainingExample => Boolean(example)) ||
+    ctx.examples.map(pickLiveAggregationExample).find((example): example is TrainingExample => Boolean(example));
+
+  if (!aggregationExample) {
+    return { records };
+  }
+
+  return refinePODFromTrainingExampleBoxes(file, aggregationExample, records, model);
 }
 
 function inferFieldAggregation(field: TrainingField, boxCount: number): FieldAggregation {
@@ -369,7 +432,7 @@ function mergeBoxGuidedRecord(
   }
 
   if (boxedFields.has("route")) {
-    const value = normalizeText(parsed.route);
+    const value = normalizeRouteValue(normalizeText(parsed.route));
     next.route = value && isRouteFormatValid(value) ? value : "";
     if (!next.route) {
       next.reviewRequired = true;
@@ -1675,6 +1738,21 @@ export async function POST(request: Request) {
     for (const file of files) {
       const consistencyResult = await runConsistencyCheck(file, model, visionCtx);
       let workingRecords = consistencyResult.records;
+
+      if (consistencyResult.imageType === "POD") {
+        const refined = await runLiveAggregationRefine(file, visionCtx, workingRecords, model);
+        workingRecords = refined.records;
+        if (refined.usage) {
+          consistencyResult.usage = mergeRefineUsage(
+            {
+              prompt_tokens: consistencyResult.usage?.prompt_tokens || 0,
+              completion_tokens: consistencyResult.usage?.completion_tokens || 0,
+              total_tokens: consistencyResult.usage?.total_tokens || 0,
+            },
+            refined.usage,
+          );
+        }
+      }
 
       workingRecords = workingRecords.map(repairRouteVersusStationTeamRecord);
       const sourceCheckedRecords = markSourceMismatchForReview(workingRecords, validLabels);
