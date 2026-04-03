@@ -521,13 +521,16 @@ async function buildAnnotatedTrainingImageDataUrl(
   example: TrainingExample,
   originalDataUrl: string,
   fieldLabels?: Record<string, string>,
+  activeFieldIds?: ReadonlySet<string>,
 ): Promise<string> {
   const parsed = parseDataUrl(originalDataUrl);
   if (!parsed) {
     return originalDataUrl;
   }
 
-  const boxes = (example.boxes || []).filter((box) => box.coordSpace === "image");
+  const boxes = (example.boxes || []).filter(
+    (box) => box.coordSpace === "image" && (!activeFieldIds || activeFieldIds.has(box.field)),
+  );
   if (boxes.length === 0) {
     return originalDataUrl;
   }
@@ -584,7 +587,12 @@ async function buildAnnotatedTrainingImageDataUrl(
  */
 export async function buildVisualReferencePack(
   examples: TrainingExample[],
-  options?: { maxImages?: number; maxBoxHintExamples?: number; fieldLabels?: Record<string, string> },
+  options?: {
+    maxImages?: number;
+    maxBoxHintExamples?: number;
+    fieldLabels?: Record<string, string>;
+    activeFieldIds?: string[];
+  },
 ): Promise<{
   hintText: string;
   referenceImages: Array<{ imageName: string; caption: string; dataUrl: string }>;
@@ -599,6 +607,7 @@ export async function buildVisualReferencePack(
   const sorted = sortTrainingExamplesForGuidance(
     annotatedExamples.length > 0 ? annotatedExamples : examples,
   );
+  const activeFieldIds = options?.activeFieldIds?.length ? new Set(options.activeFieldIds) : undefined;
 
   const referenceImages: Array<{ imageName: string; caption: string; dataUrl: string }> = [];
   if (effectiveMaxImages > 0) {
@@ -606,21 +615,21 @@ export async function buildVisualReferencePack(
       if (referenceImages.length >= effectiveMaxImages) break;
       const originalDataUrl = await getTrainingImageDataUrl(ex.imageName);
       if (!originalDataUrl) continue;
-      const dataUrl = await buildAnnotatedTrainingImageDataUrl(ex, originalDataUrl, options?.fieldLabels);
+      const dataUrl = await buildAnnotatedTrainingImageDataUrl(ex, originalDataUrl, options?.fieldLabels, activeFieldIds);
       const summary = [
-        `date=${ex.output.date}`,
-        `route=${ex.output.route}`,
-        `driver=${ex.output.driver}`,
-        ex.output.taskCode ? `taskCode=${ex.output.taskCode}` : "",
-        `total=${ex.output.total}`,
-        ex.output.totalSourceLabel ? `totalSourceLabel=${ex.output.totalSourceLabel}` : "",
-        `unscanned=${ex.output.unscanned}`,
-        `exceptions=${ex.output.exceptions}`,
-        ex.output.waybillStatus ? `waybillStatus=${ex.output.waybillStatus}` : "",
-        ex.output.stationTeam ? `stationTeam=${ex.output.stationTeam}` : "",
+        !activeFieldIds || activeFieldIds.has("date") ? `date=${ex.output.date}` : "",
+        !activeFieldIds || activeFieldIds.has("route") ? `route=${ex.output.route}` : "",
+        !activeFieldIds || activeFieldIds.has("driver") ? `driver=${ex.output.driver}` : "",
+        (!activeFieldIds || activeFieldIds.has("taskCode")) && ex.output.taskCode ? `taskCode=${ex.output.taskCode}` : "",
+        !activeFieldIds || activeFieldIds.has("total") ? `total=${ex.output.total}` : "",
+        (!activeFieldIds || activeFieldIds.has("total")) && ex.output.totalSourceLabel ? `totalSourceLabel=${ex.output.totalSourceLabel}` : "",
+        !activeFieldIds || activeFieldIds.has("unscanned") ? `unscanned=${ex.output.unscanned}` : "",
+        !activeFieldIds || activeFieldIds.has("exceptions") ? `exceptions=${ex.output.exceptions}` : "",
+        (!activeFieldIds || activeFieldIds.has("waybillStatus")) && ex.output.waybillStatus ? `waybillStatus=${ex.output.waybillStatus}` : "",
+        (!activeFieldIds || activeFieldIds.has("stationTeam")) && ex.output.stationTeam ? `stationTeam=${ex.output.stationTeam}` : "",
         ...(ex.output.customFieldValues
           ? Object.entries(ex.output.customFieldValues)
-              .filter(([, value]) => value !== "" && value !== undefined && value !== null)
+              .filter(([key, value]) => (!activeFieldIds || activeFieldIds.has(key)) && value !== "" && value !== undefined && value !== null)
               .map(([key, value]) => `${options?.fieldLabels?.[key] || key}=${value}`)
           : []),
       ]

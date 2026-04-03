@@ -21,6 +21,7 @@ import {
 } from "@/lib/pod";
 import {
   DEFAULT_TABLE_FIELDS,
+  broadcastTableFieldsChanged,
   createCustomField,
   getActiveTableFields,
   getRecordFieldValue,
@@ -639,6 +640,7 @@ export default function Home() {
     const saved = payload.tableFields?.length ? payload.tableFields : nextFields;
     setTableFields(saved);
     setFieldDrafts(saved);
+    broadcastTableFieldsChanged(saved);
     return saved;
   }
 
@@ -1180,7 +1182,7 @@ export default function Home() {
                 className="rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-xs font-medium text-blue-700 hover:bg-blue-100"
                 onClick={openFieldManager}
               >
-                新增表格项目
+                表格项目管理
               </button>
               <Link href="/training" className="font-medium text-slate-700 hover:text-slate-900 hover:underline">
                 切换到训练模式
@@ -1205,7 +1207,7 @@ export default function Home() {
               <div className="flex items-center justify-between border-b border-slate-200 px-6 py-4">
                 <div>
                   <h2 className="text-lg font-semibold">表格项目管理</h2>
-                  <p className="mt-1 text-sm text-slate-500">你可以新增、重命名、删除或恢复表格项目。删除命中当前表格数据时会先提示。</p>
+                  <p className="mt-1 text-sm text-slate-500">你可以新增、重命名、删除或恢复表格项目。这里的改动会同步到训练页和标注项目；删除命中当前表格数据时会先提示。</p>
                 </div>
                 <button
                   type="button"
@@ -1246,6 +1248,7 @@ export default function Home() {
                           {isSavingFieldConfig ? "处理中..." : "新增并去标注"}
                         </button>
                       </div>
+                      <p className="text-xs text-slate-500">新增后会直接跳转到训练模式，并默认选中新项目开始标注。</p>
                     </div>
                   </div>
 
@@ -1510,6 +1513,7 @@ export default function Home() {
               <div>
                 <h2 className="text-lg font-semibold">在线表格</h2>
                 <p className="mt-1 text-sm text-slate-500">识别后可直接修改、复制到其他表格，或下载成 Excel。</p>
+                <p className="mt-1 text-xs text-slate-500">表格项目可在这里增删改名，保存后会同步到训练页和标注项目。</p>
                 <p className="mt-1.5 flex flex-wrap items-baseline gap-x-1 gap-y-0.5 text-sm text-slate-700">
                   <span className="font-medium text-slate-900">识别条目</span>
                   <span>
@@ -1587,6 +1591,12 @@ export default function Home() {
                   )}
                 </div>
                 <div className="flex flex-wrap gap-2">
+                  <button
+                    className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-medium hover:bg-slate-50"
+                    onClick={openFieldManager}
+                  >
+                    编辑表格项目
+                  </button>
                   <button
                     className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-2 text-sm font-medium text-amber-700 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-50"
                     onClick={() => void retryAllReviewRecords()}

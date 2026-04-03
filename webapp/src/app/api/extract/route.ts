@@ -12,7 +12,6 @@ import {
   normalizeNumber,
   normalizeText,
   validateRecord,
-  visionPrompt,
 } from "@/lib/pod";
 import {
   buildVisualReferencePack,
@@ -37,6 +36,25 @@ const OPENAI_REVIEW_MODEL = process.env.OPENAI_REVIEW_MODEL || "gpt-5";
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_REASONING_EFFORT = process.env.OPENAI_REASONING_EFFORT || "minimal";
 
+const SIMPLE_EXTRACTION_PROMPT = `你是 OrSight。你会先看到几张人工标注参考图，再看到最后一张当前待识别图片。请严格遵守：
+1. 参考图只用于理解界面布局、字段标签和示例，不得抄参考图中的任何数字或文字。
+2. 最终输出只能依据最后一张“当前待识别图片”的可见内容。
+3. 不要猜测；看不清、标签不明确、值和字段对不上时，就留空并把 reviewRequired 设为 true，reviewReason 写清原因。
+4. 如果当前图里存在多个任务或多行记录，请为每个清晰可见的任务输出一条 records。
+5. route 只填写快递员路线；像 IAH-BAA、IAH-BCE 这类站点车队代码应写入 stationTeam，不要误填 route。
+6. total 只填写与“应领件数 / 应收件数 / 运单数量”等直接对应的值，并把原标签写入 totalSourceLabel。
+7. unscanned 只填写与“未领取 / 未收”直接对应的值。
+8. exceptions 只填写与“错扫 / 错分 / 误扫”直接对应的值。
+9. customFieldValues 只填写当前图中有清晰标签和值、且与当前表格项目对应的字段；键必须严格使用字段 id。
+
+返回 JSON：
+{
+  "imageType": "POD" | "WEB_TABLE" | "OTHER",
+  "records": []
+}
+
+不要输出 Markdown，不要额外解释。`;
+
 /** 四次一致性识别次数；设为 3 可略提速，2 更快但更易不一致。默认 4。 */
 function getConsistencyAttemptCount(): number {
   const raw = process.env.EXTRACT_CONSISTENCY_ATTEMPTS;
@@ -55,13 +73,11 @@ type ExtractVisionContext = {
 async function buildExtractVisionContext(): Promise<ExtractVisionContext> {
   const [examples, rawTableFields] = await Promise.all([loadTrainingExamples(), loadTableFields()]);
   const tableFields = getActiveTableFields(rawTableFields);
-  const [visualPack, imageGuidance] = await Promise.all([
-    buildVisualReferencePack(examples, {
-      fieldLabels: getFieldLabelMap(tableFields),
-    }),
-    buildTrainingImageGuidance(examples),
-  ]);
-  return { examples, visualPack, imageGuidance, tableFields };
+  const visualPack = await buildVisualReferencePack(examples, {
+    fieldLabels: getFieldLabelMap(tableFields),
+    activeFieldIds: tableFields.map((field) => field.id),
+  });
+  return { examples, visualPack, imageGuidance: [], tableFields };
 }
 
 function mergeParallelRefineReasons(base: PodRecord, ...refined: PodRecord[]): string | null {
@@ -268,6 +284,7 @@ function buildRecognitionModeDynamicFieldPrompt(tableFields: TableFieldDefinitio
   return lines.join("\n");
 }
 
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function buildRecognitionModePrompt(): string {
   return `
 
@@ -407,6 +424,7 @@ async function imageFingerprintFromBuffer(bytes: Buffer): Promise<number[]> {
   return Array.from(raw, (value) => value / 255);
 }
 
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 async function buildTrainingImageGuidance(examples: TrainingExample[]): Promise<FingerprintedTrainingExample[]> {
   const candidates = examples.filter(hasImageCoordBoxes);
   const loaded = await Promise.all(
@@ -1376,20 +1394,8 @@ async function callVisionModel(
 
   const bytes = Buffer.from(await file.arrayBuffer());
   const dataUrl = `data:${file.type || "image/jpeg"};base64,${bytes.toString("base64")}`;
-  let visualPack = ctx.visualPack;
-  try {
-    const similarExamples = await selectMostSimilarTrainingExamples(file, ctx, 3);
-    if (similarExamples.length > 0) {
-      visualPack = await buildVisualReferencePack(similarExamples, {
-        maxImages: Math.min(3, similarExamples.length),
-        fieldLabels: getFieldLabelMap(ctx.tableFields),
-      });
-    }
-  } catch {
-    visualPack = ctx.visualPack;
-  }
-
-  const baseText = `${visionPrompt}${buildRecognitionModePrompt()}${buildRecognitionModeDynamicFieldPrompt(ctx.tableFields)}${visualPack.hintText}`;
+  const visualPack = ctx.visualPack;
+  const baseText = `${SIMPLE_EXTRACTION_PROMPT}${buildRecognitionModeDynamicFieldPrompt(ctx.tableFields)}${visualPack.hintText}`;
 
   const userContent: OpenAIMessageContent[] = [{ type: "text", text: baseText }];
   for (const ref of visualPack.referenceImages) {
@@ -2041,6 +2047,55 @@ export async function POST(request: Request) {
 
     const visionCtx = await buildExtractVisionContext();
     const examples = visionCtx.examples;
+
+    for (const file of files) {
+      const recognitionResult = await callVisionModel(file, model, visionCtx);
+      const checkedRecords = recognitionResult.records.map((rawRecord, index) => mapRecord(file.name, rawRecord, index));
+
+      const totalPromptTokens = recognitionResult.usage?.prompt_tokens || 0;
+      const totalCompletionTokens = recognitionResult.usage?.completion_tokens || 0;
+      const totalTokens = recognitionResult.usage?.total_tokens || 0;
+
+      if (user?.id) {
+        const admin = getSupabaseAdmin();
+        if (admin) {
+          admin.from("usage_logs").insert({
+            user_id: user.id,
+            action_type: "extract_table",
+            image_count: 1,
+            prompt_tokens: totalPromptTokens,
+            completion_tokens: totalCompletionTokens,
+            total_tokens: totalTokens,
+            model_used: model,
+          }).then(({ error }) => {
+            if (error) console.error("Failed to log usage:", error);
+          });
+        }
+      }
+
+      if (!checkedRecords.length) {
+        issues.push({
+          imageName: file.name,
+          message: "AI 没有返回任何记录，请人工复核。",
+          level: "error",
+          code: "empty_result",
+        });
+        continue;
+      }
+
+      checkedRecords.forEach((record) => {
+        records.push(record);
+        issues.push(...validateRecord(record));
+      });
+    }
+
+    return NextResponse.json({
+      records,
+      issues,
+      modelUsed: model,
+      mode,
+      trainingExamplesLoaded: examples.length,
+    });
     const validLabels = new Set(["应领件数", "应收件数", "运单数量"]);
     for (const file of files) {
       const consistencyResult = await runConsistencyCheck(file, model, visionCtx);
@@ -2088,21 +2143,21 @@ export async function POST(request: Request) {
         counterIssues = [...counterIssues, ...counterChecked.issues];
         
         if (counterVerification.usage) {
-          totalPromptTokens += counterVerification.usage.prompt_tokens || 0;
-          totalCompletionTokens += counterVerification.usage.completion_tokens || 0;
-          totalTokens += counterVerification.usage.total_tokens || 0;
+          totalPromptTokens += counterVerification.usage?.prompt_tokens || 0;
+          totalCompletionTokens += counterVerification.usage?.completion_tokens || 0;
+          totalTokens += counterVerification.usage?.total_tokens || 0;
         }
       }
 
       checkedRecords = deriveWaybillStatus(checkedRecords);
 
       // Log usage to Supabase if user is logged in
-      if (user && user.id) {
+      if (user?.id) {
         const admin = getSupabaseAdmin();
         if (admin) {
           // Fire and forget, don't await to block the response
-          admin.from('usage_logs').insert({
-            user_id: user.id,
+          admin!.from('usage_logs').insert({
+            user_id: user!.id,
             action_type: 'extract_table',
             image_count: 1,
             prompt_tokens: totalPromptTokens,

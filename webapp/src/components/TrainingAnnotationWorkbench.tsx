@@ -107,6 +107,46 @@ function ensureBoxIds(boxes: WorkbenchAnnotationBox[]): WorkbenchAnnotationBox[]
   }));
 }
 
+function getActiveCustomFieldIdSet(fields: TableFieldDefinition[]) {
+  return new Set(fields.filter((field) => !isBuiltInFieldId(field.id)).map((field) => field.id));
+}
+
+function sanitizeManualRecord(seed: AnnotationWorkbenchSeed, activeFields: TableFieldDefinition[]): ManualRecordState {
+  const activeCustomFieldIds = getActiveCustomFieldIdSet(activeFields);
+  return {
+    ...seedToManual(seed),
+    customFieldValues: Object.fromEntries(
+      Object.entries(seed.customFieldValues || {}).filter(([fieldId]) => activeCustomFieldIds.has(fieldId)),
+    ),
+  };
+}
+
+function sanitizeAnnotationBoxes(
+  boxes: WorkbenchAnnotationBox[],
+  activeFieldIds: ReadonlySet<string>,
+): WorkbenchAnnotationBox[] {
+  return ensureBoxIds(boxes.filter((box) => activeFieldIds.has(box.field)));
+}
+
+function sanitizeFieldAggregations(
+  aggs: Partial<Record<AnnotationField, FieldAggregation>>,
+  activeFieldIds: ReadonlySet<string>,
+): Partial<Record<AnnotationField, FieldAggregation>> {
+  return Object.fromEntries(
+    Object.entries(aggs).filter(([fieldId]) => activeFieldIds.has(fieldId)),
+  ) as Partial<Record<AnnotationField, FieldAggregation>>;
+}
+
+function pickAnnotationField(
+  preferredField: AnnotationField | undefined,
+  activeFields: TableFieldDefinition[],
+): AnnotationField {
+  if (preferredField && activeFields.some((field) => field.id === preferredField)) {
+    return preferredField;
+  }
+  return activeFields[0]?.id ?? "driver";
+}
+
 export type TrainingAnnotationWorkbenchProps = {
   open: boolean;
   imageName: string;
@@ -142,15 +182,17 @@ export function TrainingAnnotationWorkbench({
     () => (fieldDefinitions?.length ? fieldDefinitions : DEFAULT_TABLE_FIELDS).filter((field) => field.active),
     [fieldDefinitions],
   );
+  const activeFieldIdSet = useMemo(() => new Set(activeFieldDefinitions.map((field) => field.id)), [activeFieldDefinitions]);
   const fieldDefinitionMap = useMemo(
     () => Object.fromEntries(activeFieldDefinitions.map((field) => [field.id, field])),
     [activeFieldDefinitions],
   );
-  const defaultFieldId = initialField ?? activeFieldDefinitions[0]?.id ?? "driver";
-  const [manualRecord, setManualRecord] = useState<ManualRecordState>(() => seedToManual(initialSeed));
-  const [annotationBoxes, setAnnotationBoxes] = useState<WorkbenchAnnotationBox[]>(() => ensureBoxIds(initialBoxes));
-  const [fieldAggregations, setFieldAggregations] =
-    useState<Partial<Record<AnnotationField, FieldAggregation>>>(initialFieldAggregations);
+  const defaultFieldId = pickAnnotationField(initialField, activeFieldDefinitions);
+  const [manualRecord, setManualRecord] = useState<ManualRecordState>(() => sanitizeManualRecord(initialSeed, activeFieldDefinitions));
+  const [annotationBoxes, setAnnotationBoxes] = useState<WorkbenchAnnotationBox[]>(() => sanitizeAnnotationBoxes(initialBoxes, activeFieldIdSet));
+  const [fieldAggregations, setFieldAggregations] = useState<Partial<Record<AnnotationField, FieldAggregation>>>(() =>
+    sanitizeFieldAggregations(initialFieldAggregations, activeFieldIdSet),
+  );
   const [annotationField, setAnnotationField] = useState<AnnotationField>(defaultFieldId);
   const [annotationNotes, setAnnotationNotes] = useState(initialNotes ?? "人工标注用于训练池。");
   const [drawingState, setDrawingState] = useState<DrawingState | null>(null);
@@ -158,6 +200,10 @@ export function TrainingAnnotationWorkbench({
   const [isPreviewFillLoading, setIsPreviewFillLoading] = useState(false);
   const [layoutTick, setLayoutTick] = useState(0);
   const bumpLayout = useCallback(() => setLayoutTick((t) => t + 1), []);
+  const visibleAnnotationBoxes = useMemo(
+    () => annotationBoxes.filter((box) => activeFieldIdSet.has(box.field)),
+    [activeFieldIdSet, annotationBoxes],
+  );
 
   const annotationCanvasRef = useRef<HTMLDivElement | null>(null);
   const imageRef = useRef<HTMLImageElement | null>(null);
@@ -312,13 +358,23 @@ export function TrainingAnnotationWorkbench({
       return;
     }
     seedJsonRef.current = next;
-    setManualRecord(seedToManual(initialSeed));
-    setAnnotationBoxes(ensureBoxIds(initialBoxes));
-    setFieldAggregations(initialFieldAggregations);
+    setManualRecord(sanitizeManualRecord(initialSeed, activeFieldDefinitions));
+    setAnnotationBoxes(sanitizeAnnotationBoxes(initialBoxes, activeFieldIdSet));
+    setFieldAggregations(sanitizeFieldAggregations(initialFieldAggregations, activeFieldIdSet));
     setAnnotationNotes(initialNotes ?? "人工标注用于训练池。");
-    setAnnotationField(initialField ?? activeFieldDefinitions[0]?.id ?? "driver");
+    setAnnotationField(pickAnnotationField(initialField, activeFieldDefinitions));
     setDrawingState(null);
-  }, [open, initialSeed, initialBoxes, initialFieldAggregations, initialNotes, initialField, activeFieldDefinitions]);
+  }, [open, initialSeed, initialBoxes, initialFieldAggregations, initialNotes, initialField, activeFieldDefinitions, activeFieldIdSet]);
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+    setManualRecord((current) => sanitizeManualRecord(current, activeFieldDefinitions));
+    setAnnotationBoxes((current) => sanitizeAnnotationBoxes(current, activeFieldIdSet));
+    setFieldAggregations((current) => sanitizeFieldAggregations(current, activeFieldIdSet));
+    setAnnotationField((current) => pickAnnotationField(current, activeFieldDefinitions));
+  }, [open, activeFieldDefinitions, activeFieldIdSet]);
 
   const handleClose = useCallback(() => {
     setDrawingState(null);
@@ -496,6 +552,7 @@ export function TrainingAnnotationWorkbench({
       const n = typeof v === "number" ? v : Number(v);
       return Number.isFinite(n) ? n : "";
     };
+    const hasField = (fieldId: string) => activeFieldIdSet.has(fieldId);
     const customFieldValues = Object.fromEntries(
       activeFieldDefinitions
         .filter((field) => !isBuiltInFieldId(field.id))
@@ -508,22 +565,22 @@ export function TrainingAnnotationWorkbench({
         .filter(([, value]) => value !== ""),
     ) as Record<string, string | number | "">;
     return {
-      date: m.date ?? "",
-      route: m.route ?? "",
-      driver: m.driver ?? "",
-      taskCode: m.taskCode ?? "",
-      total: numOrEmpty(m.total),
-      unscanned: numOrEmpty(m.unscanned),
-      exceptions: numOrEmpty(m.exceptions),
-      waybillStatus: m.waybillStatus ?? "",
-      stationTeam: m.stationTeam ?? "",
-      totalSourceLabel: m.totalSourceLabel ?? "",
+      date: hasField("date") ? (m.date ?? "") : "",
+      route: hasField("route") ? (m.route ?? "") : "",
+      driver: hasField("driver") ? (m.driver ?? "") : "",
+      taskCode: hasField("taskCode") ? (m.taskCode ?? "") : "",
+      total: hasField("total") ? numOrEmpty(m.total) : "",
+      unscanned: hasField("unscanned") ? numOrEmpty(m.unscanned) : "",
+      exceptions: hasField("exceptions") ? numOrEmpty(m.exceptions) : "",
+      waybillStatus: hasField("waybillStatus") ? (m.waybillStatus ?? "") : "",
+      stationTeam: hasField("stationTeam") ? (m.stationTeam ?? "") : "",
+      totalSourceLabel: hasField("total") ? (m.totalSourceLabel ?? "") : "",
       customFieldValues,
     };
   }
 
   async function previewFillFromAnnotations() {
-    if (!open || !imageSrc || !annotationBoxes.length) {
+    if (!open || !imageSrc || !visibleAnnotationBoxes.length) {
       onError?.("请先完成框选并确保图片已加载。");
       return;
     }
@@ -535,8 +592,8 @@ export function TrainingAnnotationWorkbench({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           imageDataUrl,
-          boxes: boxesForVisionApi(annotationBoxes),
-          fieldAggregations,
+          boxes: boxesForVisionApi(visibleAnnotationBoxes),
+          fieldAggregations: sanitizeFieldAggregations(fieldAggregations, activeFieldIdSet),
           tableFields: activeFieldDefinitions,
         }),
       });
@@ -557,7 +614,7 @@ export function TrainingAnnotationWorkbench({
         const n = typeof v === "number" ? v : Number(v);
         return Number.isFinite(n) ? n : "";
       };
-      const boxed = new Set(annotationBoxes.map((b) => b.field));
+      const boxed = new Set(visibleAnnotationBoxes.map((b) => b.field));
       setManualRecord((prev) => {
         const next = { ...prev };
         const strFromModel = (v: unknown) => (typeof v === "string" ? v : "");
@@ -624,7 +681,7 @@ export function TrainingAnnotationWorkbench({
       return;
     }
 
-    if (!annotationBoxes.length) {
+    if (!visibleAnnotationBoxes.length) {
       onError?.("请至少标注一个字段框后再保存。");
       return;
     }
@@ -632,6 +689,7 @@ export function TrainingAnnotationWorkbench({
     setIsSavingTraining(true);
 
     try {
+      const finalSeed = manualToFinalSeed(manualRecord);
       const imageDataUrl = await imageSourceToDataUrl(imageSrc);
       const response = await fetch("/api/training/save", {
         method: "POST",
@@ -643,20 +701,20 @@ export function TrainingAnnotationWorkbench({
           imageDataUrl,
           notes: annotationNotes,
           output: {
-            date: manualRecord.date || "",
-            route: manualRecord.route || "",
-            driver: manualRecord.driver || "",
-            taskCode: manualRecord.taskCode || "",
-            total: Number(manualRecord.total) || 0,
-            totalSourceLabel: manualRecord.totalSourceLabel || "",
-            unscanned: Number(manualRecord.unscanned) || 0,
-            exceptions: Number(manualRecord.exceptions) || 0,
-            waybillStatus: manualRecord.waybillStatus || "",
-            stationTeam: manualRecord.stationTeam || "",
-            customFieldValues: manualRecord.customFieldValues || {},
+            date: finalSeed.date || "",
+            route: finalSeed.route || "",
+            driver: finalSeed.driver || "",
+            taskCode: finalSeed.taskCode || "",
+            total: Number(finalSeed.total) || 0,
+            totalSourceLabel: finalSeed.totalSourceLabel || "",
+            unscanned: Number(finalSeed.unscanned) || 0,
+            exceptions: Number(finalSeed.exceptions) || 0,
+            waybillStatus: finalSeed.waybillStatus || "",
+            stationTeam: finalSeed.stationTeam || "",
+            customFieldValues: finalSeed.customFieldValues || {},
           },
-          boxes: annotationBoxes,
-          fieldAggregations,
+          boxes: visibleAnnotationBoxes,
+          fieldAggregations: sanitizeFieldAggregations(fieldAggregations, activeFieldIdSet),
         }),
       });
 
@@ -665,7 +723,6 @@ export function TrainingAnnotationWorkbench({
         throw new Error(payload.error || "保存训练样本失败。");
       }
 
-      const finalSeed = manualToFinalSeed(manualRecord);
       await Promise.resolve(onSaved?.({ totalExamples: payload.totalExamples, finalSeed }));
       handleClose();
     } catch (error) {
@@ -743,8 +800,8 @@ export function TrainingAnnotationWorkbench({
               ) : (
                 <div className="flex h-full min-h-[200px] items-center justify-center text-sm text-slate-400">加载图片中…</div>
               )}
-              {annotationBoxes.map((box) => {
-                const sameField = annotationBoxes.filter((b) => b.field === box.field);
+              {visibleAnnotationBoxes.map((box) => {
+                const sameField = visibleAnnotationBoxes.filter((b) => b.field === box.field);
                 const idx = sameField.findIndex((b) => b.id === box.id) + 1;
                 const baseLabel = fieldDefinitionMap[box.field]?.label || box.field;
                 const tag = sameField.length > 1 ? `${baseLabel}#${idx}` : baseLabel;
@@ -810,7 +867,7 @@ export function TrainingAnnotationWorkbench({
               <div className="mb-3 text-sm font-medium text-slate-700">选择字段并画框</div>
               <div className="space-y-3">
                 {activeFieldDefinitions.map((field) => {
-                  const boxesFor = annotationBoxes.filter((box) => box.field === field.id);
+                  const boxesFor = visibleAnnotationBoxes.filter((box) => box.field === field.id);
                   const count = boxesFor.length;
                   const hasBox = count > 0;
                   return (
@@ -902,7 +959,7 @@ export function TrainingAnnotationWorkbench({
                 type="button"
                 className="w-full rounded-xl border border-violet-300 bg-violet-50 px-4 py-3 text-sm font-medium text-violet-900 hover:bg-violet-100 disabled:cursor-not-allowed disabled:opacity-50"
                 onClick={() => void previewFillFromAnnotations()}
-                disabled={isPreviewFillLoading || isSavingTraining || !imageSrc || annotationBoxes.length === 0}
+                disabled={isPreviewFillLoading || isSavingTraining || !imageSrc || visibleAnnotationBoxes.length === 0}
               >
                 {isPreviewFillLoading ? "试填识别中…" : "AI 试填预览（按框选识别并填入上方）"}
               </button>

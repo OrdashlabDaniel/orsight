@@ -21,6 +21,9 @@ export type TableFieldDefinition = {
   builtIn: boolean;
 };
 
+export const TABLE_FIELDS_SYNC_EVENT = "orsight:table-fields-changed";
+export const TABLE_FIELDS_SYNC_STORAGE_KEY = "orsight:table-fields-sync";
+
 export const DEFAULT_TABLE_FIELDS: TableFieldDefinition[] = [
   { id: "date", label: "日期", type: "text", active: true, builtIn: true },
   { id: "route", label: "抽查路线", type: "text", active: true, builtIn: true },
@@ -114,6 +117,25 @@ export function getRecordFieldValue(record: PodRecord, field: TableFieldDefiniti
     return (record[field.id] as string | number | "" | undefined) ?? "";
   }
   return record.customFieldValues?.[field.id] ?? "";
+}
+
+export function broadcastTableFieldsChanged(fields: TableFieldDefinition[]) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  const detail = {
+    tableFields: fields,
+    timestamp: Date.now(),
+  };
+
+  window.dispatchEvent(new CustomEvent(TABLE_FIELDS_SYNC_EVENT, { detail }));
+
+  try {
+    window.localStorage.setItem(TABLE_FIELDS_SYNC_STORAGE_KEY, JSON.stringify(detail));
+  } catch {
+    // Ignore storage write failures; same-tab custom event already covers live sync.
+  }
 }
 
 export function hasRecordFieldValue(record: PodRecord, field: TableFieldDefinition): boolean {

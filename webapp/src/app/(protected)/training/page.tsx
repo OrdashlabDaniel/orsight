@@ -15,6 +15,8 @@ import type { AgentAsset, AgentThreadTurn } from "@/lib/agent-context-types";
 import {
   DEFAULT_TABLE_FIELDS,
   getActiveTableFields,
+  TABLE_FIELDS_SYNC_EVENT,
+  TABLE_FIELDS_SYNC_STORAGE_KEY,
   type TableFieldDefinition,
 } from "@/lib/table-fields";
 
@@ -118,6 +120,31 @@ export default function TrainingMode() {
   useEffect(() => {
     void loadTableFieldConfig();
   }, []);
+
+  useEffect(() => {
+    function handleTableFieldsChanged() {
+      void loadTableFieldConfig();
+    }
+
+    function handleStorage(event: StorageEvent) {
+      if (event.key === TABLE_FIELDS_SYNC_STORAGE_KEY) {
+        void loadTableFieldConfig();
+      }
+    }
+
+    window.addEventListener(TABLE_FIELDS_SYNC_EVENT, handleTableFieldsChanged as EventListener);
+    window.addEventListener("storage", handleStorage);
+    return () => {
+      window.removeEventListener(TABLE_FIELDS_SYNC_EVENT, handleTableFieldsChanged as EventListener);
+      window.removeEventListener("storage", handleStorage);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (setupField && !activeTableFields.some((field) => field.id === setupField)) {
+      setSetupField("");
+    }
+  }, [activeTableFields, setupField]);
 
   useEffect(() => {
     if (!isFieldOnboarding) {
