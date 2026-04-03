@@ -94,6 +94,24 @@ type FieldManagerDragState = {
   originY: number;
 };
 
+type SaveFilePickerHandle = {
+  createWritable: () => Promise<{
+    write: (data: Blob) => Promise<void>;
+    close: () => Promise<void>;
+  }>;
+};
+
+type WindowWithSavePicker = Window &
+  typeof globalThis & {
+    showSaveFilePicker?: (options?: {
+      suggestedName?: string;
+      types?: Array<{
+        description?: string;
+        accept: Record<string, string[]>;
+      }>;
+    }) => Promise<SaveFilePickerHandle>;
+  };
+
 export const editableColumns: Array<{
   key: keyof Pick<PodRecord, "date" | "route" | "driver" | "taskCode" | "total" | "unscanned" | "exceptions" | "waybillStatus">;
   label: string;
@@ -957,7 +975,7 @@ export default function Home() {
     setNoticeMessage("表格内容已复制，可直接粘贴到其他表格。");
   }
 
-  function downloadExcel() {
+  async function downloadExcel() {
     const worksheet = XLSX.utils.aoa_to_sheet([
       tableHeaders,
       ...buildExportRows(filteredRecordsResult.records, activeTableFields),
@@ -965,8 +983,48 @@ export default function Home() {
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, "OrSight数据");
     const filename = `${formatDateForFilename(filteredRecordsResult.records[0]?.date)}.xlsx`;
-    XLSX.writeFile(workbook, filename);
-    setNoticeMessage(`Excel 已下载：${filename}`);
+    const workbookBytes = XLSX.write(workbook, { bookType: "xlsx", type: "array" });
+    const fileBlob = new Blob([workbookBytes], {
+      type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    });
+
+    try {
+      const pickerWindow = window as WindowWithSavePicker;
+      if (typeof pickerWindow.showSaveFilePicker === "function") {
+        const handle = await pickerWindow.showSaveFilePicker({
+          suggestedName: filename,
+          types: [
+            {
+              description: "Excel 工作簿",
+              accept: {
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": [".xlsx"],
+              },
+            },
+          ],
+        });
+        const writable = await handle.createWritable();
+        await writable.write(fileBlob);
+        await writable.close();
+        setNoticeMessage(`Excel 已保存：${filename}`);
+        return;
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.toLowerCase().includes("abort")) {
+        setNoticeMessage("已取消 Excel 保存。");
+        return;
+      }
+    }
+
+    const downloadUrl = URL.createObjectURL(fileBlob);
+    const link = document.createElement("a");
+    link.href = downloadUrl;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(downloadUrl), 1000);
+    setNoticeMessage(`Excel 已下载：${filename}（当前浏览器不支持手动选择保存位置）`);
   }
 
   function updateRecord(id: string, field: TableFieldDefinition, value: string) {
