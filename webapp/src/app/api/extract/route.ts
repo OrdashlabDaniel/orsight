@@ -97,11 +97,31 @@ function firstNonEmptyValue<T>(records: PodRecord[], pick: (record: PodRecord) =
   return "";
 }
 
+function firstStableNumberValue(
+  records: PodRecord[],
+  pick: (record: PodRecord) => number | "" | undefined,
+): number | "" {
+  const values = records
+    .map((record) => pick(record))
+    .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+
+  if (values.length === 0) {
+    return "";
+  }
+
+  const [first] = values;
+  return values.every((value) => value === first) ? first : "";
+}
+
 function buildAggregationBaseRecord(records: PodRecord[]): PodRecord {
   const [first] = records;
   if (!first) {
     throw new Error("Cannot build aggregation base from empty records.");
   }
+
+  const stableTotal = firstStableNumberValue(records, (record) => record.total);
+  const stableUnscanned = firstStableNumberValue(records, (record) => record.unscanned);
+  const stableExceptions = firstStableNumberValue(records, (record) => record.exceptions);
 
   return {
     ...first,
@@ -109,10 +129,10 @@ function buildAggregationBaseRecord(records: PodRecord[]): PodRecord {
     route: String(firstNonEmptyValue(records, (record) => record.route) || ""),
     driver: String(firstNonEmptyValue(records, (record) => record.driver) || ""),
     taskCode: String(firstNonEmptyValue(records, (record) => record.taskCode) || ""),
-    total: firstNonEmptyValue(records, (record) => record.total) as PodRecord["total"],
-    totalSourceLabel: String(firstNonEmptyValue(records, (record) => record.totalSourceLabel) || ""),
-    unscanned: firstNonEmptyValue(records, (record) => record.unscanned) as PodRecord["unscanned"],
-    exceptions: firstNonEmptyValue(records, (record) => record.exceptions) as PodRecord["exceptions"],
+    total: stableTotal,
+    totalSourceLabel: stableTotal !== "" ? String(firstNonEmptyValue(records, (record) => record.totalSourceLabel) || "") : "",
+    unscanned: stableUnscanned,
+    exceptions: stableExceptions,
     waybillStatus: String(firstNonEmptyValue(records, (record) => record.waybillStatus) || ""),
     stationTeam: String(firstNonEmptyValue(records, (record) => record.stationTeam) || ""),
     customFieldValues: records.reduce<Record<string, string | number | "">>((acc, record) => {
@@ -203,6 +223,8 @@ function normalizeCustomFieldValues(value: unknown): Record<string, string | num
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
+// Legacy prompt builder kept only for rollback; current extraction uses buildRecognitionModeDynamicFieldPrompt instead.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function buildDynamicFieldPrompt(tableFields: TableFieldDefinition[]): string {
   if (!tableFields.length) {
     return "";
@@ -224,6 +246,36 @@ function buildDynamicFieldPrompt(tableFields: TableFieldDefinition[]): string {
   }
 
   return lines.join("\n");
+}
+
+function buildRecognitionModeDynamicFieldPrompt(tableFields: TableFieldDefinition[]): string {
+  const activeCustomFields = tableFields.filter((field) => !isBuiltInFieldId(field.id));
+  if (activeCustomFields.length === 0) {
+    return "";
+  }
+
+  const lines = [
+    "",
+    "【附加自定义表格项目】",
+    "下列字段是额外追加项，只有在当前图中能看到清晰标签且值确实对应时，才写入 customFieldValues。不要让自定义字段影响内置字段的判断。",
+  ];
+
+  for (const field of activeCustomFields) {
+    lines.push(`- 字段 id: ${field.id}；当前显示名：「${field.label}」；类型：${field.type}`);
+  }
+
+  lines.push("识别结果写入 customFieldValues 对象，键必须严格使用上面的字段 id。");
+  return lines.join("\n");
+}
+
+function buildRecognitionModePrompt(): string {
+  return `
+
+【当前识别模式覆盖规则】
+1. 人工标注参考图只用于帮助你先看懂同类界面的字段标签与布局，不是要你抄写的规则答案。最终每个字段必须仅来自当前图片的可见像素。
+2. 对 POD 界面，「未收数量」只能来自当前图中与「未领取 / 未收」等标签直接对应的数字。绝不能从「已领」、「实领件数」、「应领件数」、任务编码、时间戳或其他邻近数字里截取前缀或后缀来填值。
+3. 如果当前图片看不清未收标签或对应数字，就把 unscanned 留空并设 reviewRequired=true，不要为了凑完整结果去猜。
+4. 自定义表格项目只是附加输出，不得把内置字段的数字错分到自定义项，也不得反过来。`;
 }
 
 type FingerprintedTrainingExample = {
@@ -258,6 +310,13 @@ const TOTAL_REVIEW_REASON_PATTERNS = [
   "运单数量识别结果异常偏大",
 ];
 
+const UNSCANNED_REVIEW_REASON_PATTERNS = [
+  "æœªæ”¶æ•°é‡å¤§äºŽè¿å•æ•°é‡",
+  "æœªæ”¶æ•°é‡è¯†åˆ«ç»“æžœå¼‚å¸¸åå¤§",
+  "æœªæ”¶æ•°é‡ä¸Žå›ºå®šè®¡æ•°å™¨æŽ¨å¯¼ç»“æžœä¸ä¸€è‡´",
+  "æœªæ”¶æ•°é‡ç–‘ä¼¼åŸç”¨äº†å·²é¢†/å®žé¢†ç­‰é‚»è¿‘æ•°å­—",
+];
+
 function clearResolvedTotalReviewFlags(record: PodRecord): PodRecord {
   if (!record.reviewRequired || !record.reviewReason) {
     return record;
@@ -269,6 +328,34 @@ function clearResolvedTotalReviewFlags(record: PodRecord): PodRecord {
     .filter(Boolean)
     .filter(
       (reason) => !TOTAL_REVIEW_REASON_PATTERNS.some((pattern) => reason.includes(pattern)),
+    );
+
+  if (remainingReasons.length === 0) {
+    return {
+      ...record,
+      reviewRequired: false,
+      reviewReason: null,
+    };
+  }
+
+  return {
+    ...record,
+    reviewRequired: true,
+    reviewReason: remainingReasons.join(" | "),
+  };
+}
+
+function clearResolvedUnscannedReviewFlags(record: PodRecord): PodRecord {
+  if (!record.reviewRequired || !record.reviewReason) {
+    return record;
+  }
+
+  const remainingReasons = record.reviewReason
+    .split(" | ")
+    .map((value) => value.trim())
+    .filter(Boolean)
+    .filter(
+      (reason) => !UNSCANNED_REVIEW_REASON_PATTERNS.some((pattern) => reason.includes(pattern)),
     );
 
   if (remainingReasons.length === 0) {
@@ -1287,11 +1374,22 @@ async function callVisionModel(
     throw new Error("Missing OPENAI_API_KEY. Please configure the AI model first.");
   }
 
-  const { visualPack } = ctx;
   const bytes = Buffer.from(await file.arrayBuffer());
   const dataUrl = `data:${file.type || "image/jpeg"};base64,${bytes.toString("base64")}`;
+  let visualPack = ctx.visualPack;
+  try {
+    const similarExamples = await selectMostSimilarTrainingExamples(file, ctx, 3);
+    if (similarExamples.length > 0) {
+      visualPack = await buildVisualReferencePack(similarExamples, {
+        maxImages: Math.min(3, similarExamples.length),
+        fieldLabels: getFieldLabelMap(ctx.tableFields),
+      });
+    }
+  } catch {
+    visualPack = ctx.visualPack;
+  }
 
-  const baseText = `${visionPrompt}${buildDynamicFieldPrompt(ctx.tableFields)}${visualPack.hintText}`;
+  const baseText = `${visionPrompt}${buildRecognitionModePrompt()}${buildRecognitionModeDynamicFieldPrompt(ctx.tableFields)}${visualPack.hintText}`;
 
   const userContent: OpenAIMessageContent[] = [{ type: "text", text: baseText }];
   for (const ref of visualPack.referenceImages) {
@@ -1666,6 +1764,35 @@ function deriveWaybillStatus(records: PodRecord[]) {
   });
 }
 
+function deriveCounterBasedUnscanned(
+  expectedCount: number | null,
+  actualCount: number | null,
+  pickedUpCount: number | null,
+  actualCountVisible: boolean,
+  pickedUpVisible: boolean,
+  singleRecordView: boolean,
+): { value: number | null; source: "actualCount" | "pickedUpCount" | null } {
+  if (expectedCount === null) {
+    return { value: null, source: null };
+  }
+
+  if (actualCountVisible && actualCount !== null) {
+    const derived = expectedCount - actualCount;
+    if (Number.isInteger(derived) && derived >= 0 && derived <= expectedCount) {
+      return { value: derived, source: "actualCount" };
+    }
+  }
+
+  if (singleRecordView && pickedUpVisible && pickedUpCount !== null) {
+    const derived = expectedCount - pickedUpCount;
+    if (Number.isInteger(derived) && derived >= 0 && derived <= expectedCount) {
+      return { value: derived, source: "pickedUpCount" };
+    }
+  }
+
+  return { value: null, source: null };
+}
+
 function applyCounterVerification(
   fileName: string,
   records: PodRecord[],
@@ -1677,6 +1804,17 @@ function applyCounterVerification(
   const actualCount = toNullableNumber(verification.actualCount);
   const pickedUpCount = toNullableNumber(verification.pickedUpCount);
   const expectedCountVisible = toBoolean(verification.expectedCountVisible);
+  const actualCountVisible = toBoolean(verification.actualCountVisible);
+  const pickedUpVisible = toBoolean(verification.pickedUpVisible);
+  const singleRecordView = records.length === 1;
+  const derivedUnscanned = deriveCounterBasedUnscanned(
+    expectedCount,
+    actualCount,
+    pickedUpCount,
+    actualCountVisible,
+    pickedUpVisible,
+    singleRecordView,
+  );
 
   const nextRecords = records.map((record) => {
     let nextRecord = record;
@@ -1717,6 +1855,34 @@ function applyCounterVerification(
             code: "total_corrected_from_expected",
             message: `运单数量原为 ${previousTotal}，与应领件数 ${expectedCount} 不一致，已按应领件数自动纠正。`,
           });
+        }
+      }
+
+      if (derivedUnscanned.value !== null) {
+        const previousUnscanned = nextRecord.unscanned;
+        if (previousUnscanned === "" || previousUnscanned !== derivedUnscanned.value) {
+          nextRecord = clearResolvedUnscannedReviewFlags({
+            ...nextRecord,
+            unscanned: derivedUnscanned.value,
+          });
+
+          if (previousUnscanned === "") {
+            issues.push({
+              imageName: fileName,
+              route: record.route,
+              level: "warning",
+              code: "unscanned_filled_from_counters",
+              message: `固定计数器核验推导出未收数量 ${derivedUnscanned.value}（依据 ${derivedUnscanned.source === "actualCount" ? "应领件数 - 实领件数" : "应领件数 - 已领"}），已自动回填。`,
+            });
+          } else if (previousUnscanned !== derivedUnscanned.value) {
+            issues.push({
+              imageName: fileName,
+              route: record.route,
+              level: "warning",
+              code: "unscanned_corrected_from_counters",
+              message: `未收数量原为 ${previousUnscanned}，与固定计数器推导结果 ${derivedUnscanned.value} 不一致，已自动纠正。`,
+            });
+          }
         }
       }
 
