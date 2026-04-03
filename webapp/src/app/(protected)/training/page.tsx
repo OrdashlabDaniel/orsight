@@ -100,6 +100,10 @@ export default function TrainingMode() {
     fieldAggregations: Partial<Record<AnnotationField, FieldAggregation>>;
     notes: string;
   } | null>(null);
+
+  const goToFillMode = useCallback(() => {
+    window.location.assign("/");
+  }, []);
   const removeUploadAfterSaveRef = useRef<string | null>(null);
 
   const [isSavingTraining, setIsSavingTraining] = useState(false);
@@ -672,9 +676,13 @@ export default function TrainingMode() {
             <Link href="/forms" className="font-medium text-blue-600 hover:underline">
               ← 返回填表池
             </Link>
-            <Link href="/" className="font-medium text-slate-700 hover:text-slate-900 hover:underline">
+            <button
+              type="button"
+              onClick={goToFillMode}
+              className="font-medium text-slate-700 hover:text-slate-900 hover:underline"
+            >
               切换到填表模式
-            </Link>
+            </button>
           </div>
           <h1 className="text-2xl font-semibold">OrSight - 训练模式</h1>
           <p className="mt-2 text-sm text-slate-600">
