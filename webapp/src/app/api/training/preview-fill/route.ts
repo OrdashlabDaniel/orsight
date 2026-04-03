@@ -35,7 +35,11 @@ type PreviewRequestBody = {
   boxes?: unknown;
   fieldAggregations?: unknown;
   tableFields?: unknown;
+  annotationMode?: unknown;
 };
+
+type AnnotationMode = "record" | "table";
+type PreviewTableFieldValues = Record<string, Array<string | number | "">>;
 
 function normalizeNumber(value: unknown): number | null {
   if (typeof value === "number" && Number.isFinite(value)) return value;
@@ -48,6 +52,10 @@ function normalizeNumber(value: unknown): number | null {
 
 function normalizeText(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
+}
+
+function normalizeAnnotationMode(value: unknown): AnnotationMode {
+  return value === "table" ? "table" : "record";
 }
 
 function normalizeBoxes(
@@ -214,12 +222,91 @@ function buildCropInstructionText(
   return lines.join("\n");
 }
 
+function buildTableCropInstructionText(
+  boxes: Array<{ field: TrainingField; x: number; y: number; width: number; height: number }>,
+  aggregations: Partial<Record<TrainingField, FieldAggregation>>,
+  tableFields: TableFieldDefinition[],
+  fieldLabels: Record<string, string>,
+  fieldTypeMap: Record<string, "text" | "number">,
+): string {
+  const byField = new Map<TrainingField, typeof boxes>();
+  for (const box of boxes) {
+    const list = byField.get(box.field) || [];
+    list.push(box);
+    byField.set(box.field, list);
+  }
+
+  const lines: string[] = [
+    `下面会附上 ${boxes.length} 张裁剪小图（PNG），每张图通常对应整张表格中的一列或一段列区域。`,
+    "请对每张小图只做列内 OCR：按表格从上到下读取当前列每一行的值，返回数组。",
+    "不要把列标题、分页、按钮（如查看/打印）、序号、空白装饰当成数据行。",
+    "如果同一字段有多张小图，请分别为每张图返回数组；服务器会按字段聚合规则合并它们。",
+    "",
+    "图片与字段对应关系：",
+  ];
+
+  boxes.forEach((box, index) => {
+    lines.push(`图${index + 1} -> 【${fieldLabels[box.field] || box.field}】（JSON 键名 ${box.field}）`);
+  });
+
+  lines.push("", "同字段多张图时的聚合规则：");
+  for (const [field, fieldBoxes] of byField) {
+    if (fieldBoxes.length <= 1) {
+      continue;
+    }
+    const indices = boxes
+      .map((box, index) => (box.field === field ? index + 1 : -1))
+      .filter((index) => index > 0);
+    const mode = aggregations[field] ?? inferAggregation(field, fieldBoxes.length, fieldTypeMap);
+    lines.push(
+      `- ${fieldLabels[field] || field}：图${indices.join("、图")}；${describeAggregation(mode)}。在完整表格模式下，这表示按“同一行”对齐后再聚合。`,
+    );
+  }
+
+  const customFields = tableFields.filter((field) => !isBuiltInFieldId(field.id));
+  if (customFields.length > 0) {
+    lines.push(
+      "",
+      `自定义字段同样直接用字段 id 输出。当前可能出现的自定义字段有：${customFields
+        .map((field) => `${field.id}（${field.label}）`)
+        .join("、")}。`,
+    );
+  }
+
+  lines.push(
+    "",
+    "请只返回合法 JSON，格式如下：",
+    `{`,
+    `  "imageValues": {`,
+    `    "1": ["第1行值", "第2行值"],`,
+    `    "2": ["第1行值", "第2行值"]`,
+    `  },`,
+    `  "previewNote": "可选说明"`,
+    `}`,
+  );
+
+  return lines.join("\n");
+}
+
 function parsePreviewJson(content: string): { record: Record<string, unknown>; previewNote: string } {
   const parsed = JSON.parse(content) as Record<string, unknown>;
   const previewNote = typeof parsed.previewNote === "string" ? parsed.previewNote.trim() : "";
   const record = { ...parsed };
   delete record.previewNote;
   return { record, previewNote };
+}
+
+function parseTablePreviewJson(content: string): {
+  imageValues: Record<string, unknown>;
+  previewNote: string;
+} {
+  const parsed = JSON.parse(content) as Record<string, unknown>;
+  const previewNote = typeof parsed.previewNote === "string" ? parsed.previewNote.trim() : "";
+  const imageValues =
+    parsed.imageValues && typeof parsed.imageValues === "object"
+      ? (parsed.imageValues as Record<string, unknown>)
+      : {};
+  return { imageValues, previewNote };
 }
 
 function normalizeCustomFieldPreviewValue(
@@ -237,6 +324,65 @@ function normalizeCustomFieldPreviewValue(
   return "";
 }
 
+function trimTrailingEmptyEntries(values: Array<string | number | "">) {
+  const next = [...values];
+  while (next.length > 0 && next[next.length - 1] === "") {
+    next.pop();
+  }
+  return next;
+}
+
+function normalizeTablePreviewSeries(
+  field: TableFieldDefinition,
+  raw: unknown,
+): Array<string | number | ""> {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  return trimTrailingEmptyEntries(raw.map((value) => normalizeCustomFieldPreviewValue(field, value)));
+}
+
+function mergeTablePreviewSeries(
+  seriesList: Array<Array<string | number | "">>,
+  mode: FieldAggregation,
+  fieldType: "text" | "number",
+): Array<string | number | ""> {
+  if (seriesList.length === 0) {
+    return [];
+  }
+  if (seriesList.length === 1 || mode === "first") {
+    return trimTrailingEmptyEntries(seriesList[0] || []);
+  }
+
+  const maxLength = seriesList.reduce((max, series) => Math.max(max, series.length), 0);
+  const merged: Array<string | number | ""> = [];
+  for (let index = 0; index < maxLength; index += 1) {
+    const values = seriesList.map((series) => series[index] ?? "");
+    if (mode === "sum" && fieldType === "number") {
+      const total = values.reduce<number>((sum, value) => {
+        if (typeof value === "number" && Number.isFinite(value)) {
+          return sum + value;
+        }
+        const parsed = normalizeNumber(value);
+        return parsed !== null ? sum + parsed : sum;
+      }, 0);
+      merged.push(total);
+      continue;
+    }
+
+    const textValues = values
+      .map((value) => (typeof value === "number" ? String(value) : normalizeText(value)))
+      .filter(Boolean);
+    if (textValues.length === 0) {
+      merged.push("");
+      continue;
+    }
+    merged.push(mode === "join_newline" ? textValues.join("\n") : textValues.join(","));
+  }
+
+  return trimTrailingEmptyEntries(merged);
+}
+
 export async function POST(request: Request) {
   try {
     const { user, skipAuth } = await getAuthUserOrSkip();
@@ -244,13 +390,13 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "请先登录。" }, { status: 401 });
     }
     if (!OPENAI_API_KEY) {
-      return NextResponse.json({ error: "未配置 OPENAI_API_KEY。" }, { status: 503 });
+      return NextResponse.json({ error: "??? OPENAI_API_KEY?" }, { status: 503 });
     }
 
     const body = (await request.json()) as PreviewRequestBody;
     const imageDataUrl = typeof body.imageDataUrl === "string" ? body.imageDataUrl.trim() : "";
     if (!imageDataUrl.startsWith("data:") || imageDataUrl.length > 14 * 1024 * 1024) {
-      return NextResponse.json({ error: "图片无效或过大。" }, { status: 400 });
+      return NextResponse.json({ error: "缺少图片数据。" }, { status: 400 });
     }
 
     const requestedFields = Array.isArray(body.tableFields)
@@ -269,13 +415,15 @@ export async function POST(request: Request) {
 
     const boxes = normalizeBoxes(body.boxes, allowedFieldIds);
     if (boxes.length === 0) {
-      return NextResponse.json({ error: "请至少提供一个有效字段框。" }, { status: 400 });
+      return NextResponse.json({ error: "请至少提供一个有效标注框。" }, { status: 400 });
     }
 
     const fieldAggregations = normalizeAggregations(body.fieldAggregations, allowedFieldIds);
+    const annotationMode = normalizeAnnotationMode(body.annotationMode);
+    const fieldMap = new Map(activeTableFields.map((field) => [field.id, field] as const));
     const imageBuffer = parseDataUrlToBuffer(imageDataUrl);
     if (!imageBuffer || imageBuffer.length === 0) {
-      return NextResponse.json({ error: "无法解析图片数据。" }, { status: 400 });
+      return NextResponse.json({ error: "无法解析图片内容。" }, { status: 400 });
     }
 
     let cropUrls: string[];
@@ -283,21 +431,20 @@ export async function POST(request: Request) {
       cropUrls = await cropsToPngDataUrls(imageBuffer, boxes);
     } catch (error) {
       return NextResponse.json(
-        { error: error instanceof Error ? error.message : "裁剪标注区域失败。" },
+        { error: error instanceof Error ? error.message : "裁剪图片失败。" },
         { status: 400 },
       );
     }
 
-    const userText = buildCropInstructionText(
-      boxes,
-      fieldAggregations,
-      activeTableFields,
-      fieldLabels,
-      fieldTypeMap,
-    );
+    const userText =
+      annotationMode === "table"
+        ? buildTableCropInstructionText(boxes, fieldAggregations, activeTableFields, fieldLabels, fieldTypeMap)
+        : buildCropInstructionText(boxes, fieldAggregations, activeTableFields, fieldLabels, fieldTypeMap);
 
-    const systemText = `你是 OrSight 训练标注预览助手。用户会发来多张已经裁剪好的小图，每张图只包含一个标注框内的像素。
-你必须只根据这些小图做 OCR，并按字段说明合并结果。禁止引用小图之外的信息。只返回合法 JSON。`;
+    const systemText =
+      annotationMode === "table"
+        ? "你是 OrSight 的训练标注辅助模型。当前任务是完整表格模式，请只根据每张裁剪小图读出该列从上到下的所有行值，并严格返回 JSON。不要臆造缺失行，不要把列标题、按钮、分页、操作链接当成数据。"
+        : "你是 OrSight 的训练标注辅助模型。当前任务是单条记录模式，请只根据每张裁剪小图读出对应字段的值，并严格返回 JSON。不要臆造框外文字，不要把邻近字段误填进当前字段。";
 
     const userContent: Array<
       | { type: "text"; text: string }
@@ -326,7 +473,7 @@ export async function POST(request: Request) {
 
     if (!response.ok) {
       const text = await response.text();
-      return NextResponse.json({ error: `模型错误 ${response.status}: ${text.slice(0, 400)}` }, { status: 502 });
+      return NextResponse.json({ error: `模型预览调用失败 ${response.status}: ${text.slice(0, 400)}` }, { status: 502 });
     }
 
     const payload = (await response.json()) as {
@@ -334,7 +481,49 @@ export async function POST(request: Request) {
     };
     const content = payload.choices?.[0]?.message?.content;
     if (!content) {
-      return NextResponse.json({ error: "模型未返回内容。" }, { status: 502 });
+      return NextResponse.json({ error: "模型未返回可用内容" }, { status: 502 });
+    }
+
+    if (annotationMode === "table") {
+      let parsedImageValues: Record<string, unknown>;
+      let previewNote = "";
+      try {
+        const parsed = parseTablePreviewJson(content);
+        parsedImageValues = parsed.imageValues;
+        previewNote = parsed.previewNote;
+      } catch {
+        return NextResponse.json({ error: "完整表格试填返回的 JSON 无法解析" }, { status: 502 });
+      }
+
+      const byField = new Map<TrainingField, Array<Array<string | number | "">>>();
+      boxes.forEach((box, index) => {
+        const field = fieldMap.get(box.field);
+        if (!field) {
+          return;
+        }
+        const series = normalizeTablePreviewSeries(field, parsedImageValues[String(index + 1)]);
+        const current = byField.get(box.field) || [];
+        current.push(series);
+        byField.set(box.field, current);
+      });
+
+      const tableFieldValues: PreviewTableFieldValues = {};
+      for (const field of activeTableFields) {
+        const seriesList = byField.get(field.id) || [];
+        if (seriesList.length === 0) {
+          continue;
+        }
+        const mode = fieldAggregations[field.id] ?? inferAggregation(field.id, seriesList.length, fieldTypeMap);
+        const merged = mergeTablePreviewSeries(seriesList, mode, field.type);
+        if (merged.length > 0) {
+          tableFieldValues[field.id] = merged;
+        }
+      }
+
+      return NextResponse.json({
+        tableFieldValues,
+        previewNote: previewNote || undefined,
+      });
     }
 
     let parsedRecord: Record<string, unknown>;
@@ -344,7 +533,7 @@ export async function POST(request: Request) {
       parsedRecord = parsed.record;
       previewNote = parsed.previewNote;
     } catch {
-      return NextResponse.json({ error: "模型返回的 JSON 无法解析。" }, { status: 502 });
+        return NextResponse.json({ error: "单条记录试填返回的 JSON 无法解析" }, { status: 502 });
     }
 
     const boxedFields = new Set(boxes.map((box) => box.field));
@@ -386,7 +575,7 @@ export async function POST(request: Request) {
     });
   } catch (error) {
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : "预览失败。" },
+      { error: error instanceof Error ? error.message : "试填失败" },
       { status: 500 },
     );
   }

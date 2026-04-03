@@ -9,6 +9,12 @@ import type { TableFieldDefinition } from "./table-fields";
 export type { AgentAsset, AgentThreadTurn } from "./agent-context-types";
 
 export type TrainingField = string;
+export type TrainingScalarValue = string | number | "";
+export type TrainingAnnotationMode = "record" | "table";
+export type TrainingTableFieldValues = Record<string, TrainingScalarValue[]>;
+export type TrainingTableOutput = {
+  fieldValues?: TrainingTableFieldValues;
+};
 
 /** 同一字段多框时，如何合并写入表格 */
 export type FieldAggregation = "sum" | "join_comma" | "join_newline" | "first";
@@ -32,6 +38,7 @@ export type TrainingBox = {
 export type TrainingExample = {
   imageName: string;
   notes?: string;
+  annotationMode?: TrainingAnnotationMode;
   output: {
     date: string;
     route: string;
@@ -48,6 +55,7 @@ export type TrainingExample = {
   boxes?: TrainingBox[];
   /** 按字段指定多框合并方式；未指定的字段按默认策略推断 */
   fieldAggregations?: Partial<Record<TrainingField, FieldAggregation>>;
+  tableOutput?: TrainingTableOutput;
 };
 
 export type GuidanceTurn = {
@@ -422,6 +430,90 @@ function describeAggregation(mode: FieldAggregation): string {
   }
 }
 
+function normalizeTableSeriesValue(value: unknown): TrainingScalarValue {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "string") {
+    return value.trim();
+  }
+  return "";
+}
+
+function trimTrailingEmptySeries(values: TrainingScalarValue[]): TrainingScalarValue[] {
+  const next = [...values];
+  while (next.length > 0 && next[next.length - 1] === "") {
+    next.pop();
+  }
+  return next;
+}
+
+function getTrainingTableFieldValues(
+  example: TrainingExample,
+  activeFieldIds?: ReadonlySet<string>,
+): TrainingTableFieldValues {
+  const raw = example.tableOutput?.fieldValues;
+  if (!raw || typeof raw !== "object") {
+    return {};
+  }
+
+  const out: TrainingTableFieldValues = {};
+  for (const [fieldId, series] of Object.entries(raw)) {
+    if (activeFieldIds && !activeFieldIds.has(fieldId)) {
+      continue;
+    }
+    if (!Array.isArray(series)) {
+      continue;
+    }
+    const normalized = trimTrailingEmptySeries(series.map((value) => normalizeTableSeriesValue(value)));
+    if (normalized.length > 0) {
+      out[fieldId] = normalized;
+    }
+  }
+  return out;
+}
+
+function buildTableModeExampleSummary(
+  example: TrainingExample,
+  fieldLabels?: Record<string, string>,
+  activeFieldIds?: ReadonlySet<string>,
+): string {
+  const fieldValues = getTrainingTableFieldValues(example, activeFieldIds);
+  const fieldOrder = Object.keys(fieldValues);
+  if (fieldOrder.length === 0) {
+    return "";
+  }
+
+  const rowCount = fieldOrder.reduce((max, fieldId) => Math.max(max, fieldValues[fieldId]?.length ?? 0), 0);
+  if (rowCount <= 0) {
+    return "";
+  }
+
+  const previewRows = Math.min(rowCount, 12);
+  const rowSummaries: string[] = [];
+  for (let index = 0; index < previewRows; index += 1) {
+    const cells = fieldOrder
+      .map((fieldId) => {
+        const value = fieldValues[fieldId]?.[index];
+        if (value === "" || value === undefined || value === null) {
+          return "";
+        }
+        return `${fieldLabels?.[fieldId] || TRAINING_FIELD_LABELS[fieldId] || fieldId}=${String(value)}`;
+      })
+      .filter(Boolean);
+    if (cells.length > 0) {
+      rowSummaries.push(`第${index + 1}行：${cells.join("；")}`);
+    }
+  }
+
+  if (rowSummaries.length === 0) {
+    return "";
+  }
+
+  const suffix = rowCount > previewRows ? `；其余 ${rowCount - previewRows} 行同样按自上而下顺序。` : "";
+  return `这是一个完整表格样本，共 ${rowCount} 行。按自上而下顺序，列框中的正确值示例如下：${rowSummaries.join(" | ")}${suffix}`;
+}
+
 // Legacy text-rule generator kept only for rollback; extraction now uses annotated reference images instead.
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 function formatBoxHintsForExample(example: TrainingExample): string {
@@ -603,46 +695,71 @@ export async function buildVisualReferencePack(
       ? 0
       : Math.max(0, Number.parseInt(maxImagesRaw || "4", 10) || 4);
   const effectiveMaxImages = options?.maxImages ?? maxImages;
-  const annotatedExamples = examples.filter((e) => e.boxes && e.boxes.length > 0);
-  const sorted = sortTrainingExamplesForGuidance(
-    annotatedExamples.length > 0 ? annotatedExamples : examples,
-  );
+  const annotatedExamples = examples.filter((example) => example.boxes && example.boxes.length > 0);
+  const sorted = sortTrainingExamplesForGuidance(annotatedExamples.length > 0 ? annotatedExamples : examples);
   const activeFieldIds = options?.activeFieldIds?.length ? new Set(options.activeFieldIds) : undefined;
 
   const referenceImages: Array<{ imageName: string; caption: string; dataUrl: string }> = [];
   if (effectiveMaxImages > 0) {
-    for (const ex of sorted) {
-      if (referenceImages.length >= effectiveMaxImages) break;
-      const originalDataUrl = await getTrainingImageDataUrl(ex.imageName);
-      if (!originalDataUrl) continue;
-      const dataUrl = await buildAnnotatedTrainingImageDataUrl(ex, originalDataUrl, options?.fieldLabels, activeFieldIds);
-      const summary = [
-        !activeFieldIds || activeFieldIds.has("date") ? `date=${ex.output.date}` : "",
-        !activeFieldIds || activeFieldIds.has("route") ? `route=${ex.output.route}` : "",
-        !activeFieldIds || activeFieldIds.has("driver") ? `driver=${ex.output.driver}` : "",
-        (!activeFieldIds || activeFieldIds.has("taskCode")) && ex.output.taskCode ? `taskCode=${ex.output.taskCode}` : "",
-        !activeFieldIds || activeFieldIds.has("total") ? `total=${ex.output.total}` : "",
-        (!activeFieldIds || activeFieldIds.has("total")) && ex.output.totalSourceLabel ? `totalSourceLabel=${ex.output.totalSourceLabel}` : "",
-        !activeFieldIds || activeFieldIds.has("unscanned") ? `unscanned=${ex.output.unscanned}` : "",
-        !activeFieldIds || activeFieldIds.has("exceptions") ? `exceptions=${ex.output.exceptions}` : "",
-        (!activeFieldIds || activeFieldIds.has("waybillStatus")) && ex.output.waybillStatus ? `waybillStatus=${ex.output.waybillStatus}` : "",
-        (!activeFieldIds || activeFieldIds.has("stationTeam")) && ex.output.stationTeam ? `stationTeam=${ex.output.stationTeam}` : "",
-        ...(ex.output.customFieldValues
-          ? Object.entries(ex.output.customFieldValues)
-              .filter(([key, value]) => (!activeFieldIds || activeFieldIds.has(key)) && value !== "" && value !== undefined && value !== null)
+    for (const example of sorted) {
+      if (referenceImages.length >= effectiveMaxImages) {
+        break;
+      }
+
+      const originalDataUrl = await getTrainingImageDataUrl(example.imageName);
+      if (!originalDataUrl) {
+        continue;
+      }
+
+      const dataUrl = await buildAnnotatedTrainingImageDataUrl(
+        example,
+        originalDataUrl,
+        options?.fieldLabels,
+        activeFieldIds,
+      );
+
+      const recordSummary = [
+        !activeFieldIds || activeFieldIds.has("date") ? `date=${example.output.date}` : "",
+        !activeFieldIds || activeFieldIds.has("route") ? `route=${example.output.route}` : "",
+        !activeFieldIds || activeFieldIds.has("driver") ? `driver=${example.output.driver}` : "",
+        (!activeFieldIds || activeFieldIds.has("taskCode")) && example.output.taskCode ? `taskCode=${example.output.taskCode}` : "",
+        !activeFieldIds || activeFieldIds.has("total") ? `total=${example.output.total}` : "",
+        (!activeFieldIds || activeFieldIds.has("total")) && example.output.totalSourceLabel
+          ? `totalSourceLabel=${example.output.totalSourceLabel}`
+          : "",
+        !activeFieldIds || activeFieldIds.has("unscanned") ? `unscanned=${example.output.unscanned}` : "",
+        !activeFieldIds || activeFieldIds.has("exceptions") ? `exceptions=${example.output.exceptions}` : "",
+        (!activeFieldIds || activeFieldIds.has("waybillStatus")) && example.output.waybillStatus
+          ? `waybillStatus=${example.output.waybillStatus}`
+          : "",
+        (!activeFieldIds || activeFieldIds.has("stationTeam")) && example.output.stationTeam
+          ? `stationTeam=${example.output.stationTeam}`
+          : "",
+        ...(example.output.customFieldValues
+          ? Object.entries(example.output.customFieldValues)
+              .filter(
+                ([key, value]) =>
+                  (!activeFieldIds || activeFieldIds.has(key)) && value !== "" && value !== undefined && value !== null,
+              )
               .map(([key, value]) => `${options?.fieldLabels?.[key] || key}=${value}`)
           : []),
       ]
         .filter(Boolean)
-        .join("；");
-      const caption = `【人工标注参考图：${ex.imageName}】这是一张已人工确认的样本图，方框只用于帮助你先看懂同类界面的字段位置与含义。该样本的正确结果是：${summary}。禁止把这张样本图的数字直接抄到最终结果；最终输出只能来自最后一张「当前待识别图片」的可见像素。`;
-      referenceImages.push({ imageName: ex.imageName, caption, dataUrl });
+        .join(" | ");
+
+      const summary =
+        example.annotationMode === "table"
+          ? buildTableModeExampleSummary(example, options?.fieldLabels, activeFieldIds) || recordSummary
+          : recordSummary;
+
+      const caption = `训练参考图：${example.imageName}。这是一张人工确认并且已经画框标注过的样本图。请重点参考它的版式、字段位置、标注框覆盖范围，以及对应的正确结果：${summary}。若当前待识别图片与它布局相似，请优先沿用相同的阅读方式。`;
+      referenceImages.push({ imageName: example.imageName, caption, dataUrl });
     }
   }
 
   const hintText =
     referenceImages.length > 0
-      ? "\n\n【人工标注参考图】先看下面这些已标注样本图，理解同类界面的字段含义与布局；不要把样本值抄入当前结果。\n"
+      ? "\n\n上面附带了训练池里的人工标注参考图。模型应先看这些带框样本，理解字段对应的版式与正确答案，再去识别当前图片。\n"
       : "";
 
   return { hintText, referenceImages };

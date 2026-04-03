@@ -1,14 +1,16 @@
 import { NextResponse } from "next/server";
 
 import { getAuthUserOrSkip } from "@/lib/auth-server";
-import { getActiveTableFields } from "@/lib/table-fields";
+import { getActiveTableFields, type TableFieldDefinition } from "@/lib/table-fields";
 import { loadTableFields } from "@/lib/table-fields-store";
 import {
   saveTrainingImageDataUrl,
   type FieldAggregation,
+  type TrainingAnnotationMode,
   type TrainingBox,
   type TrainingField,
   type TrainingExample,
+  type TrainingScalarValue,
   upsertTrainingExample,
   loadTrainingExamples,
 } from "@/lib/training";
@@ -17,6 +19,7 @@ type SaveTrainingPayload = {
   imageName?: unknown;
   imageDataUrl?: unknown;
   notes?: unknown;
+  annotationMode?: unknown;
   output?: {
     date?: unknown;
     route?: unknown;
@@ -32,6 +35,7 @@ type SaveTrainingPayload = {
   };
   boxes?: unknown;
   fieldAggregations?: unknown;
+  tableOutput?: unknown;
 };
 
 function normalizeText(value: unknown) {
@@ -138,6 +142,85 @@ function normalizeCustomFieldValues(
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
+function normalizeAnnotationMode(value: unknown): TrainingAnnotationMode {
+  return value === "table" ? "table" : "record";
+}
+
+function trimTrailingEmptyEntries(values: TrainingScalarValue[]) {
+  const next = [...values];
+  while (next.length > 0 && next[next.length - 1] === "") {
+    next.pop();
+  }
+  return next;
+}
+
+function normalizeTableFieldValues(
+  raw: unknown,
+  fieldMap: ReadonlyMap<string, TableFieldDefinition>,
+): Record<string, TrainingScalarValue[]> | undefined {
+  const source =
+    raw && typeof raw === "object" && "fieldValues" in (raw as Record<string, unknown>)
+      ? (raw as { fieldValues?: unknown }).fieldValues
+      : raw;
+  if (!source || typeof source !== "object") {
+    return undefined;
+  }
+
+  const out: Record<string, TrainingScalarValue[]> = {};
+  for (const [fieldId, value] of Object.entries(source as Record<string, unknown>)) {
+    const field = fieldMap.get(fieldId);
+    if (!field) {
+      continue;
+    }
+
+    const rawSeries =
+      Array.isArray(value)
+        ? value
+        : typeof value === "string"
+          ? value.replace(/\r/g, "").split("\n")
+          : [];
+    if (rawSeries.length === 0) {
+      continue;
+    }
+
+    const normalized = trimTrailingEmptyEntries(
+      rawSeries.map((item) => {
+        if (typeof item === "number" && Number.isFinite(item)) {
+          return item;
+        }
+        const text = normalizeText(item);
+        if (!text) {
+          return "";
+        }
+        if (field.type === "number") {
+          const asNumber = normalizeNumber(text);
+          return asNumber ?? text;
+        }
+        return text;
+      }),
+    );
+    if (normalized.length > 0) {
+      out[fieldId] = normalized;
+    }
+  }
+
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function getFirstTableValue(
+  fieldValues: Record<string, TrainingScalarValue[]> | undefined,
+  fieldId: string,
+): TrainingScalarValue {
+  return fieldValues?.[fieldId]?.[0] ?? "";
+}
+
+function hasTableFieldValues(fieldValues: Record<string, TrainingScalarValue[]> | undefined) {
+  return Boolean(
+    fieldValues &&
+      Object.values(fieldValues).some((series) => series.some((value) => value !== "" && value !== undefined && value !== null)),
+  );
+}
+
 export async function POST(request: Request) {
   try {
     const { user, skipAuth } = await getAuthUserOrSkip();
@@ -156,27 +239,53 @@ export async function POST(request: Request) {
     const tableFields = getActiveTableFields(await loadTableFields());
     const activeFieldIds = new Set(tableFields.map((field) => field.id));
     const activeCustomFieldIds = new Set(tableFields.filter((field) => !field.builtIn).map((field) => field.id));
+    const fieldMap = new Map(tableFields.map((field) => [field.id, field] as const));
     const hasField = (fieldId: string) => activeFieldIds.has(fieldId);
-
+    const annotationMode = normalizeAnnotationMode(payload.annotationMode);
+    const tableFieldValues = normalizeTableFieldValues(payload.tableOutput, fieldMap);
+    const firstValue = (fieldId: string) => getFirstTableValue(tableFieldValues, fieldId);
     const output = payload.output;
+    const explicitCustomFieldValues = normalizeCustomFieldValues(output?.customFieldValues, activeCustomFieldIds);
+    const mergedCustomFieldValues: Record<string, string | number | ""> = {
+      ...(explicitCustomFieldValues || {}),
+    };
+    for (const field of tableFields.filter((field) => !field.builtIn)) {
+      if (mergedCustomFieldValues[field.id] !== undefined) {
+        continue;
+      }
+      const value = firstValue(field.id);
+      if (value !== "") {
+        mergedCustomFieldValues[field.id] = value;
+      }
+    }
+
     const example: TrainingExample = {
       imageName,
       notes: normalizeText(payload.notes),
+      annotationMode,
       output: {
-        date: hasField("date") ? normalizeText(output?.date) : "",
-        route: hasField("route") ? normalizeText(output?.route) : "",
-        driver: hasField("driver") ? normalizeText(output?.driver) : "",
-        taskCode: hasField("taskCode") ? normalizeText(output?.taskCode) || undefined : undefined,
-        total: hasField("total") ? normalizeNumber(output?.total) || 0 : 0,
+        date: hasField("date") ? normalizeText(output?.date) || normalizeText(firstValue("date")) : "",
+        route: hasField("route") ? normalizeText(output?.route) || normalizeText(firstValue("route")) : "",
+        driver: hasField("driver") ? normalizeText(output?.driver) || normalizeText(firstValue("driver")) : "",
+        taskCode:
+          hasField("taskCode") ? normalizeText(output?.taskCode) || normalizeText(firstValue("taskCode")) || undefined : undefined,
+        total: hasField("total") ? normalizeNumber(output?.total) ?? normalizeNumber(firstValue("total")) ?? 0 : 0,
         totalSourceLabel: hasField("total") ? normalizeText(output?.totalSourceLabel) || undefined : undefined,
-        unscanned: hasField("unscanned") ? normalizeNumber(output?.unscanned) || 0 : 0,
-        exceptions: hasField("exceptions") ? normalizeNumber(output?.exceptions) || 0 : 0,
-        waybillStatus: hasField("waybillStatus") ? normalizeText(output?.waybillStatus) || undefined : undefined,
-        stationTeam: hasField("stationTeam") ? normalizeText(output?.stationTeam) || undefined : undefined,
-        customFieldValues: normalizeCustomFieldValues(output?.customFieldValues, activeCustomFieldIds),
+        unscanned: hasField("unscanned") ? normalizeNumber(output?.unscanned) ?? normalizeNumber(firstValue("unscanned")) ?? 0 : 0,
+        exceptions: hasField("exceptions") ? normalizeNumber(output?.exceptions) ?? normalizeNumber(firstValue("exceptions")) ?? 0 : 0,
+        waybillStatus:
+          hasField("waybillStatus")
+            ? normalizeText(output?.waybillStatus) || normalizeText(firstValue("waybillStatus")) || undefined
+            : undefined,
+        stationTeam:
+          hasField("stationTeam")
+            ? normalizeText(output?.stationTeam) || normalizeText(firstValue("stationTeam")) || undefined
+            : undefined,
+        customFieldValues: Object.keys(mergedCustomFieldValues).length > 0 ? mergedCustomFieldValues : undefined,
       },
       boxes: normalizeBoxes(payload.boxes, activeFieldIds),
       fieldAggregations: normalizeFieldAggregations(payload.fieldAggregations, activeFieldIds),
+      tableOutput: annotationMode === "table" && tableFieldValues ? { fieldValues: tableFieldValues } : undefined,
     };
 
     if (imageDataUrl) {
@@ -186,10 +295,12 @@ export async function POST(request: Request) {
     // Only upsert the example to the database if it actually has some data (i.e. it's not just a raw image upload)
     let nextExamples = await loadTrainingExamples();
     if (
+      example.boxes?.length ||
       example.output.date ||
       example.output.route ||
       example.output.driver ||
       example.output.taskCode ||
+      hasTableFieldValues(tableFieldValues) ||
       (example.output.customFieldValues && Object.keys(example.output.customFieldValues).length > 0) ||
       example.notes
     ) {

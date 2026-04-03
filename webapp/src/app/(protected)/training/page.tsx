@@ -7,8 +7,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   TrainingAnnotationWorkbench,
   type AnnotationField,
+  type AnnotationMode,
   type AnnotationWorkbenchSeed,
   type FieldAggregation,
+  type TableAnnotationFieldValues,
   type WorkbenchAnnotationBox,
 } from "@/components/TrainingAnnotationWorkbench";
 import type { AgentAsset, AgentThreadTurn } from "@/lib/agent-context-types";
@@ -46,6 +48,7 @@ type TrainingStatusItem = {
   example: {
     imageName: string;
     notes?: string;
+    annotationMode?: AnnotationMode;
     output: {
       date: string;
       route: string;
@@ -61,6 +64,9 @@ type TrainingStatusItem = {
     };
     boxes?: WorkbenchAnnotationBox[];
     fieldAggregations?: Partial<Record<AnnotationField, FieldAggregation>>;
+    tableOutput?: {
+      fieldValues?: TableAnnotationFieldValues;
+    };
   } | null;
 };
 
@@ -88,6 +94,8 @@ export default function TrainingMode() {
   const [annotationImageSrc, setAnnotationImageSrc] = useState("");
   const [annotationDraft, setAnnotationDraft] = useState<{
     seed: AnnotationWorkbenchSeed;
+    annotationMode: AnnotationMode;
+    tableFieldValues?: TableAnnotationFieldValues;
     boxes: WorkbenchAnnotationBox[];
     fieldAggregations: Partial<Record<AnnotationField, FieldAggregation>>;
     notes: string;
@@ -607,6 +615,9 @@ export default function TrainingMode() {
         totalSourceLabel: existingExample?.output.totalSourceLabel || "",
         customFieldValues: { ...(existingExample?.output.customFieldValues || {}) },
       },
+      annotationMode:
+        existingExample?.annotationMode === "table" || existingExample?.tableOutput?.fieldValues ? "table" : "record",
+      tableFieldValues: existingExample?.tableOutput?.fieldValues || undefined,
       boxes: rawBoxes.map((b) => ({
         ...b,
         id: typeof b.id === "string" && b.id ? b.id : crypto.randomUUID(),
@@ -1060,6 +1071,8 @@ export default function TrainingMode() {
             imageSrc={annotationImageSrc}
             fieldDefinitions={activeTableFields}
             initialSeed={annotationDraft.seed}
+            initialAnnotationMode={annotationDraft.annotationMode}
+            initialTableFieldValues={annotationDraft.tableFieldValues}
             initialBoxes={annotationDraft.boxes}
             initialFieldAggregations={annotationDraft.fieldAggregations}
             initialNotes={annotationDraft.notes}
