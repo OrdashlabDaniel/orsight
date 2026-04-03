@@ -83,11 +83,14 @@ type ExtractVisionContext = {
 async function buildExtractVisionContext(): Promise<ExtractVisionContext> {
   const [examples, rawTableFields] = await Promise.all([loadTrainingExamples(), loadTableFields()]);
   const tableFields = getActiveTableFields(rawTableFields);
-  const visualPack = await buildVisualReferencePack(examples, {
-    fieldLabels: getFieldLabelMap(tableFields),
-    activeFieldIds: tableFields.map((field) => field.id),
-  });
-  return { examples, visualPack, imageGuidance: [], tableFields };
+  const [visualPack, imageGuidance] = await Promise.all([
+    buildVisualReferencePack(examples, {
+      fieldLabels: getFieldLabelMap(tableFields),
+      activeFieldIds: tableFields.map((field) => field.id),
+    }),
+    buildTrainingImageGuidance(examples),
+  ]);
+  return { examples, visualPack, imageGuidance, tableFields };
 }
 
 function mergeParallelRefineReasons(base: PodRecord, ...refined: PodRecord[]): string | null {
@@ -434,7 +437,6 @@ async function imageFingerprintFromBuffer(bytes: Buffer): Promise<number[]> {
   return Array.from(raw, (value) => value / 255);
 }
 
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
 async function buildTrainingImageGuidance(examples: TrainingExample[]): Promise<FingerprintedTrainingExample[]> {
   const candidates = examples.filter(hasImageCoordBoxes);
   const loaded = await Promise.all(
@@ -1404,7 +1406,7 @@ async function callVisionModel(
 
   const bytes = Buffer.from(await file.arrayBuffer());
   const dataUrl = `data:${file.type || "image/jpeg"};base64,${bytes.toString("base64")}`;
-  const visualPack = ctx.visualPack;
+  const visualPack = await buildVisualPackForCurrentImage(file, ctx);
   const baseText = `${SIMPLE_EXTRACTION_PROMPT}${SIMPLE_EXTRACTION_STRICT_APPENDIX}${buildRecognitionModeDynamicFieldPrompt(ctx.tableFields)}${visualPack.hintText}`;
 
   const userContent: OpenAIMessageContent[] = [{ type: "text", text: baseText }];
@@ -1469,6 +1471,324 @@ async function callVisionModel(
   return {
     records: parsed.records || [],
     imageType: parsed.imageType || "OTHER",
+    usage: payload.usage,
+  };
+}
+
+async function buildVisualPackForCurrentImage(file: File, ctx: ExtractVisionContext) {
+  const similarExamples = await selectMostSimilarTrainingExamples(
+    file,
+    ctx,
+    Math.max(1, Number.parseInt(process.env.TRAINING_VISUAL_REF_IMAGES || "4", 10) || 4),
+  );
+
+  if (!similarExamples.length) {
+    return ctx.visualPack;
+  }
+
+  return buildVisualReferencePack(similarExamples, {
+    fieldLabels: getFieldLabelMap(ctx.tableFields),
+    activeFieldIds: ctx.tableFields.map((field) => field.id),
+  });
+}
+
+type RecoveryFieldId = keyof Pick<
+  PodRecord,
+  "date" | "route" | "driver" | "taskCode" | "total" | "unscanned" | "exceptions" | "stationTeam"
+> | "totalSourceLabel";
+
+type RecoveryPlan = {
+  index: number;
+  missingBuiltIns: RecoveryFieldId[];
+  missingCustomFields: TableFieldDefinition[];
+};
+
+function collectRecoveryPlan(records: PodRecord[], tableFields: TableFieldDefinition[]): RecoveryPlan[] {
+  const customFields = tableFields.filter((field) => !isBuiltInFieldId(field.id));
+
+  return records.map((record, index) => {
+    const missingBuiltIns: RecoveryFieldId[] = [];
+
+    if (!record.date) missingBuiltIns.push("date");
+    if (!record.route || !isRouteFormatValid(record.route)) missingBuiltIns.push("route");
+    if (!record.driver) missingBuiltIns.push("driver");
+    if (!record.taskCode) missingBuiltIns.push("taskCode");
+    if (record.total === "") missingBuiltIns.push("total");
+    if (record.total !== "" && !record.totalSourceLabel) missingBuiltIns.push("totalSourceLabel");
+    if (record.unscanned === "") missingBuiltIns.push("unscanned");
+    if (record.exceptions === "") missingBuiltIns.push("exceptions");
+    if (!record.stationTeam) missingBuiltIns.push("stationTeam");
+
+    const missingCustomFields = customFields.filter((field) => {
+      const value = record.customFieldValues?.[field.id];
+      return value === "" || value === undefined || value === null;
+    });
+
+    return {
+      index,
+      missingBuiltIns,
+      missingCustomFields,
+    };
+  });
+}
+
+function buildRecoveryPrompt(records: PodRecord[], plans: RecoveryPlan[], tableFields: TableFieldDefinition[]) {
+  const fieldLabelMap = getFieldLabelMap(tableFields);
+  const lines = [
+    "你正在执行 OrSight 的第二次补全识别。",
+    "你会再次看到几张人工标注参考图，再看到最后一张当前待识别图片。",
+    "你的任务不是重做整张表，而是只补全下面每条记录当前缺失的字段。",
+    "",
+    "严格规则：",
+    "1. records 顺序固定，对应当前图片里从上到下的任务/记录顺序。",
+    "2. 可以使用每条记录已有的非空字段作为锚点去定位同一行，例如 driver、taskCode、total、stationTeam、route。",
+    "3. date 和 stationTeam 如果整张图共用同一个顶部信息，可以补到所有需要的记录。",
+    "4. route 必须是快递员路线，例如 IAH01-050-M；像 IAH-BCE、IAH-LEN 这样的站点车队代码只能写 stationTeam。",
+    "5. total 只有在当前图里看得到明确 total 标签语义（应领件数/应收件数/运单数量）时才填写，并尽量同时返回 totalSourceLabel。",
+    "6. unscanned 只能来自「未领取 / 未收」直接对应的数字；不能从已领、应领件数、实领件数、任务编码或时间中截取。",
+    "7. exceptions 只能来自「错扫 / 错分 / 误扫」直接对应的数字。",
+    "8. 看不清就返回 null；不要为了补齐而猜。",
+    "9. 不要改动未请求的字段。",
+    "",
+    "下面是首轮识别后的部分记录与待补字段：",
+  ];
+
+  for (const plan of plans) {
+    const record = records[plan.index];
+    const anchors = [
+      record.date ? `date=${record.date}` : "",
+      record.route ? `route=${record.route}` : "",
+      record.driver ? `driver=${record.driver}` : "",
+      record.taskCode ? `taskCode=${record.taskCode}` : "",
+      record.total !== "" ? `total=${record.total}` : "",
+      record.unscanned !== "" ? `unscanned=${record.unscanned}` : "",
+      record.exceptions !== "" ? `exceptions=${record.exceptions}` : "",
+      record.stationTeam ? `stationTeam=${record.stationTeam}` : "",
+      ...Object.entries(record.customFieldValues || {})
+        .filter(([, value]) => value !== "" && value !== undefined && value !== null)
+        .map(([key, value]) => `${fieldLabelMap[key] || key}=${value}`),
+    ].filter(Boolean);
+
+    const needLabels = [
+      ...plan.missingBuiltIns.map((fieldId) => fieldLabelMap[fieldId] || fieldId),
+      ...plan.missingCustomFields.map((field) => `${field.label}(${field.id})`),
+    ];
+
+    lines.push(
+      `${plan.index + 1}. anchors: ${anchors.length > 0 ? anchors.join("；") : "无明显锚点"}；need: ${needLabels.join("、") || "无"}`,
+    );
+  }
+
+  lines.push(
+    "",
+    "返回格式：",
+    "{",
+    '  "records": [',
+    "    {",
+    '      "date": "..." | null,',
+    '      "route": "..." | null,',
+    '      "driver": "..." | null,',
+    '      "taskCode": "..." | null,',
+    '      "total": 123 | null,',
+    '      "totalSourceLabel": "应领件数" | null,',
+    '      "unscanned": 1 | null,',
+    '      "exceptions": 0 | null,',
+    '      "stationTeam": "IAH-BCE" | null,',
+    '      "customFieldValues": { "字段id": "值" | 123 | null }',
+    "    }",
+    "  ]",
+    "}",
+    "records 数组长度必须与上面给出的记录数量完全一致，按相同顺序返回。只返回 JSON。",
+  );
+
+  return lines.join("\n");
+}
+
+function mergeRecoveredFieldValue(
+  base: string | number | "",
+  recovered: unknown,
+  type: TableFieldDefinition["type"],
+): string | number | "" {
+  if (base !== "" && base !== undefined && base !== null) {
+    return base;
+  }
+
+  if (type === "number") {
+    const value = normalizeNumber(recovered);
+    return typeof value === "number" ? value : "";
+  }
+
+  return normalizeText(recovered) || "";
+}
+
+function mergeRecoveredRecords(
+  records: PodRecord[],
+  parsed: RawModelRecord[],
+  tableFields: TableFieldDefinition[],
+): PodRecord[] {
+  const customFieldMap = new Map(tableFields.filter((field) => !isBuiltInFieldId(field.id)).map((field) => [field.id, field]));
+
+  return records.map((record, index) => {
+    const recovered = parsed[index];
+    if (!recovered) {
+      return record;
+    }
+
+    const next: PodRecord = { ...record };
+
+    if (!next.date) {
+      next.date = normalizeText(recovered.date) || "";
+    }
+
+    if (!next.route || !isRouteFormatValid(next.route)) {
+      const route = normalizeRouteValue(normalizeText(recovered.route));
+      next.route = route && isRouteFormatValid(route) ? route : next.route;
+    }
+
+    if (!next.driver) {
+      next.driver = normalizeText(recovered.driver) || "";
+    }
+
+    if (!next.taskCode) {
+      next.taskCode = normalizeText(recovered.taskCode) || "";
+    }
+
+    if (next.total === "") {
+      const total = normalizeNumber(recovered.total);
+      next.total = typeof total === "number" ? total : "";
+    }
+
+    if (!next.totalSourceLabel) {
+      next.totalSourceLabel = normalizeText(recovered.totalSourceLabel) || "";
+    }
+
+    if (next.unscanned === "") {
+      const unscanned = normalizeNumber(recovered.unscanned);
+      next.unscanned = typeof unscanned === "number" ? unscanned : "";
+    }
+
+    if (next.exceptions === "") {
+      const exceptions = normalizeNumber(recovered.exceptions);
+      next.exceptions = typeof exceptions === "number" ? exceptions : "";
+    }
+
+    if (!next.stationTeam) {
+      next.stationTeam = normalizeText(recovered.stationTeam) || "";
+    }
+
+    const customValues = normalizeCustomFieldValues(recovered.customFieldValues);
+    if (customValues) {
+      for (const [fieldId, rawValue] of Object.entries(customValues)) {
+        const field = customFieldMap.get(fieldId);
+        if (!field) {
+          continue;
+        }
+        const currentValue = next.customFieldValues?.[fieldId] ?? "";
+        const mergedValue = mergeRecoveredFieldValue(currentValue, rawValue, field.type);
+        next.customFieldValues = {
+          ...(next.customFieldValues || {}),
+          [fieldId]: mergedValue,
+        };
+      }
+    }
+
+    return next;
+  });
+}
+
+function propagateSharedImageFields(records: PodRecord[]) {
+  const sharedDate = normalizeText(firstNonEmptyValue(records, (record) => record.date)) || "";
+  const sharedStationTeamRaw = normalizeText(firstNonEmptyValue(records, (record) => record.stationTeam)) || "";
+  const sharedStationTeam = isStationTeamCodeNotCourierRoute(sharedStationTeamRaw) ? sharedStationTeamRaw : "";
+
+  return records.map((record) => ({
+    ...record,
+    date: record.date || sharedDate,
+    stationTeam: record.stationTeam || sharedStationTeam,
+  }));
+}
+
+async function recoverMissingFieldsFromVision(
+  file: File,
+  model: string,
+  ctx: ExtractVisionContext,
+  records: PodRecord[],
+): Promise<{ records: PodRecord[]; usage?: OpenAIUsage }> {
+  if (!OPENAI_API_KEY || records.length === 0) {
+    return { records };
+  }
+
+  const plans = collectRecoveryPlan(records, ctx.tableFields).filter(
+    (plan) => plan.missingBuiltIns.length > 0 || plan.missingCustomFields.length > 0,
+  );
+
+  if (plans.length === 0) {
+    return { records };
+  }
+
+  const bytes = Buffer.from(await file.arrayBuffer());
+  const dataUrl = `data:${file.type || "image/jpeg"};base64,${bytes.toString("base64")}`;
+  const visualPack = await buildVisualPackForCurrentImage(file, ctx);
+  const userContent: OpenAIMessageContent[] = [{ type: "text", text: buildRecoveryPrompt(records, plans, ctx.tableFields) }];
+
+  for (const ref of visualPack.referenceImages) {
+    userContent.push({ type: "text", text: ref.caption });
+    userContent.push({ type: "image_url", image_url: { url: ref.dataUrl } });
+  }
+
+  userContent.push({
+    type: "text",
+    text: "\n【当前待补全图片】请只根据下面这一张当前图片补全缺失字段；上面的参考图只用于理解界面，不得抄写其中的文字或数字。\n",
+  });
+  userContent.push({ type: "image_url", image_url: { url: dataUrl } });
+
+  const response = await fetch(`${OPENAI_BASE_URL}/chat/completions`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${OPENAI_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model,
+      reasoning_effort: OPENAI_REASONING_EFFORT,
+      response_format: { type: "json_object" },
+      messages: [
+        {
+          role: "user",
+          content: userContent,
+        },
+      ],
+    }),
+  });
+
+  if (!response.ok) {
+    return { records };
+  }
+
+  const payload = (await response.json()) as {
+    choices?: Array<{
+      message?: {
+        content?: string;
+      };
+    }>;
+    usage?: OpenAIUsage;
+  };
+
+  const content = payload.choices?.[0]?.message?.content;
+  if (!content) {
+    return { records };
+  }
+
+  let parsed: { records?: RawModelRecord[] };
+  try {
+    parsed = JSON.parse(content) as { records?: RawModelRecord[] };
+  } catch {
+    return { records };
+  }
+
+  const merged = mergeRecoveredRecords(records, parsed.records || [], ctx.tableFields);
+  return {
+    records: merged,
     usage: payload.usage,
   };
 }
@@ -2060,11 +2380,30 @@ export async function POST(request: Request) {
 
     for (const file of files) {
       const recognitionResult = await callVisionModel(file, model, visionCtx);
-      const checkedRecords = recognitionResult.records.map((rawRecord, index) => mapRecord(file.name, rawRecord, index));
+      let checkedRecords = recognitionResult.records.map((rawRecord, index) => mapRecord(file.name, rawRecord, index));
 
-      const totalPromptTokens = recognitionResult.usage?.prompt_tokens || 0;
-      const totalCompletionTokens = recognitionResult.usage?.completion_tokens || 0;
-      const totalTokens = recognitionResult.usage?.total_tokens || 0;
+      let totalPromptTokens = recognitionResult.usage?.prompt_tokens || 0;
+      let totalCompletionTokens = recognitionResult.usage?.completion_tokens || 0;
+      let totalTokens = recognitionResult.usage?.total_tokens || 0;
+
+      if (!checkedRecords.length) {
+        issues.push({
+          imageName: file.name,
+          message: "AI 没有返回任何记录，请人工复核。",
+          level: "error",
+          code: "empty_result",
+        });
+        continue;
+      }
+
+      const recoveryResult = await recoverMissingFieldsFromVision(file, model, visionCtx, checkedRecords);
+      checkedRecords = recoveryResult.records.map(repairRouteVersusStationTeamRecord);
+      checkedRecords = propagateSharedImageFields(checkedRecords);
+      checkedRecords = deriveWaybillStatus(checkedRecords);
+
+      totalPromptTokens += recoveryResult.usage?.prompt_tokens || 0;
+      totalCompletionTokens += recoveryResult.usage?.completion_tokens || 0;
+      totalTokens += recoveryResult.usage?.total_tokens || 0;
 
       if (user?.id) {
         const admin = getSupabaseAdmin();
@@ -2081,16 +2420,6 @@ export async function POST(request: Request) {
             if (error) console.error("Failed to log usage:", error);
           });
         }
-      }
-
-      if (!checkedRecords.length) {
-        issues.push({
-          imageName: file.name,
-          message: "AI 没有返回任何记录，请人工复核。",
-          level: "error",
-          code: "empty_result",
-        });
-        continue;
       }
 
       checkedRecords.forEach((record) => {
