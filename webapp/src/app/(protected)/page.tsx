@@ -82,6 +82,18 @@ type ViewerDragState = {
   originY: number;
 };
 
+type FieldManagerOffset = {
+  x: number;
+  y: number;
+};
+
+type FieldManagerDragState = {
+  startX: number;
+  startY: number;
+  originX: number;
+  originY: number;
+};
+
 export const editableColumns: Array<{
   key: keyof Pick<PodRecord, "date" | "route" | "driver" | "taskCode" | "total" | "unscanned" | "exceptions" | "waybillStatus">;
   label: string;
@@ -180,6 +192,8 @@ export default function Home() {
   const [newFieldName, setNewFieldName] = useState("");
   const [newFieldType, setNewFieldType] = useState<"text" | "number">("text");
   const [isSavingFieldConfig, setIsSavingFieldConfig] = useState(false);
+  const [fieldManagerOffset, setFieldManagerOffset] = useState<FieldManagerOffset>({ x: 0, y: 0 });
+  const [fieldManagerDragState, setFieldManagerDragState] = useState<FieldManagerDragState | null>(null);
   const [routeFilter, setRouteFilter] = useState("");
   const [isRouteDropdownOpen, setIsRouteDropdownOpen] = useState(false);
   const filterInputRef = useRef<HTMLInputElement | null>(null);
@@ -249,6 +263,32 @@ export default function Home() {
       document.removeEventListener("mousedown", handleClickOutside);
     };
   }, []);
+
+  useEffect(() => {
+    if (!fieldManagerDragState) {
+      return;
+    }
+    const dragState = fieldManagerDragState;
+
+    function handleMouseMove(event: MouseEvent) {
+      setFieldManagerOffset({
+        x: dragState.originX + (event.clientX - dragState.startX),
+        y: dragState.originY + (event.clientY - dragState.startY),
+      });
+    }
+
+    function handleMouseUp() {
+      setFieldManagerDragState(null);
+    }
+
+    window.addEventListener("mousemove", handleMouseMove);
+    window.addEventListener("mouseup", handleMouseUp);
+
+    return () => {
+      window.removeEventListener("mousemove", handleMouseMove);
+      window.removeEventListener("mouseup", handleMouseUp);
+    };
+  }, [fieldManagerDragState]);
 
   const handleFilesRef = useRef<((fileList: FileList | File[] | null) => Promise<void>) | null>(null);
 
@@ -624,7 +664,22 @@ export default function Home() {
     setFieldDrafts(tableFields.map((field) => ({ ...field })));
     setNewFieldName("");
     setNewFieldType("text");
+    setFieldManagerOffset({ x: 0, y: 0 });
+    setFieldManagerDragState(null);
     setIsFieldManagerOpen(true);
+  }
+
+  function beginFieldManagerDrag(event: React.MouseEvent<HTMLDivElement>) {
+    if ((event.target as HTMLElement).closest("button, input, select, textarea, label")) {
+      return;
+    }
+    event.preventDefault();
+    setFieldManagerDragState({
+      startX: event.clientX,
+      startY: event.clientY,
+      originX: fieldManagerOffset.x,
+      originY: fieldManagerOffset.y,
+    });
   }
 
   async function saveFieldConfig(nextFields: TableFieldDefinition[]) {
@@ -1220,9 +1275,10 @@ export default function Home() {
         </header>
 
         {isFieldManagerOpen ? (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4">
-            <div className="w-full max-w-3xl rounded-3xl border border-slate-200 bg-white shadow-2xl">
-              <div className="flex items-center justify-between border-b border-slate-200 px-6 py-4">
+          <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-900/40 p-4 sm:p-6">
+            <div className="flex min-h-full items-start justify-center">
+            <div className="my-2 flex max-h-[calc(100vh-2rem)] w-full max-w-4xl flex-col overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-2xl" style={{ transform: `translate(${fieldManagerOffset.x}px, ${fieldManagerOffset.y}px)` }}>
+              <div className="flex cursor-move select-none items-center justify-between border-b border-slate-200 px-6 py-4" onMouseDown={beginFieldManagerDrag}>
                 <div>
                   <h2 className="text-lg font-semibold">表格项目管理</h2>
                   <p className="mt-1 text-sm text-slate-500">你可以新增、重命名、删除或恢复表格项目。这里的改动会同步到训练页和标注项目；删除命中当前表格数据时会先提示。</p>
@@ -1236,7 +1292,7 @@ export default function Home() {
                 </button>
               </div>
 
-              <div className="grid gap-6 px-6 py-5 lg:grid-cols-[1.1fr_0.9fr]">
+              <div className="grid flex-1 gap-6 overflow-y-auto px-6 py-5 lg:grid-cols-[1.1fr_0.9fr]">
                 <div className="space-y-4">
                   <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
                     <div className="mb-3 text-sm font-medium text-slate-700">新增项目并进入标注</div>
@@ -1371,6 +1427,7 @@ export default function Home() {
                   </button>
                 </div>
               </div>
+            </div>
             </div>
           </div>
         ) : null}
