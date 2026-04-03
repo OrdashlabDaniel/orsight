@@ -147,6 +147,18 @@ function pickAnnotationField(
   return activeFields[0]?.id ?? "driver";
 }
 
+function cloneAnnotationBoxes(boxes: WorkbenchAnnotationBox[]): WorkbenchAnnotationBox[] {
+  return boxes.map((box) => ({ ...box }));
+}
+
+function isEditableTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) {
+    return false;
+  }
+  const tagName = target.tagName.toLowerCase();
+  return tagName === "input" || tagName === "textarea" || tagName === "select" || target.isContentEditable;
+}
+
 export type TrainingAnnotationWorkbenchProps = {
   open: boolean;
   imageName: string;
@@ -198,12 +210,15 @@ export function TrainingAnnotationWorkbench({
   const [drawingState, setDrawingState] = useState<DrawingState | null>(null);
   const [isSavingTraining, setIsSavingTraining] = useState(false);
   const [isPreviewFillLoading, setIsPreviewFillLoading] = useState(false);
+  const [annotationZoom, setAnnotationZoom] = useState(150);
+  const [undoStack, setUndoStack] = useState<WorkbenchAnnotationBox[][]>([]);
   const [layoutTick, setLayoutTick] = useState(0);
   const bumpLayout = useCallback(() => setLayoutTick((t) => t + 1), []);
   const visibleAnnotationBoxes = useMemo(
     () => annotationBoxes.filter((box) => activeFieldIdSet.has(box.field)),
     [activeFieldIdSet, annotationBoxes],
   );
+  const canUndoAnnotationBoxes = undoStack.length > 0;
 
   const annotationCanvasRef = useRef<HTMLDivElement | null>(null);
   const imageRef = useRef<HTMLImageElement | null>(null);
@@ -363,6 +378,8 @@ export function TrainingAnnotationWorkbench({
     setFieldAggregations(sanitizeFieldAggregations(initialFieldAggregations, activeFieldIdSet));
     setAnnotationNotes(initialNotes ?? "人工标注用于训练池。");
     setAnnotationField(pickAnnotationField(initialField, activeFieldDefinitions));
+    setUndoStack([]);
+    setAnnotationZoom(150);
     setDrawingState(null);
   }, [open, initialSeed, initialBoxes, initialFieldAggregations, initialNotes, initialField, activeFieldDefinitions, activeFieldIdSet]);
 
@@ -381,18 +398,65 @@ export function TrainingAnnotationWorkbench({
     onClose();
   }, [onClose]);
 
+  function applyAnnotationBoxesChange(updater: (current: WorkbenchAnnotationBox[]) => WorkbenchAnnotationBox[]) {
+    setAnnotationBoxes((current) => {
+      const next = updater(current);
+      const sameLength = next.length === current.length;
+      const sameValues =
+        sameLength &&
+        next.every((box, index) => {
+          const prev = current[index];
+          return (
+            prev &&
+            prev.id === box.id &&
+            prev.field === box.field &&
+            prev.value === box.value &&
+            prev.x === box.x &&
+            prev.y === box.y &&
+            prev.width === box.width &&
+            prev.height === box.height &&
+            prev.coordSpace === box.coordSpace
+          );
+        });
+      if (sameValues) {
+        return current;
+      }
+      setUndoStack((stack) => [...stack.slice(-29), cloneAnnotationBoxes(current)]);
+      return next;
+    });
+  }
+
+  const undoLastAnnotationBoxChange = useCallback(() => {
+    setUndoStack((stack) => {
+      const previous = stack[stack.length - 1];
+      if (!previous) {
+        return stack;
+      }
+      setAnnotationBoxes(cloneAnnotationBoxes(previous));
+      return stack.slice(0, -1);
+    });
+    setDrawingState(null);
+  }, []);
+
   useEffect(() => {
     if (!open) {
       return;
     }
     function onKeyDown(event: KeyboardEvent) {
+      if ((event.ctrlKey || event.metaKey) && !event.shiftKey && event.key.toLowerCase() === "z") {
+        if (!isEditableTarget(event.target)) {
+          event.preventDefault();
+          undoLastAnnotationBoxChange();
+        }
+        return;
+      }
       if (event.key === "Escape") {
         handleClose();
       }
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [open, handleClose]);
+  }, [open, handleClose, undoLastAnnotationBoxChange]);
 
   function getAnnotationFieldValue(field: AnnotationField) {
     const value = isBuiltInFieldId(field)
@@ -420,6 +484,9 @@ export function TrainingAnnotationWorkbench({
   }
 
   function beginDrawing(event: React.MouseEvent<HTMLDivElement>) {
+    if (event.button !== 0) {
+      return;
+    }
     const point = getPointerNorm(event.clientX, event.clientY);
     setDrawingState({
       startX: point.x,
@@ -520,15 +587,15 @@ export function TrainingAnnotationWorkbench({
       coordSpace: drawingState.space === "image" ? "image" : "container",
     };
 
-    setAnnotationBoxes((current) => [...current, nextBox]);
+    applyAnnotationBoxesChange((current) => [...current, nextBox]);
   }
 
   function removeAnnotationBoxById(boxId: string) {
-    setAnnotationBoxes((current) => current.filter((box) => box.id !== boxId));
+    applyAnnotationBoxesChange((current) => current.filter((box) => box.id !== boxId));
   }
 
   function clearAnnotationFieldBoxes(field: AnnotationField) {
-    setAnnotationBoxes((current) => current.filter((box) => box.field !== field));
+    applyAnnotationBoxesChange((current) => current.filter((box) => box.field !== field));
   }
 
   async function imageSourceToDataUrl(source: string) {
@@ -783,20 +850,60 @@ export function TrainingAnnotationWorkbench({
 
         <div className="grid min-h-0 flex-1 gap-4 overflow-y-auto pr-1 lg:grid-cols-[minmax(0,1fr)_min(100%,380px)]">
           <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
-            <div className="mb-3 text-sm font-medium text-slate-700">标注图片：{imageName}</div>
-            <div
-              ref={annotationCanvasRef}
-              className="relative min-h-[min(55vh,520px)] cursor-crosshair select-none overflow-hidden rounded-xl bg-black/5 [touch-action:none]"
-              data-layout-tick={layoutTick}
-              onMouseDown={beginDrawing}
-              onMouseMove={updateDrawing}
-              onMouseUp={() => finishDrawing()}
-              onMouseLeave={() => finishDrawing()}
-              onTouchStart={beginDrawingTouch}
-              onTouchMove={updateDrawingTouch}
-              onTouchEnd={finishDrawingTouch}
-              onTouchCancel={() => setDrawingState(null)}
-            >
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <div className="text-sm font-medium text-slate-700">标注图片：{imageName}</div>
+                <div className="mt-1 text-xs text-slate-500">保存后，模型参考时会直接看到带框的人工标注图。</div>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  className="rounded-lg border border-slate-300 px-2.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-white disabled:cursor-not-allowed disabled:opacity-50"
+                  onClick={undoLastAnnotationBoxChange}
+                  disabled={!canUndoAnnotationBoxes}
+                >
+                  撤回 Ctrl+Z
+                </button>
+                <button
+                  type="button"
+                  className="rounded-lg border border-slate-300 px-2.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-white disabled:cursor-not-allowed disabled:opacity-50"
+                  onClick={() => setAnnotationZoom((current) => Math.max(100, current - 25))}
+                  disabled={annotationZoom <= 100}
+                >
+                  缩小
+                </button>
+                <button
+                  type="button"
+                  className="rounded-lg border border-slate-300 px-2.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-white"
+                  onClick={() => setAnnotationZoom(150)}
+                >
+                  {annotationZoom}%
+                </button>
+                <button
+                  type="button"
+                  className="rounded-lg border border-slate-300 px-2.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-white disabled:cursor-not-allowed disabled:opacity-50"
+                  onClick={() => setAnnotationZoom((current) => Math.min(300, current + 25))}
+                  disabled={annotationZoom >= 300}
+                >
+                  放大
+                </button>
+              </div>
+            </div>
+            <div className="min-h-[min(55vh,520px)] max-h-[65vh] overflow-auto rounded-xl bg-black/5 p-2">
+              <div
+                ref={annotationCanvasRef}
+                className="relative min-w-full cursor-crosshair select-none [touch-action:none]"
+                style={{ width: `${annotationZoom}%` }}
+                data-layout-tick={layoutTick}
+                onMouseDown={beginDrawing}
+                onMouseMove={updateDrawing}
+                onMouseUp={() => finishDrawing()}
+                onMouseLeave={() => finishDrawing()}
+                onTouchStart={beginDrawingTouch}
+                onTouchMove={updateDrawingTouch}
+                onTouchEnd={finishDrawingTouch}
+                onTouchCancel={() => setDrawingState(null)}
+              >
               {imageSrc ? (
                 // eslint-disable-next-line @next/next/no-img-element
                 <img
@@ -805,10 +912,10 @@ export function TrainingAnnotationWorkbench({
                   alt={imageName}
                   draggable={false}
                   onLoad={bumpLayout}
-                  className="pointer-events-none h-full w-full object-contain"
+                  className="pointer-events-none block h-auto w-full"
                 />
               ) : (
-                <div className="flex h-full min-h-[200px] items-center justify-center text-sm text-slate-400">加载图片中…</div>
+                <div className="flex min-h-[200px] items-center justify-center text-sm text-slate-400">加载图片中…</div>
               )}
               {visibleAnnotationBoxes.map((box) => {
                 const sameField = visibleAnnotationBoxes.filter((b) => b.field === box.field);
@@ -842,6 +949,7 @@ export function TrainingAnnotationWorkbench({
                   })}
                 />
               ) : null}
+            </div>
             </div>
           </div>
 
