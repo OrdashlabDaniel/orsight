@@ -743,8 +743,8 @@ export function TrainingAnnotationWorkbench({
       aria-modal="true"
       aria-labelledby="annotation-dialog-title"
     >
-      <div className="my-auto w-full max-w-6xl rounded-3xl border border-slate-200 bg-white p-5 shadow-2xl">
-        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+      <div className="my-auto flex max-h-[92vh] w-full max-w-6xl flex-col overflow-hidden rounded-3xl border border-slate-200 bg-white p-5 shadow-2xl">
+        <div className="sticky top-0 z-10 mb-4 flex flex-wrap items-center justify-between gap-3 bg-white pb-2">
           <div>
             <h2 id="annotation-dialog-title" className="text-lg font-semibold">
               图片框选标注
@@ -762,7 +762,16 @@ export function TrainingAnnotationWorkbench({
               </li>
             </ol>
           </div>
-          <button
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              aria-label="关闭标注弹窗"
+              className="inline-flex h-10 w-10 items-center justify-center rounded-xl border border-slate-300 text-lg font-medium text-slate-600 hover:bg-slate-50"
+              onClick={handleClose}
+            >
+              ×
+            </button>
+            <button
             type="button"
             className="shrink-0 rounded-xl border border-slate-300 px-4 py-2 text-sm font-medium hover:bg-slate-50"
             onClick={handleClose}
@@ -770,8 +779,9 @@ export function TrainingAnnotationWorkbench({
             关闭（Esc）
           </button>
         </div>
+        </div>
 
-        <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_min(100%,380px)]">
+        <div className="grid min-h-0 flex-1 gap-4 overflow-y-auto pr-1 lg:grid-cols-[minmax(0,1fr)_min(100%,380px)]">
           <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
             <div className="mb-3 text-sm font-medium text-slate-700">标注图片：{imageName}</div>
             <div
@@ -835,7 +845,7 @@ export function TrainingAnnotationWorkbench({
             </div>
           </div>
 
-          <div className="flex flex-col gap-4">
+          <div className="flex min-h-0 flex-col gap-4">
             <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
               <div className="mb-3 text-sm font-medium text-slate-700">填写正确数值</div>
               <div className="space-y-3">
@@ -955,6 +965,13 @@ export function TrainingAnnotationWorkbench({
             </div>
 
             <div className="mt-auto flex flex-col gap-2">
+              <button
+                type="button"
+                className="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm font-medium text-slate-700 hover:bg-slate-50"
+                onClick={handleClose}
+              >
+                关闭标注弹窗
+              </button>
               <button
                 type="button"
                 className="w-full rounded-xl border border-violet-300 bg-violet-50 px-4 py-3 text-sm font-medium text-violet-900 hover:bg-violet-100 disabled:cursor-not-allowed disabled:opacity-50"

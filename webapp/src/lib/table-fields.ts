@@ -85,6 +85,13 @@ export function normalizeTableFields(raw: unknown): TableFieldDefinition[] {
     seen.add(id);
   }
 
+  for (const fallback of DEFAULT_TABLE_FIELDS) {
+    if (seen.has(fallback.id)) {
+      continue;
+    }
+    normalized.push({ ...fallback });
+  }
+
   return normalized.length > 0
     ? normalized
     : DEFAULT_TABLE_FIELDS.map((field) => ({ ...field }));

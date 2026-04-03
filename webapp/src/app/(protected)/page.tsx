@@ -688,6 +688,24 @@ export default function Home() {
     updateFieldDraft(field.id, (current) => ({ ...current, active: true }));
   }
 
+  function moveFieldDraft(fieldId: string, direction: -1 | 1) {
+    setFieldDrafts((current) => {
+      const activeFields = current.filter((field) => field.active);
+      const deletedFields = current.filter((field) => !field.active);
+      const currentIndex = activeFields.findIndex((field) => field.id === fieldId);
+      const targetIndex = currentIndex + direction;
+
+      if (currentIndex < 0 || targetIndex < 0 || targetIndex >= activeFields.length) {
+        return current;
+      }
+
+      const nextActiveFields = [...activeFields];
+      const [movedField] = nextActiveFields.splice(currentIndex, 1);
+      nextActiveFields.splice(targetIndex, 0, movedField);
+      return [...nextActiveFields, ...deletedFields];
+    });
+  }
+
   async function submitFieldDrafts() {
     setIsSavingFieldConfig(true);
     setErrorMessage("");
@@ -1255,7 +1273,7 @@ export default function Home() {
                   <div className="rounded-2xl border border-slate-200 p-4">
                     <div className="mb-3 text-sm font-medium text-slate-700">当前项目</div>
                     <div className="space-y-3">
-                      {fieldDrafts.filter((field) => field.active).map((field) => (
+                      {fieldDrafts.filter((field) => field.active).map((field, index, activeFields) => (
                         <div key={field.id} className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
                           <div className="flex flex-wrap items-center gap-2">
                             <input
@@ -1277,6 +1295,22 @@ export default function Home() {
                             ) : (
                               <span className="rounded-full bg-violet-100 px-2 py-1 text-[11px] text-violet-700">自定义</span>
                             )}
+                            <button
+                              type="button"
+                              className="rounded-xl border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-40"
+                              onClick={() => moveFieldDraft(field.id, -1)}
+                              disabled={index === 0}
+                            >
+                              上移
+                            </button>
+                            <button
+                              type="button"
+                              className="rounded-xl border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-40"
+                              onClick={() => moveFieldDraft(field.id, 1)}
+                              disabled={index === activeFields.length - 1}
+                            >
+                              下移
+                            </button>
                             <button
                               type="button"
                               className="rounded-xl border border-rose-300 bg-rose-50 px-3 py-2 text-sm font-medium text-rose-700 hover:bg-rose-100"
@@ -1324,6 +1358,7 @@ export default function Home() {
                   <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-600">
                     <p>删除项目时，如果当前表格里已经有该列的数据，系统会先提醒你。</p>
                     <p className="mt-2">删除后的项目会先隐藏，不会立刻清空已有识别值；你也可以在这里恢复。</p>
+                    <p className="mt-2">当前项目的上下顺序，就是填表表头和标注字段的显示顺序。</p>
                   </div>
 
                   <button

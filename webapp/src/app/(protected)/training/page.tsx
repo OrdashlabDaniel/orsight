@@ -76,6 +76,7 @@ export default function TrainingMode() {
   const [tableFields, setTableFields] = useState<TableFieldDefinition[]>(DEFAULT_TABLE_FIELDS);
   const [uploads, setUploads] = useState<UploadItem[]>([]);
   const [selectedUploadId, setSelectedUploadId] = useState<string | null>(null);
+  const [trainingThumbnailMap, setTrainingThumbnailMap] = useState<Record<string, string>>({});
   
   const [trainingStatus, setTrainingStatus] = useState<TrainingStatusResponse | null>(null);
   const [isDraggingFiles, setIsDraggingFiles] = useState(false);
@@ -156,6 +157,49 @@ export default function TrainingMode() {
   useEffect(() => {
     void loadGlobalRules();
   }, []);
+
+  useEffect(() => {
+    const imageNames = trainingStatus?.items.map((item) => item.imageName) || [];
+    if (!imageNames.length) {
+      return;
+    }
+
+    let cancelled = false;
+    const pendingNames = imageNames.filter((imageName) => !trainingThumbnailMap[imageName]);
+
+    setTrainingThumbnailMap((current) =>
+      Object.fromEntries(Object.entries(current).filter(([imageName]) => imageNames.includes(imageName))),
+    );
+
+    if (!pendingNames.length) {
+      return;
+    }
+
+    void (async () => {
+      for (const imageName of pendingNames) {
+        if (cancelled) {
+          return;
+        }
+
+        try {
+          const response = await fetch(`/api/training/image?imageName=${encodeURIComponent(imageName)}`);
+          const payload = (await response.json()) as { dataUrl?: string; error?: string };
+          if (!response.ok || !payload.dataUrl || cancelled) {
+            continue;
+          }
+          setTrainingThumbnailMap((current) =>
+            current[imageName] ? current : { ...current, [imageName]: payload.dataUrl! },
+          );
+        } catch {
+          // Ignore thumbnail failures; clicking the card will still open the full image.
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [trainingStatus, trainingThumbnailMap]);
 
   async function loadTableFieldConfig() {
     try {
@@ -524,6 +568,7 @@ export default function TrainingMode() {
       removeUploadAfterSaveRef.current = item.id;
     } else {
       imageName = item.imageName;
+      previewUrl = trainingThumbnailMap[item.imageName] || "";
       existingExample = item.example;
       removeUploadAfterSaveRef.current = null;
     }
@@ -947,10 +992,19 @@ export default function TrainingMode() {
                       className="group relative flex aspect-square flex-col overflow-hidden rounded-2xl border border-slate-200 bg-slate-50 text-left transition-all hover:border-blue-400 hover:shadow-md"
                     >
                       <div className="relative flex-1 bg-slate-100">
-                        {/* We don't have a thumbnail URL directly, but we can just show a placeholder or fetch it when clicked */}
-                        <div className="flex h-full items-center justify-center p-4 text-center text-xs text-slate-400 break-all">
-                          {item.imageName}
-                        </div>
+                        {trainingThumbnailMap[item.imageName] ? (
+                          <Image
+                            src={trainingThumbnailMap[item.imageName]}
+                            alt={item.imageName}
+                            fill
+                            unoptimized
+                            className="object-cover"
+                          />
+                        ) : (
+                          <div className="flex h-full items-center justify-center p-4 text-center text-xs text-slate-400 break-all">
+                            缩略图加载中
+                          </div>
+                        )}
                       </div>
                       <div className="border-t border-slate-200 bg-white px-3 py-2">
                         <div className="truncate text-xs font-medium text-slate-700" title={item.imageName}>
