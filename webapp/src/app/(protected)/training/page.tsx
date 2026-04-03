@@ -167,9 +167,17 @@ export default function TrainingMode() {
     let cancelled = false;
     const pendingNames = imageNames.filter((imageName) => !trainingThumbnailMap[imageName]);
 
-    setTrainingThumbnailMap((current) =>
-      Object.fromEntries(Object.entries(current).filter(([imageName]) => imageNames.includes(imageName))),
-    );
+    setTrainingThumbnailMap((current) => {
+      const next = Object.fromEntries(
+        Object.entries(current).filter(([imageName]) => imageNames.includes(imageName)),
+      );
+      for (const imageName of pendingNames) {
+        if (!next[imageName]) {
+          next[imageName] = buildTrainingImageRawUrl(imageName);
+        }
+      }
+      return next;
+    });
 
     if (!pendingNames.length) {
       return;
@@ -187,9 +195,16 @@ export default function TrainingMode() {
           if (!response.ok || !payload.dataUrl || cancelled) {
             continue;
           }
-          setTrainingThumbnailMap((current) =>
-            current[imageName] ? current : { ...current, [imageName]: payload.dataUrl! },
-          );
+          setTrainingThumbnailMap((current) => {
+            const existing = current[imageName];
+            if (existing === payload.dataUrl) {
+              return current;
+            }
+            if (existing && !existing.includes("&raw=1")) {
+              return current;
+            }
+            return { ...current, [imageName]: payload.dataUrl! };
+          });
         } catch {
           // Ignore thumbnail failures; clicking the card will still open the full image.
         }
@@ -546,6 +561,10 @@ export default function TrainingMode() {
     return payload.dataUrl;
   }
 
+  function buildTrainingImageRawUrl(imageName: string) {
+    return `/api/training/image?imageName=${encodeURIComponent(imageName)}&raw=1`;
+  }
+
   function handleImageClick(upload: UploadItem) {
     setSelectedUploadId(upload.id);
     void openAnnotationPanel(upload);
@@ -568,7 +587,7 @@ export default function TrainingMode() {
       removeUploadAfterSaveRef.current = item.id;
     } else {
       imageName = item.imageName;
-      previewUrl = trainingThumbnailMap[item.imageName] || "";
+      previewUrl = trainingThumbnailMap[item.imageName] || buildTrainingImageRawUrl(item.imageName);
       existingExample = item.example;
       removeUploadAfterSaveRef.current = null;
     }

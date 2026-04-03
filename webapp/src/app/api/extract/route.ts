@@ -66,7 +66,8 @@ const SIMPLE_EXTRACTION_STRICT_APPENDIX = `
 3. 如果任务编码（例如 TASK2026...）清晰可见，就填写 taskCode。
 4. unscanned 只能读取“未领取 / 未收”旁边直接对应的数字，绝不能从旁边的“已领 / 应领件数 / 实领件数”里截取前缀或后缀。
 5. 如果图上未收数量是 1，就只能写 1，不能把附近的 150 / 151 误拼成 15。
-6. 对每个字段都先看标签，再看标签直接对应的值，不要按位置猜。`;
+6. 对每个字段都先看标签，再看标签直接对应的值，不要按位置猜。
+7. 如果当前图片是网页输入表格/系统列表，而画面里没有明确的“站点车队/站点/车队”列或顶部站点标签，stationTeam 必须留空；绝不能从 route、线路区域名称或其他列猜一个 stationTeam。`;
 
 const TASK_CODE_RECOVERY_APPENDIX = `
 
@@ -1485,6 +1486,42 @@ async function callVisionModel(
   };
 }
 
+function sanitizeStationTeamRecord(record: PodRecord): PodRecord {
+  const stationTeam = normalizeText(record.stationTeam);
+  if (!stationTeam) {
+    return record.stationTeam ? { ...record, stationTeam: "" } : record;
+  }
+
+  if (record.route && stationTeam === record.route) {
+    return {
+      ...record,
+      stationTeam: "",
+    };
+  }
+
+  if (isRouteFormatValid(stationTeam)) {
+    return {
+      ...record,
+      stationTeam: "",
+      route: record.route || stationTeam,
+    };
+  }
+
+  if (!isStationTeamCodeNotCourierRoute(stationTeam)) {
+    return {
+      ...record,
+      stationTeam: "",
+    };
+  }
+
+  return stationTeam === record.stationTeam
+    ? record
+    : {
+        ...record,
+        stationTeam,
+      };
+}
+
 function enforceTaskCodeIntegrity(record: PodRecord): PodRecord {
   const taskCode = normalizeTaskCode(record.taskCode);
   if (!taskCode) {
@@ -1533,7 +1570,7 @@ async function buildVisualPackForCurrentImage(file: File, ctx: ExtractVisionCont
 
 type RecoveryFieldId = keyof Pick<
   PodRecord,
-  "date" | "route" | "driver" | "taskCode" | "total" | "unscanned" | "exceptions" | "stationTeam"
+  "date" | "route" | "driver" | "taskCode" | "total" | "unscanned" | "exceptions"
 > | "totalSourceLabel";
 
 type RecoveryPlan = {
@@ -1558,8 +1595,6 @@ function collectRecoveryPlan(records: PodRecord[], tableFields: TableFieldDefini
     if (record.total !== "" && !record.totalSourceLabel) missingBuiltIns.push("totalSourceLabel");
     if (record.unscanned === "") missingBuiltIns.push("unscanned");
     if (record.exceptions === "") missingBuiltIns.push("exceptions");
-    if (!record.stationTeam) missingBuiltIns.push("stationTeam");
-
     const missingCustomFields = customFields.filter((field) => {
       const value = record.customFieldValues?.[field.id];
       return value === "" || value === undefined || value === null;
@@ -1583,14 +1618,15 @@ function buildRecoveryPrompt(records: PodRecord[], plans: RecoveryPlan[], tableF
     "严格规则：",
     "1. records 顺序固定，对应当前图片里从上到下的任务/记录顺序。",
     "2. 可以使用每条记录已有的非空字段作为锚点去定位同一行，例如 driver、taskCode、total、stationTeam、route。",
-    "3. date 和 stationTeam 如果整张图共用同一个顶部信息，可以补到所有需要的记录。",
+    "3. date 可以按整张图共用的顶部信息补到所有需要的记录；stationTeam 只有在整张图顶部或当前行里清晰看到明确站点/车队标签时才允许补。",
     "4. route 必须是快递员路线，例如 IAH01-050-M；像 IAH-BCE、IAH-LEN 这样的站点车队代码只能写 stationTeam。",
     "5. total 只有在当前图里看得到明确 total 标签语义（应领件数/应收件数/运单数量）时才填写，并尽量同时返回 totalSourceLabel。",
     "6. unscanned 只能来自「未领取 / 未收」直接对应的数字；不能从已领、应领件数、实领件数、任务编码或时间中截取。",
     "7. exceptions 只能来自「错扫 / 错分 / 误扫」直接对应的数字。",
-    "8. taskCode 必须是完整的 TASK + 12位数字；如果只能读到半截、混入字母 O/I、或尾部缺失，就返回 null。",
-    "9. 看不清就返回 null；不要为了补齐而猜。",
-    "10. 不要改动未请求的字段。",
+    "8. 对 WEB_TABLE 截图，如果看不到明确的站点车队列/标签，就把 stationTeam 留空，不要从 route 或其它列推断。",
+    "9. taskCode 必须是完整的 TASK + 12位数字；如果只能读到半截、混入字母 O/I、或尾部缺失，就返回 null。",
+    "10. 看不清就返回 null；不要为了补齐而猜。",
+    "11. 不要改动未请求的字段。",
     "",
     "下面是首轮识别后的部分记录与待补字段：",
   ];
@@ -1717,7 +1753,8 @@ function mergeRecoveredRecords(
     }
 
     if (!next.stationTeam) {
-      next.stationTeam = normalizeText(recovered.stationTeam) || "";
+      const recoveredStationTeam = normalizeText(recovered.stationTeam);
+      next.stationTeam = isStationTeamCodeNotCourierRoute(recoveredStationTeam) ? recoveredStationTeam : "";
     }
 
     const customValues = normalizeCustomFieldValues(recovered.customFieldValues);
@@ -2441,7 +2478,9 @@ export async function POST(request: Request) {
       }
 
       const recoveryResult = await recoverMissingFieldsFromVision(file, model, visionCtx, checkedRecords);
-      checkedRecords = recoveryResult.records.map(repairRouteVersusStationTeamRecord);
+      checkedRecords = recoveryResult.records
+        .map(repairRouteVersusStationTeamRecord)
+        .map(sanitizeStationTeamRecord);
       checkedRecords = propagateSharedImageFields(checkedRecords);
       checkedRecords = checkedRecords.map(enforceTaskCodeIntegrity);
       checkedRecords = deriveWaybillStatus(checkedRecords);
