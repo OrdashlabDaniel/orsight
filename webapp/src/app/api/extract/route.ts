@@ -6,8 +6,10 @@ import { getSupabaseAdmin } from "@/lib/supabase";
 import {
   type ExtractionIssue,
   type PodRecord,
+  isTaskCodeFormatValid,
   isRouteFormatValid,
   isStationTeamCodeNotCourierRoute,
+  normalizeTaskCode,
   normalizeRouteValue,
   normalizeNumber,
   normalizeText,
@@ -65,6 +67,14 @@ const SIMPLE_EXTRACTION_STRICT_APPENDIX = `
 4. unscanned 只能读取“未领取 / 未收”旁边直接对应的数字，绝不能从旁边的“已领 / 应领件数 / 实领件数”里截取前缀或后缀。
 5. 如果图上未收数量是 1，就只能写 1，不能把附近的 150 / 151 误拼成 15。
 6. 对每个字段都先看标签，再看标签直接对应的值，不要按位置猜。`;
+
+const TASK_CODE_RECOVERY_APPENDIX = `
+
+任务编码专项要求：
+1. taskCode 只有在能看清完整字符串时才允许填写。
+2. 常见合法格式是 TASK + 12位数字，例如 TASK202604024045。
+3. 像 TASK202604C、TASK20260、TASK20260402O405 这种残缺或尾部含非数字字符的结果都视为无效。
+4. 如果看不清完整 taskCode，就返回 null，不要保留半截结果。`;
 
 function getConsistencyAttemptCount(): number {
   const raw = process.env.EXTRACT_CONSISTENCY_ATTEMPTS;
@@ -1407,7 +1417,7 @@ async function callVisionModel(
   const bytes = Buffer.from(await file.arrayBuffer());
   const dataUrl = `data:${file.type || "image/jpeg"};base64,${bytes.toString("base64")}`;
   const visualPack = await buildVisualPackForCurrentImage(file, ctx);
-  const baseText = `${SIMPLE_EXTRACTION_PROMPT}${SIMPLE_EXTRACTION_STRICT_APPENDIX}${buildRecognitionModeDynamicFieldPrompt(ctx.tableFields)}${visualPack.hintText}`;
+  const baseText = `${SIMPLE_EXTRACTION_PROMPT}${SIMPLE_EXTRACTION_STRICT_APPENDIX}${TASK_CODE_RECOVERY_APPENDIX}${buildRecognitionModeDynamicFieldPrompt(ctx.tableFields)}${visualPack.hintText}`;
 
   const userContent: OpenAIMessageContent[] = [{ type: "text", text: baseText }];
   for (const ref of visualPack.referenceImages) {
@@ -1475,6 +1485,35 @@ async function callVisionModel(
   };
 }
 
+function enforceTaskCodeIntegrity(record: PodRecord): PodRecord {
+  const taskCode = normalizeTaskCode(record.taskCode);
+  if (!taskCode) {
+    return {
+      ...record,
+      taskCode: "",
+    };
+  }
+
+  if (isTaskCodeFormatValid(taskCode)) {
+    return taskCode === record.taskCode
+      ? record
+      : {
+          ...record,
+          taskCode,
+        };
+  }
+
+  return {
+    ...record,
+    taskCode: "",
+    reviewRequired: true,
+    reviewReason: appendReviewReason(
+      record.reviewReason,
+      `任务编码识别结果“${taskCode}”不符合 TASK + 12位数字格式，已清空待复核。`,
+    ),
+  };
+}
+
 async function buildVisualPackForCurrentImage(file: File, ctx: ExtractVisionContext) {
   const similarExamples = await selectMostSimilarTrainingExamples(
     file,
@@ -1512,7 +1551,9 @@ function collectRecoveryPlan(records: PodRecord[], tableFields: TableFieldDefini
     if (!record.date) missingBuiltIns.push("date");
     if (!record.route || !isRouteFormatValid(record.route)) missingBuiltIns.push("route");
     if (!record.driver) missingBuiltIns.push("driver");
-    if (!record.taskCode) missingBuiltIns.push("taskCode");
+    if (!record.taskCode || !isTaskCodeFormatValid(normalizeTaskCode(record.taskCode))) {
+      missingBuiltIns.push("taskCode");
+    }
     if (record.total === "") missingBuiltIns.push("total");
     if (record.total !== "" && !record.totalSourceLabel) missingBuiltIns.push("totalSourceLabel");
     if (record.unscanned === "") missingBuiltIns.push("unscanned");
@@ -1547,8 +1588,9 @@ function buildRecoveryPrompt(records: PodRecord[], plans: RecoveryPlan[], tableF
     "5. total 只有在当前图里看得到明确 total 标签语义（应领件数/应收件数/运单数量）时才填写，并尽量同时返回 totalSourceLabel。",
     "6. unscanned 只能来自「未领取 / 未收」直接对应的数字；不能从已领、应领件数、实领件数、任务编码或时间中截取。",
     "7. exceptions 只能来自「错扫 / 错分 / 误扫」直接对应的数字。",
-    "8. 看不清就返回 null；不要为了补齐而猜。",
-    "9. 不要改动未请求的字段。",
+    "8. taskCode 必须是完整的 TASK + 12位数字；如果只能读到半截、混入字母 O/I、或尾部缺失，就返回 null。",
+    "9. 看不清就返回 null；不要为了补齐而猜。",
+    "10. 不要改动未请求的字段。",
     "",
     "下面是首轮识别后的部分记录与待补字段：",
   ];
@@ -1649,8 +1691,10 @@ function mergeRecoveredRecords(
       next.driver = normalizeText(recovered.driver) || "";
     }
 
-    if (!next.taskCode) {
-      next.taskCode = normalizeText(recovered.taskCode) || "";
+    const currentTaskCode = normalizeTaskCode(next.taskCode);
+    if (!currentTaskCode || !isTaskCodeFormatValid(currentTaskCode)) {
+      const recoveredTaskCode = normalizeTaskCode(recovered.taskCode);
+      next.taskCode = isTaskCodeFormatValid(recoveredTaskCode) ? recoveredTaskCode : "";
     }
 
     if (next.total === "") {
@@ -1901,7 +1945,7 @@ function mapRecord(imageName: string, raw: RawModelRecord, index: number): PodRe
     date: normalizeText(raw.date),
     route: normalizeText(raw.route),
     driver: normalizeText(raw.driver),
-    taskCode: normalizeText(raw.taskCode),
+    taskCode: normalizeTaskCode(raw.taskCode),
     total: normalizeNumber(raw.total),
     totalSourceLabel: normalizeText(raw.totalSourceLabel),
     unscanned: normalizeNumber(raw.unscanned),
@@ -2399,6 +2443,7 @@ export async function POST(request: Request) {
       const recoveryResult = await recoverMissingFieldsFromVision(file, model, visionCtx, checkedRecords);
       checkedRecords = recoveryResult.records.map(repairRouteVersusStationTeamRecord);
       checkedRecords = propagateSharedImageFields(checkedRecords);
+      checkedRecords = checkedRecords.map(enforceTaskCodeIntegrity);
       checkedRecords = deriveWaybillStatus(checkedRecords);
 
       totalPromptTokens += recoveryResult.usage?.prompt_tokens || 0;
