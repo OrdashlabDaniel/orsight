@@ -828,7 +828,7 @@ export function TrainingAnnotationWorkbench({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           imageDataUrl,
-          annotationMode,
+          annotationMode: "auto",
           boxes: boxesForVisionApi(visibleAnnotationBoxes),
           fieldAggregations: sanitizeFieldAggregations(fieldAggregations, activeFieldIdSet),
           tableFields: activeFieldDefinitions,
@@ -839,15 +839,22 @@ export function TrainingAnnotationWorkbench({
         record?: Record<string, string | number | "">;
         tableFieldValues?: TableAnnotationFieldValues;
         previewNote?: string;
+        detectedMode?: AnnotationMode;
+        detectedModeReason?: string;
       };
       if (!res.ok) {
         throw new Error(data.error || "\u8bd5\u586b\u5931\u8d25");
       }
 
-      if (annotationMode === "table") {
+      const resolvedMode: AnnotationMode = data.detectedMode === "table" ? "table" : "record";
+      const resolvedModeLabel = resolvedMode === "table" ? "完整表格" : "单条记录";
+      const resolvedModeReason = data.detectedModeReason?.trim();
+
+      if (resolvedMode === "table") {
         if (!data.tableFieldValues) {
           throw new Error("\u672a\u8fd4\u56de\u5b8c\u6574\u8868\u683c\u8bd5\u586b\u7ed3\u679c");
         }
+        setAnnotationMode("table");
         setTableFieldTexts(
           sanitizeTableFieldTexts(tableFieldValuesToTextState(data.tableFieldValues, activeFieldDefinitions), activeFieldDefinitions),
         );
@@ -856,8 +863,8 @@ export function TrainingAnnotationWorkbench({
         );
         onNotice?.(
           data.previewNote
-            ? `AI \u8bd5\u586b\u5b8c\u6210\uff08\u5b8c\u6574\u8868\u683c\u6a21\u5f0f\uff0c\u6bcf\u884c\u4e00\u4e2a\u503c\uff09\u3002\u8bf4\u660e\uff1a${data.previewNote} \u8bf7\u6838\u5bf9\u540e\u518d\u5b58\u5165\u8bad\u7ec3\u6c60\u3002`
-            : "AI \u8bd5\u586b\u5b8c\u6210\uff1a\u670d\u52a1\u7aef\u5df2\u6309\u6bcf\u4e2a\u6846\u88c1\u526a\u6210\u5c0f\u56fe\u5e76\u6309\u884c\u8bfb\u53d6\uff0c\u8bf7\u6838\u5bf9\u53f3\u4fa7\u5b8c\u6574\u8868\u683c\u6570\u503c\u3002",
+            ? `AI \u8bd5\u586b\u5b8c\u6210\uff0c\u5df2\u81ea\u52a8\u5207\u6362\u5230${resolvedModeLabel}\u6a21\u5f0f\u3002${resolvedModeReason ? ` \u5224\u65ad\u4f9d\u636e\uff1a${resolvedModeReason}\u3002` : ""} \u8bf4\u660e\uff1a${data.previewNote} \u8bf7\u6838\u5bf9\u540e\u518d\u5b58\u5165\u8bad\u7ec3\u6c60\u3002`
+            : `AI \u8bd5\u586b\u5b8c\u6210\uff0c\u5df2\u81ea\u52a8\u5207\u6362\u5230${resolvedModeLabel}\u6a21\u5f0f\u3002${resolvedModeReason ? ` \u5224\u65ad\u4f9d\u636e\uff1a${resolvedModeReason}\u3002` : ""} \u670d\u52a1\u7aef\u5df2\u6309\u6bcf\u4e2a\u6846\u88c1\u526a\u6210\u5c0f\u56fe\u5e76\u6309\u884c\u8bfb\u53d6\uff0c\u8bf7\u6838\u5bf9\u53f3\u4fa7\u5b8c\u6574\u8868\u683c\u6570\u503c\u3002`,
         );
         return;
       }
@@ -865,6 +872,7 @@ export function TrainingAnnotationWorkbench({
       if (!data.record) {
         throw new Error("\u672a\u8fd4\u56de\u8bd5\u586b\u7ed3\u679c");
       }
+      setAnnotationMode("record");
       const r = data.record;
       const numOrEmpty = (v: unknown): number | "" => {
         if (v === "" || v === null || v === undefined) return "";
@@ -906,8 +914,8 @@ export function TrainingAnnotationWorkbench({
       });
       onNotice?.(
         data.previewNote
-          ? `AI \u8bd5\u586b\u5b8c\u6210\uff08\u5df2\u6309\u6807\u6ce8\u6846\u88c1\u526a\u6210\u5c0f\u56fe\u518d\u8bc6\u522b\uff09\u3002\u8bf4\u660e\uff1a${data.previewNote} \u8bf7\u6838\u5bf9\u540e\u518d\u5b58\u5165\u8bad\u7ec3\u6c60\u3002`
-          : "AI \u8bd5\u586b\u5b8c\u6210\uff1a\u670d\u52a1\u7aef\u5df2\u6309\u6bcf\u4e2a\u6846\u88c1\u526a\u6210\u5c0f\u56fe\u540e\u9001\u6a21\u578b\u8bc6\u522b\uff0c\u8bf7\u6838\u5bf9\u53f3\u4fa7\u6570\u503c\u3002",
+          ? `AI \u8bd5\u586b\u5b8c\u6210\uff0c\u5df2\u81ea\u52a8\u5207\u6362\u5230${resolvedModeLabel}\u6a21\u5f0f\u3002${resolvedModeReason ? ` \u5224\u65ad\u4f9d\u636e\uff1a${resolvedModeReason}\u3002` : ""} \u8bf4\u660e\uff1a${data.previewNote} \u8bf7\u6838\u5bf9\u540e\u518d\u5b58\u5165\u8bad\u7ec3\u6c60\u3002`
+          : `AI \u8bd5\u586b\u5b8c\u6210\uff0c\u5df2\u81ea\u52a8\u5207\u6362\u5230${resolvedModeLabel}\u6a21\u5f0f\u3002${resolvedModeReason ? ` \u5224\u65ad\u4f9d\u636e\uff1a${resolvedModeReason}\u3002` : ""} \u670d\u52a1\u7aef\u5df2\u6309\u6bcf\u4e2a\u6846\u88c1\u526a\u6210\u5c0f\u56fe\u540e\u9001\u6a21\u578b\u8bc6\u522b\uff0c\u8bf7\u6838\u5bf9\u53f3\u4fa7\u6570\u503c\u3002`,
       );
     } catch (err) {
       onError?.(err instanceof Error ? err.message : "\u8bd5\u586b\u5931\u8d25");
@@ -1321,7 +1329,7 @@ export function TrainingAnnotationWorkbench({
                 onClick={() => void previewFillFromAnnotations()}
                 disabled={isPreviewFillLoading || isSavingTraining || !imageSrc || visibleAnnotationBoxes.length === 0}
               >
-                {isPreviewFillLoading ? "试填识别中…" : "AI 试填预览（按框选识别并填入上方）"}
+                {isPreviewFillLoading ? "试填识别中…" : "AI 试填预览（自动判断单条/完整表格）"}
               </button>
               <button
                 type="button"

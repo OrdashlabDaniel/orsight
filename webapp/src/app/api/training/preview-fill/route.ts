@@ -38,6 +38,7 @@ type PreviewRequestBody = {
   annotationMode?: unknown;
 };
 
+type RequestedAnnotationMode = "record" | "table" | "auto";
 type AnnotationMode = "record" | "table";
 type PreviewTableFieldValues = Record<string, Array<string | number | "">>;
 
@@ -54,8 +55,10 @@ function normalizeText(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
 }
 
-function normalizeAnnotationMode(value: unknown): AnnotationMode {
-  return value === "table" ? "table" : "record";
+function normalizeAnnotationMode(value: unknown): RequestedAnnotationMode {
+  if (value === "table") return "table";
+  if (value === "auto") return "auto";
+  return "record";
 }
 
 function normalizeBoxes(
@@ -309,6 +312,17 @@ function parseTablePreviewJson(content: string): {
   return { imageValues, previewNote };
 }
 
+function parseModeDetectionJson(content: string): {
+  mode: AnnotationMode;
+  reason: string;
+} {
+  const parsed = JSON.parse(content) as Record<string, unknown>;
+  return {
+    mode: parsed.mode === "table" ? "table" : "record",
+    reason: typeof parsed.reason === "string" ? parsed.reason.trim() : "",
+  };
+}
+
 function normalizeCustomFieldPreviewValue(
   field: TableFieldDefinition,
   value: unknown,
@@ -387,16 +401,16 @@ export async function POST(request: Request) {
   try {
     const { user, skipAuth } = await getAuthUserOrSkip();
     if (!skipAuth && !user) {
-      return NextResponse.json({ error: "请先登录。" }, { status: 401 });
+      return NextResponse.json({ error: "请先登录后再试。" }, { status: 401 });
     }
     if (!OPENAI_API_KEY) {
-      return NextResponse.json({ error: "??? OPENAI_API_KEY?" }, { status: 503 });
+      return NextResponse.json({ error: "服务端缺少 OPENAI_API_KEY。" }, { status: 503 });
     }
 
     const body = (await request.json()) as PreviewRequestBody;
     const imageDataUrl = typeof body.imageDataUrl === "string" ? body.imageDataUrl.trim() : "";
     if (!imageDataUrl.startsWith("data:") || imageDataUrl.length > 14 * 1024 * 1024) {
-      return NextResponse.json({ error: "缺少图片数据。" }, { status: 400 });
+      return NextResponse.json({ error: "请先上传或粘贴图片。" }, { status: 400 });
     }
 
     const requestedFields = Array.isArray(body.tableFields)
@@ -415,15 +429,15 @@ export async function POST(request: Request) {
 
     const boxes = normalizeBoxes(body.boxes, allowedFieldIds);
     if (boxes.length === 0) {
-      return NextResponse.json({ error: "请至少提供一个有效标注框。" }, { status: 400 });
+      return NextResponse.json({ error: "请至少标注一个字段框后再试填。" }, { status: 400 });
     }
 
     const fieldAggregations = normalizeAggregations(body.fieldAggregations, allowedFieldIds);
-    const annotationMode = normalizeAnnotationMode(body.annotationMode);
+    const requestedAnnotationMode = normalizeAnnotationMode(body.annotationMode);
     const fieldMap = new Map(activeTableFields.map((field) => [field.id, field] as const));
     const imageBuffer = parseDataUrlToBuffer(imageDataUrl);
     if (!imageBuffer || imageBuffer.length === 0) {
-      return NextResponse.json({ error: "无法解析图片内容。" }, { status: 400 });
+      return NextResponse.json({ error: "图片数据无效。" }, { status: 400 });
     }
 
     let cropUrls: string[];
@@ -431,20 +445,80 @@ export async function POST(request: Request) {
       cropUrls = await cropsToPngDataUrls(imageBuffer, boxes);
     } catch (error) {
       return NextResponse.json(
-        { error: error instanceof Error ? error.message : "裁剪图片失败。" },
+        { error: error instanceof Error ? error.message : "裁剪标注框失败。" },
         { status: 400 },
       );
     }
 
+    let resolvedAnnotationMode: AnnotationMode =
+      requestedAnnotationMode === "auto" ? "record" : requestedAnnotationMode;
+    let detectionReason = "";
+
+    if (requestedAnnotationMode === "auto") {
+      const boxSummary = activeTableFields
+        .map((field) => {
+          const count = boxes.filter((box) => box.field === field.id).length;
+          return count > 0 ? `${field.label}(${field.id})=${count}?` : "";
+        })
+        .filter(Boolean)
+        .join("?");
+
+      const detectResponse = await fetch(`${OPENAI_BASE_URL}/chat/completions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${OPENAI_API_KEY}`,
+        },
+        body: JSON.stringify({
+          model: PREVIEW_MODEL,
+          reasoning_effort: OPENAI_REASONING_EFFORT,
+          response_format: { type: "json_object" },
+          messages: [
+            {
+              role: "system",
+              content:
+                'You are OrSight\'s training preview mode classifier. Decide whether the screenshot should be preview-filled as a single detail record ("record") or as a whole table with multiple rows ("table"). Choose "table" only when the screenshot clearly shows a grid or list with many rows and the selected boxes are meant to capture one value per row. Otherwise choose "record". Return strict JSON: {"mode":"record"|"table","reason":"short reason"}.',
+            },
+            {
+              role: "user",
+              content: [
+                {
+                  type: "text",
+                  text: `Please inspect this screenshot and decide whether AI preview should use single-record mode or whole-table mode. Field box summary: ${boxSummary || "no summarized field boxes"}.`,
+                },
+                { type: "image_url", image_url: { url: imageDataUrl } },
+              ],
+            },
+          ],
+        }),
+      });
+
+      if (detectResponse.ok) {
+        const detectPayload = (await detectResponse.json()) as {
+          choices?: Array<{ message?: { content?: string } }>;
+        };
+        const detectContent = detectPayload.choices?.[0]?.message?.content;
+        if (detectContent) {
+          try {
+            const detected = parseModeDetectionJson(detectContent);
+            resolvedAnnotationMode = detected.mode;
+            detectionReason = detected.reason;
+          } catch {
+            // Keep fallback mode if parsing fails.
+          }
+        }
+      }
+    }
+
     const userText =
-      annotationMode === "table"
+      resolvedAnnotationMode === "table"
         ? buildTableCropInstructionText(boxes, fieldAggregations, activeTableFields, fieldLabels, fieldTypeMap)
         : buildCropInstructionText(boxes, fieldAggregations, activeTableFields, fieldLabels, fieldTypeMap);
 
     const systemText =
-      annotationMode === "table"
-        ? "你是 OrSight 的训练标注辅助模型。当前任务是完整表格模式，请只根据每张裁剪小图读出该列从上到下的所有行值，并严格返回 JSON。不要臆造缺失行，不要把列标题、按钮、分页、操作链接当成数据。"
-        : "你是 OrSight 的训练标注辅助模型。当前任务是单条记录模式，请只根据每张裁剪小图读出对应字段的值，并严格返回 JSON。不要臆造框外文字，不要把邻近字段误填进当前字段。";
+      resolvedAnnotationMode === "table"
+        ? 'You are OrSight\'s training preview OCR assistant. The screenshot represents a whole table with multiple rows. Each crop corresponds to one selected field column. Read values from top to bottom and return strict JSON in the format {"imageValues":{"1":["row1","row2"],"2":[...]}, "previewNote":"optional short note"}. Use empty strings for unreadable cells and preserve row order.'
+        : 'You are OrSight\'s training preview OCR assistant. The screenshot represents a single record/detail view. Read each cropped field image and return strict JSON in the format {"record":{"field":"value"},"previewNote":"optional short note"}. Use empty strings for unreadable fields.';
 
     const userContent: Array<
       | { type: "text"; text: string }
@@ -473,7 +547,7 @@ export async function POST(request: Request) {
 
     if (!response.ok) {
       const text = await response.text();
-      return NextResponse.json({ error: `模型预览调用失败 ${response.status}: ${text.slice(0, 400)}` }, { status: 502 });
+      return NextResponse.json({ error: `AI 试填请求失败 ${response.status}: ${text.slice(0, 400)}` }, { status: 502 });
     }
 
     const payload = (await response.json()) as {
@@ -481,10 +555,10 @@ export async function POST(request: Request) {
     };
     const content = payload.choices?.[0]?.message?.content;
     if (!content) {
-      return NextResponse.json({ error: "模型未返回可用内容" }, { status: 502 });
+      return NextResponse.json({ error: "AI 试填没有返回内容。" }, { status: 502 });
     }
 
-    if (annotationMode === "table") {
+    if (resolvedAnnotationMode === "table") {
       let parsedImageValues: Record<string, unknown>;
       let previewNote = "";
       try {
@@ -492,7 +566,7 @@ export async function POST(request: Request) {
         parsedImageValues = parsed.imageValues;
         previewNote = parsed.previewNote;
       } catch {
-        return NextResponse.json({ error: "完整表格试填返回的 JSON 无法解析" }, { status: 502 });
+        return NextResponse.json({ error: "AI 试填返回的完整表格 JSON 无法解析。" }, { status: 502 });
       }
 
       const byField = new Map<TrainingField, Array<Array<string | number | "">>>();
@@ -521,6 +595,8 @@ export async function POST(request: Request) {
       }
 
       return NextResponse.json({
+        detectedMode: resolvedAnnotationMode,
+        detectedModeReason: detectionReason || undefined,
         tableFieldValues,
         previewNote: previewNote || undefined,
       });
@@ -533,7 +609,7 @@ export async function POST(request: Request) {
       parsedRecord = parsed.record;
       previewNote = parsed.previewNote;
     } catch {
-        return NextResponse.json({ error: "单条记录试填返回的 JSON 无法解析" }, { status: 502 });
+      return NextResponse.json({ error: "AI 试填返回的 JSON 无法解析。" }, { status: 502 });
     }
 
     const boxedFields = new Set(boxes.map((box) => box.field));
@@ -570,12 +646,14 @@ export async function POST(request: Request) {
     }
 
     return NextResponse.json({
+      detectedMode: resolvedAnnotationMode,
+      detectedModeReason: detectionReason || undefined,
       record: out,
       previewNote: previewNote || undefined,
     });
   } catch (error) {
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : "试填失败" },
+      { error: error instanceof Error ? error.message : "AI 试填失败。" },
       { status: 500 },
     );
   }
