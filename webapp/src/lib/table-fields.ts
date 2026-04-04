@@ -44,9 +44,23 @@ export function getDefaultFieldDefinition(fieldId: string): TableFieldDefinition
   return DEFAULT_TABLE_FIELDS.find((field) => field.id === fieldId);
 }
 
-export function normalizeTableFields(raw: unknown): TableFieldDefinition[] {
-  if (!Array.isArray(raw) || raw.length === 0) {
-    return DEFAULT_TABLE_FIELDS.map((field) => ({ ...field }));
+type NormalizeTableFieldsOptions = {
+  preserveEmpty?: boolean;
+  appendMissingBuiltIns?: boolean;
+};
+
+export function normalizeTableFields(
+  raw: unknown,
+  options: NormalizeTableFieldsOptions = {},
+): TableFieldDefinition[] {
+  const { preserveEmpty = false, appendMissingBuiltIns = true } = options;
+
+  if (!Array.isArray(raw)) {
+    return preserveEmpty ? [] : DEFAULT_TABLE_FIELDS.map((field) => ({ ...field }));
+  }
+
+  if (raw.length === 0) {
+    return preserveEmpty ? [] : DEFAULT_TABLE_FIELDS.map((field) => ({ ...field }));
   }
 
   const normalized: TableFieldDefinition[] = [];
@@ -85,16 +99,20 @@ export function normalizeTableFields(raw: unknown): TableFieldDefinition[] {
     seen.add(id);
   }
 
-  for (const fallback of DEFAULT_TABLE_FIELDS) {
-    if (seen.has(fallback.id)) {
-      continue;
+  if (appendMissingBuiltIns) {
+    for (const fallback of DEFAULT_TABLE_FIELDS) {
+      if (seen.has(fallback.id)) {
+        continue;
+      }
+      normalized.push({ ...fallback });
     }
-    normalized.push({ ...fallback });
   }
 
   return normalized.length > 0
     ? normalized
-    : DEFAULT_TABLE_FIELDS.map((field) => ({ ...field }));
+    : preserveEmpty
+      ? []
+      : DEFAULT_TABLE_FIELDS.map((field) => ({ ...field }));
 }
 
 export function getActiveTableFields(fields: TableFieldDefinition[]) {

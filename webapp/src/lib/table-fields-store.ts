@@ -31,17 +31,24 @@ function cloneDefaultTableFields() {
   return DEFAULT_TABLE_FIELDS.map((field) => ({ ...field }));
 }
 
+function shouldUseBlankFieldConfig(formId = DEFAULT_FORM_ID) {
+  return normalizeFormId(formId) !== DEFAULT_FORM_ID;
+}
+
 function loadLocalTableFields(formId = DEFAULT_FORM_ID): TableFieldDefinition[] {
   const filePath = resolveLocalFieldConfigPath(formId);
   if (!fs.existsSync(filePath)) {
-    return cloneDefaultTableFields();
+    return shouldUseBlankFieldConfig(formId) ? [] : cloneDefaultTableFields();
   }
 
   try {
     const payload = JSON.parse(fs.readFileSync(filePath, "utf8")) as { tableFields?: unknown };
-    return normalizeTableFields(payload.tableFields);
+    return normalizeTableFields(payload.tableFields, {
+      preserveEmpty: shouldUseBlankFieldConfig(formId),
+      appendMissingBuiltIns: !shouldUseBlankFieldConfig(formId),
+    });
   } catch {
-    return cloneDefaultTableFields();
+    return shouldUseBlankFieldConfig(formId) ? [] : cloneDefaultTableFields();
   }
 }
 
@@ -68,19 +75,26 @@ export async function loadTableFields(formId = DEFAULT_FORM_ID): Promise<TableFi
       .single();
 
     if (error || !data) {
-      return cloneDefaultTableFields();
+      return shouldUseBlankFieldConfig(normalizedFormId) ? [] : cloneDefaultTableFields();
     }
 
     const row = data.data as { tableFields?: unknown };
-    return normalizeTableFields(row.tableFields);
+    return normalizeTableFields(row.tableFields, {
+      preserveEmpty: shouldUseBlankFieldConfig(normalizedFormId),
+      appendMissingBuiltIns: !shouldUseBlankFieldConfig(normalizedFormId),
+    });
   } catch {
-    return cloneDefaultTableFields();
+    return shouldUseBlankFieldConfig(normalizedFormId) ? [] : cloneDefaultTableFields();
   }
 }
 
 export async function saveTableFields(fields: TableFieldDefinition[], formId = DEFAULT_FORM_ID) {
-  const normalized = normalizeTableFields(fields);
   const normalizedFormId = normalizeFormId(formId);
+  const blankFieldConfig = shouldUseBlankFieldConfig(normalizedFormId);
+  const normalized = normalizeTableFields(fields, {
+    preserveEmpty: blankFieldConfig,
+    appendMissingBuiltIns: !blankFieldConfig,
+  });
   const storageKey =
     normalizedFormId === DEFAULT_FORM_ID ? GLOBAL_RULES_KEY : getFormGlobalRulesStorageKey(normalizedFormId);
   const admin = getSupabaseAdmin();

@@ -1,6 +1,6 @@
 import { notFound } from "next/navigation";
 
-import { FormSetupClient } from "@/components/FormSetupClient";
+import { FormSetupFlow } from "@/components/FormSetupFlow";
 import { getFormById } from "@/lib/forms-store";
 
 type PageProps = {
@@ -14,5 +14,5 @@ export default async function FormSetupPage({ params }: PageProps) {
     notFound();
   }
 
-  return <FormSetupClient initialForm={form} />;
+  return <FormSetupFlow initialForm={form} />;
 }

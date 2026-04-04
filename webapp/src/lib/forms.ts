@@ -190,10 +190,7 @@ export function getFormImageStoragePath(formId: string, imageName: string) {
 }
 
 export function buildBlankTableFields(): TableFieldDefinition[] {
-  return DEFAULT_TABLE_FIELDS.map((field) => ({
-    ...field,
-    active: false,
-  }));
+  return [];
 }
 
 export function cloneTableFields(fields: TableFieldDefinition[]) {
@@ -254,15 +251,6 @@ export function buildTableFieldsFromTemplateColumns(columns: TemplateColumnInput
       builtIn: false,
     });
     usedIds.add(id);
-  }
-
-  for (const field of DEFAULT_TABLE_FIELDS) {
-    if (!usedIds.has(field.id)) {
-      fields.push({
-        ...field,
-        active: false,
-      });
-    }
   }
 
   return fields;

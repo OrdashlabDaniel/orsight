@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 import { getAuthUserOrSkip } from "@/lib/auth-server";
 import { getFormIdFromRequest } from "@/lib/form-request";
+import { DEFAULT_FORM_ID, normalizeFormId } from "@/lib/forms";
 import { normalizeTableFields } from "@/lib/table-fields";
 import { loadTableFields, saveTableFields } from "@/lib/table-fields-store";
 
@@ -32,7 +33,11 @@ export async function POST(request: Request) {
 
     const formId = getFormIdFromRequest(request);
     const payload = (await request.json()) as { tableFields?: unknown };
-    const tableFields = normalizeTableFields(payload.tableFields);
+    const normalizedFormId = normalizeFormId(formId);
+    const tableFields = normalizeTableFields(payload.tableFields, {
+      preserveEmpty: normalizedFormId !== DEFAULT_FORM_ID,
+      appendMissingBuiltIns: normalizedFormId === DEFAULT_FORM_ID,
+    });
     const saved = await saveTableFields(tableFields, formId);
     return NextResponse.json({ ok: true, tableFields: saved });
   } catch (error) {

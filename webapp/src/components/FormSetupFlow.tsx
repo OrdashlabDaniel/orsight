@@ -16,7 +16,6 @@ import {
   type WorkbenchAnnotationBox,
 } from "@/components/TrainingAnnotationWorkbench";
 import {
-  DEFAULT_FORM_ID,
   buildFormFillHref,
   buildFormTrainingHref,
   buildTableFieldsFromTemplateColumns,
@@ -102,9 +101,7 @@ type TemplateFromImageResponse = {
 type DropZoneKey = "source-image" | "template-excel" | "template-image";
 
 function withFormId(formId: string, path: string) {
-  return formId === DEFAULT_FORM_ID
-    ? path
-    : `${path}${path.includes("?") ? "&" : "?"}formId=${encodeURIComponent(formId)}`;
+  return `${path}${path.includes("?") ? "&" : "?"}formId=${encodeURIComponent(formId)}`;
 }
 
 function buildTrainingImageRawUrl(formId: string, imageName: string) {
@@ -120,7 +117,7 @@ function formatTemplateSource(source?: FormDefinition["templateSource"]) {
     case "image":
       return "模板图片识别";
     case "copied":
-      return "复制自已有填表";
+      return "克隆自已有填表";
     default:
       return "空白模板";
   }
@@ -254,7 +251,7 @@ function UploadDropArea({
   );
 }
 
-export function FormSetupClient({ initialForm }: { initialForm: FormDefinition }) {
+export function FormSetupFlow({ initialForm }: { initialForm: FormDefinition }) {
   const router = useRouter();
   const formId = initialForm.id;
   const apiPathBuilder = useCallback((path: string) => withFormId(formId, path), [formId]);
@@ -289,10 +286,7 @@ export function FormSetupClient({ initialForm }: { initialForm: FormDefinition }
   uploadsRef.current = uploads;
 
   const activeTableFields = useMemo(() => getActiveTableFields(tableFields), [tableFields]);
-  const deletedFieldDrafts = useMemo(
-    () => fieldDrafts.filter((field) => !field.active),
-    [fieldDrafts],
-  );
+  const deletedFieldDrafts = useMemo(() => fieldDrafts.filter((field) => !field.active), [fieldDrafts]);
 
   useEffect(() => {
     return () => {
@@ -399,18 +393,20 @@ export function FormSetupClient({ initialForm }: { initialForm: FormDefinition }
         try {
           const response = await fetch(apiPathBuilder(`/api/training/image?imageName=${encodeURIComponent(imageName)}`));
           const payload = (await response.json()) as { dataUrl?: string; error?: string };
-          if (!response.ok || !payload.dataUrl || cancelled) {
+          const nextDataUrl = payload.dataUrl;
+          if (!response.ok || !nextDataUrl || cancelled) {
             continue;
           }
+          const resolvedDataUrl: string = nextDataUrl;
           setTrainingThumbnailMap((current) => {
             const existing = current[imageName];
-            if (existing === payload.dataUrl) {
+            if (existing === resolvedDataUrl) {
               return current;
             }
             if (existing && !existing.includes("&raw=1")) {
               return current;
             }
-            return { ...current, [imageName]: payload.dataUrl! };
+            return { ...current, [imageName]: resolvedDataUrl };
           });
         } catch {
           // Keep raw fallback URL when thumbnail fetch fails.
@@ -454,7 +450,7 @@ export function FormSetupClient({ initialForm }: { initialForm: FormDefinition }
       }
       const key = label.toLocaleLowerCase("zh-CN");
       if (seenLabels.has(key)) {
-        throw new Error(`表格项目「${label}」与「${seenLabels.get(key)}」重名，请调整后再保存。`);
+        throw new Error(`表格项目“${label}”与“${seenLabels.get(key)}”重名，请调整后再保存。`);
       }
       seenLabels.set(key, label);
     }
@@ -482,6 +478,7 @@ export function FormSetupClient({ initialForm }: { initialForm: FormDefinition }
     if (!response.ok) {
       throw new Error(payload.error || "保存表格模板失败。");
     }
+
     const saved = normalizeTableFields(payload.tableFields || normalized, {
       preserveEmpty: true,
       appendMissingBuiltIns: false,
@@ -714,20 +711,15 @@ export function FormSetupClient({ initialForm }: { initialForm: FormDefinition }
     try {
       const nextUploads = await Promise.all(
         Array.from(fileList).map(async (file, index) => {
-          const buffer = await file.arrayBuffer();
-          const clonedFile = new File([buffer], file.name, {
-            type: file.type,
-            lastModified: file.lastModified,
-          });
+          const previewUrl = URL.createObjectURL(file);
           return {
-            id: `${clonedFile.name}-${clonedFile.lastModified}-${index}-${Date.now()}`,
-            file: clonedFile,
-            previewUrl: URL.createObjectURL(clonedFile),
+            id: `${Date.now()}-${index}-${Math.random().toString(36).slice(2, 8)}`,
+            file,
+            previewUrl,
           };
         }),
       );
-
-      setUploads((current) => [...current, ...nextUploads]);
+      setUploads((current) => [...nextUploads, ...current]);
       setSelectedUploadId(nextUploads[0]?.id || null);
       setNoticeMessage(`已加入 ${nextUploads.length} 张数据来源图片，并自动进入标注。`);
       setErrorMessage("");
@@ -795,7 +787,7 @@ export function FormSetupClient({ initialForm }: { initialForm: FormDefinition }
           </div>
           <h1 className="text-3xl font-semibold tracking-tight">{form.name} · 新建填表</h1>
           <p className="mt-2 text-sm text-slate-600">
-            每个填表都会拥有自己的表格模板、训练池和专属工作规则。先搭建模板，再上传数据来源图片标注训练，最后完成新建进入填表模式。
+            每个填表都有自己的表格模板、训练池和专属工作规则。先准备模板，再上传数据来源图片标注训练，最后完成新建进入填表模式。
           </p>
           {noticeMessage ? (
             <div className="mt-4 rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
@@ -808,224 +800,28 @@ export function FormSetupClient({ initialForm }: { initialForm: FormDefinition }
             </div>
           ) : null}
         </header>
-
         <section className="grid gap-4 xl:grid-cols-[420px_minmax(0,1.2fr)]">
-          <div className="order-2 rounded-3xl border border-slate-200 bg-white p-6 shadow-sm xl:order-2">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <h2 className="text-xl font-semibold">1. 配置表格模板</h2>
-                <p className="mt-1 text-sm text-slate-500">
-                  可以导入 Excel、上传模板截图给 AI 识别，或者手动逐项搭建表格项目。
-                </p>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  onClick={() => excelInputRef.current?.click()}
-                  disabled={isImportingExcel}
-                  className="rounded-xl border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
-                >
-                  {isImportingExcel ? "导入中..." : "上传 Excel 模板"}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => templateImageInputRef.current?.click()}
-                  disabled={isImportingImage}
-                  className="rounded-xl border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
-                >
-                  {isImportingImage ? "识别中..." : "上传图片识别模板"}
-                </button>
-              </div>
-            </div>
-
-            <input
-              ref={excelInputRef}
-              type="file"
-              accept=".xlsx,.xls,.csv"
-              className="hidden"
-              onChange={(event) => void handleExcelTemplateSelection(event.target.files)}
-            />
-            <input
-              ref={templateImageInputRef}
-              type="file"
-              accept="image/*"
-              className="hidden"
-              onChange={(event) => void handleTemplateImageSelection(event.target.files)}
-            />
-
-            <div className="mt-5 rounded-3xl border border-slate-200 bg-slate-50 p-4">
-              <div className="text-sm font-medium text-slate-700">空白表格区域预览</div>
-              <div className="mt-1 text-xs text-slate-500">已启用 {activeTableFields.length} 个表格项目。</div>
-              {activeTableFields.length ? (
-                <div className="mt-4 overflow-x-auto rounded-2xl border border-slate-200 bg-white">
-                  <div
-                    className="grid min-w-[760px] bg-slate-900 text-sm font-medium text-white"
-                    style={{ gridTemplateColumns: `repeat(${activeTableFields.length}, minmax(120px, 1fr))` }}
-                  >
-                    {activeTableFields.map((field) => (
-                      <div key={field.id} className="border-r border-slate-800 px-3 py-3 last:border-r-0">
-                        {field.label}
-                      </div>
-                    ))}
-                  </div>
-                  <div
-                    className="grid min-w-[760px] text-sm text-slate-400"
-                    style={{ gridTemplateColumns: `repeat(${activeTableFields.length}, minmax(120px, 1fr))` }}
-                  >
-                    {activeTableFields.map((field) => (
-                      <div key={field.id} className="border-r border-slate-100 px-3 py-4 last:border-r-0">
-                        {field.type === "number" ? "0" : "示例值"}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              ) : (
-                <div className="mt-4 rounded-2xl border border-dashed border-slate-300 bg-white px-4 py-8 text-center text-sm text-slate-400">
-                  这里还是空白模板。先导入模板，或者在下面手动增加表格项目。
-                </div>
-              )}
-            </div>
-
-            <div className="mt-5 rounded-3xl border border-slate-200 p-4">
-              <div className="mb-3 text-sm font-medium text-slate-700">手动编辑表格项目</div>
-              <div className="flex flex-wrap gap-2">
-                <input
-                  type="text"
-                  value={newFieldName}
-                  onChange={(event) => setNewFieldName(event.target.value.slice(0, 40))}
-                  placeholder="输入新的表格项目名称"
-                  className="min-w-0 flex-1 rounded-xl border border-slate-300 px-3 py-2 text-sm outline-none focus:border-blue-500"
-                />
-                <select
-                  value={newFieldType}
-                  onChange={(event) => setNewFieldType(event.target.value as TableFieldType)}
-                  className="rounded-xl border border-slate-300 px-3 py-2 text-sm outline-none focus:border-blue-500"
-                >
-                  <option value="text">文本项目</option>
-                  <option value="number">数字项目</option>
-                </select>
-                <button
-                  type="button"
-                  onClick={handleAddField}
-                  className="rounded-xl bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500"
-                >
-                  新增项目
-                </button>
-              </div>
-
-              <div className="mt-4 space-y-3">
-                {fieldDrafts.filter((field) => field.active).map((field, index, activeFields) => (
-                  <div key={field.id} className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <input
-                        type="text"
-                        value={field.label}
-                        onChange={(event) =>
-                          updateFieldDraft(field.id, (current) => ({
-                            ...current,
-                            label: event.target.value.slice(0, 40),
-                          }))
-                        }
-                        className="min-w-0 flex-1 rounded-xl border border-slate-300 px-3 py-2 text-sm outline-none focus:border-blue-500"
-                      />
-                      <span className="rounded-full bg-slate-200 px-2 py-1 text-[11px] text-slate-600">
-                        {field.type === "number" ? "数字" : "文本"}
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => moveFieldDraft(field.id, -1)}
-                        disabled={index === 0}
-                        className="rounded-xl border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-white disabled:opacity-40"
-                      >
-                        上移
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => moveFieldDraft(field.id, 1)}
-                        disabled={index === activeFields.length - 1}
-                        className="rounded-xl border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-white disabled:opacity-40"
-                      >
-                        下移
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleDeleteField(field)}
-                        className="rounded-xl border border-rose-300 bg-rose-50 px-3 py-2 text-sm font-medium text-rose-700 hover:bg-rose-100"
-                      >
-                        删除
-                      </button>
-                    </div>
-                  </div>
-                ))}
-                {deletedFieldDrafts.length ? (
-                  <div className="rounded-2xl border border-slate-200 p-3">
-                    <div className="mb-2 text-sm font-medium text-slate-700">已删除项目</div>
-                    <div className="space-y-2">
-                      {deletedFieldDrafts.map((field) => (
-                        <div
-                          key={field.id}
-                          className="flex items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-3 py-3"
-                        >
-                          <div>
-                            <div className="text-sm font-medium text-slate-700">{field.label}</div>
-                            <div className="mt-1 text-xs text-slate-500">
-                              {field.type === "number" ? "数字项目" : "文本项目"}
-                            </div>
-                          </div>
-                          <button
-                            type="button"
-                            onClick={() => handleRestoreField(field)}
-                            className="rounded-xl border border-emerald-300 bg-emerald-50 px-3 py-2 text-sm font-medium text-emerald-700 hover:bg-emerald-100"
-                          >
-                            恢复
-                          </button>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                ) : null}
-              </div>
-
-              <button
-                type="button"
-                onClick={() => void handleSaveManualFields()}
-                disabled={isSavingFields}
-                className="mt-4 w-full rounded-2xl bg-slate-900 px-4 py-3 text-sm font-medium text-white hover:bg-slate-800 disabled:bg-slate-400"
-              >
-                {isSavingFields ? "保存中..." : "保存模板配置"}
-              </button>
-            </div>
-          </div>
-
-          <div className="order-1 space-y-4 xl:order-1">
+          <div className="space-y-4">
             <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
               <h2 className="text-xl font-semibold">2. 数据来源图片与训练</h2>
               <p className="mt-2 text-sm text-slate-500">
-                模板配置好后，把真实数据来源图片上传到这里。上传后会自动打开标注工作台。
+                先把模板配好，再把真实数据来源图片拖拽到这里。上传后会自动打开标注工作台。
               </p>
-              <label
-                className={`mt-4 flex cursor-pointer flex-col items-center justify-center rounded-3xl border border-dashed px-6 py-10 text-center transition ${
-                  activeTableFields.length
-                    ? "border-slate-300 bg-slate-50 hover:border-blue-400 hover:bg-blue-50/40"
-                    : "cursor-not-allowed border-slate-200 bg-slate-100 text-slate-400"
-                }`}
-              >
-                <input
-                  ref={sourceImageInputRef}
-                  type="file"
+
+              <div className="mt-4">
+                <UploadDropArea
                   accept="image/*"
                   multiple
                   disabled={!activeTableFields.length}
-                  className="hidden"
-                  onChange={(event) => void handleSourceFiles(event.target.files)}
+                  active={activeDropTarget === "source-image"}
+                  title={activeTableFields.length ? "拖拽或点击上传数据来源图片" : "请先配置表格模板"}
+                  hint={activeTableFields.length ? "支持批量上传，上传后自动进入标注。" : "模板为空时不能开始标注。"}
+                  helper={activeTableFields.length ? "支持 JPG / PNG / WEBP。" : undefined}
+                  inputRef={sourceImageInputRef}
+                  onFiles={handleSourceFiles}
+                  onHoverChange={(active) => setActiveDropTarget(active ? "source-image" : null)}
                 />
-                <div className="text-base font-medium">
-                  {activeTableFields.length ? "点击上传数据来源图片" : "请先配置表格模板"}
-                </div>
-                <div className="mt-2 text-sm text-slate-500">
-                  {activeTableFields.length ? "支持批量上传，上传后自动跳转标注。" : "模板为空时无法开始标注。"}
-                </div>
-              </label>
+              </div>
 
               <div className="mt-4 space-y-3">
                 {uploads.length ? (
@@ -1113,6 +909,193 @@ export function FormSetupClient({ initialForm }: { initialForm: FormDefinition }
             >
               {isCompleting ? "完成中..." : form.ready ? "保存并进入填表模式" : "完成新建并进入填表模式"}
             </button>
+          </div>
+
+          <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="text-xl font-semibold">1. 配置表格模板</h2>
+                <p className="mt-1 text-sm text-slate-500">
+                  你可以拖拽 Excel 模板、拖拽模板截图让 AI 识别，或者手动一个一个新增表格项目。
+                </p>
+              </div>
+              <div className="text-xs text-slate-400">所有上传区都支持直接拖拽丢入。</div>
+            </div>
+
+            <div className="mt-5 grid gap-3 md:grid-cols-2">
+              <UploadDropArea
+                accept=".xlsx,.xls,.csv"
+                disabled={isImportingExcel}
+                active={activeDropTarget === "template-excel"}
+                title={isImportingExcel ? "正在导入 Excel 模板..." : "拖拽或点击导入 Excel 模板"}
+                hint="系统会自动识别表头并生成模板字段。"
+                helper="支持 .xlsx / .xls / .csv"
+                inputRef={excelInputRef}
+                onFiles={handleExcelTemplateSelection}
+                onHoverChange={(active) => setActiveDropTarget(active ? "template-excel" : null)}
+              />
+              <UploadDropArea
+                accept="image/*"
+                disabled={isImportingImage}
+                active={activeDropTarget === "template-image"}
+                title={isImportingImage ? "正在识别模板截图..." : "拖拽或点击上传模板截图"}
+                hint="把整张模板图识别成标准表格字段。"
+                helper="适合网页表格截图、完整模板截图。"
+                inputRef={templateImageInputRef}
+                onFiles={handleTemplateImageSelection}
+                onHoverChange={(active) => setActiveDropTarget(active ? "template-image" : null)}
+              />
+            </div>
+
+            <div className="mt-5 rounded-3xl border border-slate-200 bg-slate-50 p-4">
+              <div className="text-sm font-medium text-slate-700">空白模板区域预览</div>
+              <div className="mt-1 text-xs text-slate-500">当前启用 {activeTableFields.length} 个表格项目。</div>
+              {activeTableFields.length ? (
+                <div className="mt-4 overflow-x-auto rounded-2xl border border-slate-200 bg-white">
+                  <div
+                    className="grid min-w-[760px] bg-slate-900 text-sm font-medium text-white"
+                    style={{ gridTemplateColumns: `repeat(${activeTableFields.length}, minmax(120px, 1fr))` }}
+                  >
+                    {activeTableFields.map((field) => (
+                      <div key={field.id} className="border-r border-slate-800 px-3 py-3 last:border-r-0">
+                        {field.label}
+                      </div>
+                    ))}
+                  </div>
+                  <div
+                    className="grid min-w-[760px] text-sm text-slate-400"
+                    style={{ gridTemplateColumns: `repeat(${activeTableFields.length}, minmax(120px, 1fr))` }}
+                  >
+                    {activeTableFields.map((field) => (
+                      <div key={field.id} className="border-r border-slate-100 px-3 py-4 last:border-r-0">
+                        {field.type === "number" ? "0" : "示例值"}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <div className="mt-4 rounded-2xl border border-dashed border-slate-300 bg-white px-4 py-8 text-center text-sm text-slate-400">
+                  这是一个完全空白的新模板。没有旧字段，也没有默认字段，你可以从零开始搭建。
+                </div>
+              )}
+            </div>
+
+            <div className="mt-5 rounded-3xl border border-slate-200 p-4">
+              <div className="mb-3 text-sm font-medium text-slate-700">手动编辑表格项目</div>
+              <div className="flex flex-wrap gap-2">
+                <input
+                  type="text"
+                  value={newFieldName}
+                  onChange={(event) => setNewFieldName(event.target.value.slice(0, 40))}
+                  placeholder="输入新的表格项目名称"
+                  className="min-w-0 flex-1 rounded-xl border border-slate-300 px-3 py-2 text-sm outline-none focus:border-blue-500"
+                />
+                <select
+                  value={newFieldType}
+                  onChange={(event) => setNewFieldType(event.target.value as TableFieldType)}
+                  className="rounded-xl border border-slate-300 px-3 py-2 text-sm outline-none focus:border-blue-500"
+                >
+                  <option value="text">文本项目</option>
+                  <option value="number">数字项目</option>
+                </select>
+                <button
+                  type="button"
+                  onClick={handleAddField}
+                  className="rounded-xl bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500"
+                >
+                  新增项目
+                </button>
+              </div>
+
+              <div className="mt-4 space-y-3">
+                {fieldDrafts.filter((field) => field.active).length ? (
+                  fieldDrafts.filter((field) => field.active).map((field, index, visibleFields) => (
+                    <div key={field.id} className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <input
+                          type="text"
+                          value={field.label}
+                          onChange={(event) =>
+                            updateFieldDraft(field.id, (current) => ({
+                              ...current,
+                              label: event.target.value.slice(0, 40),
+                            }))
+                          }
+                          className="min-w-0 flex-1 rounded-xl border border-slate-300 px-3 py-2 text-sm outline-none focus:border-blue-500"
+                        />
+                        <span className="rounded-full bg-slate-200 px-2 py-1 text-[11px] text-slate-600">
+                          {field.type === "number" ? "数字" : "文本"}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => moveFieldDraft(field.id, -1)}
+                          disabled={index === 0}
+                          className="rounded-xl border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-white disabled:opacity-40"
+                        >
+                          上移
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => moveFieldDraft(field.id, 1)}
+                          disabled={index === visibleFields.length - 1}
+                          className="rounded-xl border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-white disabled:opacity-40"
+                        >
+                          下移
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteField(field)}
+                          className="rounded-xl border border-rose-300 bg-rose-50 px-3 py-2 text-sm font-medium text-rose-700 hover:bg-rose-100"
+                        >
+                          删除
+                        </button>
+                      </div>
+                    </div>
+                  ))
+                ) : (
+                  <div className="rounded-2xl border border-dashed border-slate-200 px-4 py-6 text-center text-sm text-slate-400">
+                    当前还没有任何表格项目。你可以直接拖入模板，也可以在这里手动从零新增。
+                  </div>
+                )}
+
+                {deletedFieldDrafts.length ? (
+                  <div className="rounded-2xl border border-slate-200 p-3">
+                    <div className="mb-2 text-sm font-medium text-slate-700">已删除项目</div>
+                    <div className="space-y-2">
+                      {deletedFieldDrafts.map((field) => (
+                        <div
+                          key={field.id}
+                          className="flex items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-3 py-3"
+                        >
+                          <div>
+                            <div className="text-sm font-medium text-slate-700">{field.label}</div>
+                            <div className="mt-1 text-xs text-slate-500">
+                              {field.type === "number" ? "数字项目" : "文本项目"}
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => handleRestoreField(field)}
+                            className="rounded-xl border border-emerald-300 bg-emerald-50 px-3 py-2 text-sm font-medium text-emerald-700 hover:bg-emerald-100"
+                          >
+                            恢复
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+
+              <button
+                type="button"
+                onClick={() => void handleSaveManualFields()}
+                disabled={isSavingFields}
+                className="mt-4 w-full rounded-2xl bg-slate-900 px-4 py-3 text-sm font-medium text-white hover:bg-slate-800 disabled:bg-slate-400"
+              >
+                {isSavingFields ? "保存中..." : "保存模板配置"}
+              </button>
+            </div>
           </div>
         </section>
 

@@ -1,7 +1,7 @@
-import FormsPoolClient from "@/components/FormsPoolClient";
+import FormsPoolBoard from "@/components/FormsPoolBoard";
 
 export default function FormsPoolPage() {
-  return <FormsPoolClient />;
+  return <FormsPoolBoard />;
 }
 
 /*
