@@ -278,6 +278,7 @@ export type TrainingAnnotationWorkbenchProps = {
   open: boolean;
   imageName: string;
   imageSrc: string;
+  apiPathBuilder?: (path: string) => string;
   fieldDefinitions?: TableFieldDefinition[];
   initialSeed: AnnotationWorkbenchSeed;
   initialAnnotationMode?: AnnotationMode;
@@ -301,6 +302,7 @@ export function TrainingAnnotationWorkbench({
   open,
   imageName,
   imageSrc,
+  apiPathBuilder,
   fieldDefinitions,
   initialSeed,
   initialAnnotationMode = "record",
@@ -355,6 +357,7 @@ export function TrainingAnnotationWorkbench({
     [parsedTableFieldValues, activeFieldDefinitions],
   );
   const canUndoAnnotationBoxes = undoStack.length > 0;
+  const buildApiPath = useCallback((path: string) => (apiPathBuilder ? apiPathBuilder(path) : path), [apiPathBuilder]);
 
   const annotationCanvasRef = useRef<HTMLDivElement | null>(null);
   const imageRef = useRef<HTMLImageElement | null>(null);
@@ -823,7 +826,7 @@ export function TrainingAnnotationWorkbench({
     setIsPreviewFillLoading(true);
     try {
       const imageDataUrl = await imageSourceToDataUrl(imageSrc);
-      const res = await fetch("/api/training/preview-fill", {
+      const res = await fetch(buildApiPath("/api/training/preview-fill"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -941,7 +944,7 @@ export function TrainingAnnotationWorkbench({
       const tableFieldValues = annotationMode === "table" ? parsedTableFieldValues : undefined;
       const finalSeed = annotationMode === "table" ? tableModeSeed : manualToFinalSeed(manualRecord);
       const imageDataUrl = await imageSourceToDataUrl(imageSrc);
-      const response = await fetch("/api/training/save", {
+      const response = await fetch(buildApiPath("/api/training/save"), {
         method: "POST",
         headers: {
           "Content-Type": "application/json",

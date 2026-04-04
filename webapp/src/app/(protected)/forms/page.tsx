@@ -1,9 +1,10 @@
- "use client";
+import FormsPoolClient from "@/components/FormsPoolClient";
 
-import Link from "next/link";
-import { useEffect, useState } from "react";
-import { createClient } from "@/lib/supabase/browser";
-import { isSupabaseAuthEnabled } from "@/lib/supabase";
+export default function FormsPoolPage() {
+  return <FormsPoolClient />;
+}
+
+/*
 
 type FormCard = {
   id: string;
@@ -430,3 +431,4 @@ export default function FormsPoolPage() {
     </main>
   );
 }
+*/

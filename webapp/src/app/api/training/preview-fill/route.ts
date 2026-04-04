@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import sharp from "sharp";
 
 import { getAuthUserOrSkip } from "@/lib/auth-server";
+import { getFormIdFromRequest } from "@/lib/form-request";
 import type { FieldAggregation, TrainingField } from "@/lib/training";
 import {
   DEFAULT_TABLE_FIELDS,
@@ -403,6 +404,7 @@ export async function POST(request: Request) {
     if (!skipAuth && !user) {
       return NextResponse.json({ error: "请先登录后再试。" }, { status: 401 });
     }
+    const formId = getFormIdFromRequest(request);
     if (!OPENAI_API_KEY) {
       return NextResponse.json({ error: "服务端缺少 OPENAI_API_KEY。" }, { status: 503 });
     }
@@ -415,7 +417,7 @@ export async function POST(request: Request) {
 
     const requestedFields = Array.isArray(body.tableFields)
       ? normalizeTableFields(body.tableFields)
-      : await loadTableFields();
+      : await loadTableFields(formId);
     const activeTableFields = getActiveTableFields(requestedFields.length ? requestedFields : DEFAULT_TABLE_FIELDS);
     const fieldLabels = {
       ...DEFAULT_FIELD_LABELS,

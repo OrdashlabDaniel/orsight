@@ -2,7 +2,8 @@
 
 import Image from "next/image";
 import Link from "next/link";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useSearchParams } from "next/navigation";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   TrainingAnnotationWorkbench,
@@ -21,6 +22,7 @@ import {
   TABLE_FIELDS_SYNC_STORAGE_KEY,
   type TableFieldDefinition,
 } from "@/lib/table-fields";
+import { DEFAULT_FORM_ID, buildFormFillHref, normalizeFormId } from "@/lib/forms";
 
 function formatTurnForChatApi(turn: AgentThreadTurn): string {
   let s = turn.content;
@@ -77,7 +79,19 @@ type TrainingStatusResponse = {
   items: TrainingStatusItem[];
 };
 
-export default function TrainingMode() {
+function TrainingModeContent() {
+  const searchParams = useSearchParams();
+  const currentFormId = useMemo(
+    () => normalizeFormId(searchParams.get("formId") || DEFAULT_FORM_ID),
+    [searchParams],
+  );
+  const withFormId = useMemo(
+    () => (path: string) =>
+      currentFormId === DEFAULT_FORM_ID
+        ? path
+        : `${path}${path.includes("?") ? "&" : "?"}formId=${encodeURIComponent(currentFormId)}`,
+    [currentFormId],
+  );
   const [setupField, setSetupField] = useState("");
   const [tableFields, setTableFields] = useState<TableFieldDefinition[]>(DEFAULT_TABLE_FIELDS);
   const [uploads, setUploads] = useState<UploadItem[]>([]);
@@ -102,8 +116,8 @@ export default function TrainingMode() {
   } | null>(null);
 
   const goToFillMode = useCallback(() => {
-    window.location.assign("/");
-  }, []);
+    window.location.assign(buildFormFillHref(currentFormId));
+  }, [currentFormId]);
   const removeUploadAfterSaveRef = useRef<string | null>(null);
 
   const [isSavingTraining, setIsSavingTraining] = useState(false);
@@ -128,11 +142,11 @@ export default function TrainingMode() {
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     setSetupField(params.get("setupField") || "");
-  }, []);
+  }, [searchParams]);
 
   useEffect(() => {
     void loadTableFieldConfig();
-  }, []);
+  }, [currentFormId]);
 
   useEffect(() => {
     function handleTableFieldsChanged() {
@@ -168,7 +182,7 @@ export default function TrainingMode() {
 
   useEffect(() => {
     void loadGlobalRules();
-  }, []);
+  }, [currentFormId]);
 
   useEffect(() => {
     const imageNames = trainingStatus?.items.map((item) => item.imageName) || [];
@@ -202,7 +216,7 @@ export default function TrainingMode() {
         }
 
         try {
-          const response = await fetch(`/api/training/image?imageName=${encodeURIComponent(imageName)}`);
+          const response = await fetch(withFormId(`/api/training/image?imageName=${encodeURIComponent(imageName)}`));
           const payload = (await response.json()) as { dataUrl?: string; error?: string };
           if (!response.ok || !payload.dataUrl || cancelled) {
             continue;
@@ -230,7 +244,7 @@ export default function TrainingMode() {
 
   async function loadTableFieldConfig() {
     try {
-      const res = await fetch("/api/table-fields");
+      const res = await fetch(withFormId("/api/table-fields"));
       const data = (await res.json()) as { error?: string; tableFields?: TableFieldDefinition[] };
       if (!res.ok) {
         throw new Error(data.error || "表格项目配置读取失败。");
@@ -243,7 +257,7 @@ export default function TrainingMode() {
 
   async function loadGlobalRules() {
     try {
-      const res = await fetch("/api/training/rules");
+      const res = await fetch(withFormId("/api/training/rules"));
       if (res.ok) {
         const data = await res.json();
         setGlobalRules(data);
@@ -256,7 +270,7 @@ export default function TrainingMode() {
   async function saveGlobalRules() {
     setIsSavingRules(true);
     try {
-      const res = await fetch("/api/training/rules", {
+      const res = await fetch(withFormId("/api/training/rules"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(globalRules),
@@ -290,6 +304,7 @@ export default function TrainingMode() {
     if (file.type.startsWith("image/")) {
       const fd = new FormData();
       fd.append("file", file);
+      fd.append("formId", currentFormId);
       const res = await fetch("/api/training/context-asset", { method: "POST", body: fd });
       const payload = (await res.json()) as { error?: string; imageName?: string; originalName?: string };
       if (!res.ok) {
@@ -350,7 +365,7 @@ export default function TrainingMode() {
       const thread = [...(globalRules.agentThread || []), userTurn];
       const forApi = thread.map((t) => ({ role: t.role, content: formatTurnForChatApi(t) }));
 
-      const res = await fetch("/api/training/guidance-chat", {
+      const res = await fetch(withFormId("/api/training/guidance-chat"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -393,7 +408,7 @@ export default function TrainingMode() {
 
       setIsSavingRules(true);
       try {
-        const saveRes = await fetch("/api/training/rules", {
+        const saveRes = await fetch(withFormId("/api/training/rules"), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(updated),
@@ -480,7 +495,7 @@ export default function TrainingMode() {
 
   async function loadTrainingStatus() {
     try {
-      const response = await fetch("/api/training/status");
+      const response = await fetch(withFormId("/api/training/status"));
       const payload = (await response.json()) as TrainingStatusResponse & { error?: string };
       if (!response.ok) {
         throw new Error(payload.error || "训练池状态读取失败。");
@@ -565,7 +580,7 @@ export default function TrainingMode() {
       return previewUrl;
     }
 
-    const response = await fetch(`/api/training/image?imageName=${encodeURIComponent(imageName)}`);
+      const response = await fetch(withFormId(`/api/training/image?imageName=${encodeURIComponent(imageName)}`));
     const payload = (await response.json()) as { dataUrl?: string; error?: string };
     if (!response.ok || !payload.dataUrl) {
       throw new Error(payload.error || "无法读取训练图片。");
@@ -574,7 +589,7 @@ export default function TrainingMode() {
   }
 
   function buildTrainingImageRawUrl(imageName: string) {
-    return `/api/training/image?imageName=${encodeURIComponent(imageName)}&raw=1`;
+    return withFormId(`/api/training/image?imageName=${encodeURIComponent(imageName)}&raw=1`);
   }
 
   function handleImageClick(upload: UploadItem) {
@@ -892,7 +907,7 @@ export default function TrainingMode() {
                         for (const upload of uploads) {
                           try {
                             const imageDataUrl = await imageSourceToDataUrl(upload.previewUrl);
-                            await fetch("/api/training/save", {
+                            await fetch(withFormId("/api/training/save"), {
                               method: "POST",
                               headers: { "Content-Type": "application/json" },
                               body: JSON.stringify({
@@ -1077,6 +1092,7 @@ export default function TrainingMode() {
             open
             imageName={annotationImageName}
             imageSrc={annotationImageSrc}
+            apiPathBuilder={withFormId}
             fieldDefinitions={activeTableFields}
             initialSeed={annotationDraft.seed}
             initialAnnotationMode={annotationDraft.annotationMode}
@@ -1101,5 +1117,13 @@ export default function TrainingMode() {
         ) : null}
       </div>
     </main>
+  );
+}
+
+export default function TrainingMode() {
+  return (
+    <Suspense fallback={<div className="min-h-screen bg-slate-100" />}>
+      <TrainingModeContent />
+    </Suspense>
   );
 }

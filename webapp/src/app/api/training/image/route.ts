@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { getAuthUserOrSkip } from "@/lib/auth-server";
+import { getFormIdFromRequest } from "@/lib/form-request";
 import { getTrainingImageDataUrl } from "@/lib/training";
 
 export async function GET(request: Request) {
@@ -12,12 +13,13 @@ export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const imageName = searchParams.get("imageName");
   const raw = searchParams.get("raw") === "1";
+  const formId = getFormIdFromRequest(request);
 
   if (!imageName) {
     return NextResponse.json({ error: "Missing imageName." }, { status: 400 });
   }
 
-  const dataUrl = await getTrainingImageDataUrl(imageName);
+  const dataUrl = await getTrainingImageDataUrl(imageName, formId);
   if (!dataUrl) {
     return NextResponse.json({ error: "Training image not found." }, { status: 404 });
   }

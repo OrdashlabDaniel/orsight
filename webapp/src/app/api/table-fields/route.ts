@@ -1,17 +1,19 @@
 import { NextResponse } from "next/server";
 
 import { getAuthUserOrSkip } from "@/lib/auth-server";
+import { getFormIdFromRequest } from "@/lib/form-request";
 import { normalizeTableFields } from "@/lib/table-fields";
 import { loadTableFields, saveTableFields } from "@/lib/table-fields-store";
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
     const { user, skipAuth } = await getAuthUserOrSkip();
     if (!skipAuth && !user) {
       return NextResponse.json({ error: "请先登录。" }, { status: 401 });
     }
 
-    const tableFields = await loadTableFields();
+    const formId = getFormIdFromRequest(request);
+    const tableFields = await loadTableFields(formId);
     return NextResponse.json({ tableFields });
   } catch (error) {
     return NextResponse.json(
@@ -28,9 +30,10 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "请先登录。" }, { status: 401 });
     }
 
+    const formId = getFormIdFromRequest(request);
     const payload = (await request.json()) as { tableFields?: unknown };
     const tableFields = normalizeTableFields(payload.tableFields);
-    const saved = await saveTableFields(tableFields);
+    const saved = await saveTableFields(tableFields, formId);
     return NextResponse.json({ ok: true, tableFields: saved });
   } catch (error) {
     return NextResponse.json(

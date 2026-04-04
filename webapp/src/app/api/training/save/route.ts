@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { getAuthUserOrSkip } from "@/lib/auth-server";
+import { getFormIdFromRequest } from "@/lib/form-request";
 import { getActiveTableFields, type TableFieldDefinition } from "@/lib/table-fields";
 import { loadTableFields } from "@/lib/table-fields-store";
 import {
@@ -228,6 +229,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "请先登录。" }, { status: 401 });
     }
 
+    const formId = getFormIdFromRequest(request);
     const payload = (await request.json()) as SaveTrainingPayload;
     const imageName = normalizeText(payload.imageName);
     const imageDataUrl = normalizeText(payload.imageDataUrl);
@@ -236,7 +238,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Missing imageName." }, { status: 400 });
     }
 
-    const tableFields = getActiveTableFields(await loadTableFields());
+    const tableFields = getActiveTableFields(await loadTableFields(formId));
     const activeFieldIds = new Set(tableFields.map((field) => field.id));
     const activeCustomFieldIds = new Set(tableFields.filter((field) => !field.builtIn).map((field) => field.id));
     const fieldMap = new Map(tableFields.map((field) => [field.id, field] as const));
@@ -289,11 +291,11 @@ export async function POST(request: Request) {
     };
 
     if (imageDataUrl) {
-      await saveTrainingImageDataUrl(imageName, imageDataUrl);
+      await saveTrainingImageDataUrl(imageName, imageDataUrl, formId);
     }
 
     // Only upsert the example to the database if it actually has some data (i.e. it's not just a raw image upload)
-    let nextExamples = await loadTrainingExamples();
+    let nextExamples = await loadTrainingExamples(formId);
     if (
       example.boxes?.length ||
       example.output.date ||
@@ -304,7 +306,7 @@ export async function POST(request: Request) {
       (example.output.customFieldValues && Object.keys(example.output.customFieldValues).length > 0) ||
       example.notes
     ) {
-      nextExamples = await upsertTrainingExample(example);
+      nextExamples = await upsertTrainingExample(example, formId);
     }
     return NextResponse.json({
       ok: true,

@@ -1,19 +1,18 @@
 import { notFound, redirect } from "next/navigation";
 
+import { buildFormFillHref, buildFormSetupHref } from "@/lib/forms";
+import { getFormById } from "@/lib/forms-store";
+
 type PageProps = {
   params: Promise<{ formId: string }>;
 };
 
 export default async function FormDetailPage({ params }: PageProps) {
   const { formId } = await params;
-  if (formId === "form-1") {
-    redirect("/");
-  }
-  if (formId === "form-2") {
-    redirect("/forms");
-  }
-  if (formId !== "form-1" && formId !== "form-2") {
+  const form = await getFormById(formId);
+  if (!form || form.deletedAt) {
     notFound();
   }
-  return null;
+
+  redirect(form.ready ? buildFormFillHref(form.id) : buildFormSetupHref(form.id));
 }
