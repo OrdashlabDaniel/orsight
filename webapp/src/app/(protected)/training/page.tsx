@@ -23,6 +23,11 @@ import {
   type TableFieldDefinition,
 } from "@/lib/table-fields";
 import { DEFAULT_FORM_ID, buildFormFillHref, normalizeFormId } from "@/lib/forms";
+import {
+  ensureImageDataUrlFromSource,
+  prepareVisualUpload,
+  SUPPORTED_VISUAL_UPLOAD_ACCEPT,
+} from "@/lib/client-visual-upload";
 
 function formatTurnForChatApi(turn: AgentThreadTurn): string {
   let s = turn.content;
@@ -193,17 +198,9 @@ function TrainingModeContent() {
     let cancelled = false;
     const pendingNames = imageNames.filter((imageName) => !trainingThumbnailMap[imageName]);
 
-    setTrainingThumbnailMap((current) => {
-      const next = Object.fromEntries(
-        Object.entries(current).filter(([imageName]) => imageNames.includes(imageName)),
-      );
-      for (const imageName of pendingNames) {
-        if (!next[imageName]) {
-          next[imageName] = buildTrainingImageRawUrl(imageName);
-        }
-      }
-      return next;
-    });
+    setTrainingThumbnailMap((current) =>
+      Object.fromEntries(Object.entries(current).filter(([imageName]) => imageNames.includes(imageName))),
+    );
 
     if (!pendingNames.length) {
       return;
@@ -221,15 +218,13 @@ function TrainingModeContent() {
           if (!response.ok || !payload.dataUrl || cancelled) {
             continue;
           }
+          const resolvedDataUrl = await ensureImageDataUrlFromSource(payload.dataUrl);
           setTrainingThumbnailMap((current) => {
             const existing = current[imageName];
-            if (existing === payload.dataUrl) {
+            if (existing === resolvedDataUrl || existing) {
               return current;
             }
-            if (existing && !existing.includes("&raw=1")) {
-              return current;
-            }
-            return { ...current, [imageName]: payload.dataUrl! };
+            return { ...current, [imageName]: resolvedDataUrl };
           });
         } catch {
           // Ignore thumbnail failures; clicking the card will still open the full image.
@@ -514,12 +509,11 @@ function TrainingModeContent() {
     try {
       const nextUploads = await Promise.all(
         Array.from(fileList).map(async (file, index) => {
-          const buffer = await file.arrayBuffer();
-          const clonedFile = new File([buffer], file.name, { type: file.type, lastModified: file.lastModified });
+          const prepared = await prepareVisualUpload(file);
           return {
-            id: `${clonedFile.name}-${clonedFile.lastModified}-${index}-${Date.now()}`,
-            file: clonedFile,
-            previewUrl: URL.createObjectURL(clonedFile),
+            id: `${prepared.file.name}-${prepared.file.lastModified}-${index}-${Date.now()}`,
+            file: prepared.file,
+            previewUrl: prepared.previewUrl,
           };
         })
       );
@@ -577,7 +571,7 @@ function TrainingModeContent() {
 
   async function resolveAnnotationImage(imageName: string, previewUrl?: string) {
     if (previewUrl) {
-      return previewUrl;
+      return await ensureImageDataUrlFromSource(previewUrl);
     }
 
       const response = await fetch(withFormId(`/api/training/image?imageName=${encodeURIComponent(imageName)}`));
@@ -585,7 +579,7 @@ function TrainingModeContent() {
     if (!response.ok || !payload.dataUrl) {
       throw new Error(payload.error || "无法读取训练图片。");
     }
-    return payload.dataUrl;
+    return await ensureImageDataUrlFromSource(payload.dataUrl);
   }
 
   function buildTrainingImageRawUrl(imageName: string) {
@@ -889,7 +883,13 @@ function TrainingModeContent() {
                   <span className="mt-1 text-xs text-slate-500">
                     {isDraggingFiles ? "松开鼠标即可上传图片" : "可一次选择多张，或直接 Ctrl+V 粘贴"}
                   </span>
-                  <input className="hidden" type="file" accept="image/*" multiple onChange={(event) => void handleFiles(event.target.files)} />
+                  <input
+                    className="hidden"
+                    type="file"
+                    accept={SUPPORTED_VISUAL_UPLOAD_ACCEPT}
+                    multiple
+                    onChange={(event) => void handleFiles(event.target.files)}
+                  />
                 </label>
 
                 <div className="flex flex-wrap gap-2">

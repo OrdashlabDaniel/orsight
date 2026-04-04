@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { DEFAULT_TABLE_FIELDS, isBuiltInFieldId, type TableFieldDefinition } from "@/lib/table-fields";
+import { ensureImageDataUrlFromSource } from "@/lib/client-visual-upload";
 
 /** 训练标注字段 key，与训练池 boxes 一致 */
 export type AnnotationField = string;
@@ -336,6 +337,7 @@ export function TrainingAnnotationWorkbench({
     sanitizeFieldAggregations(initialFieldAggregations, activeFieldIdSet),
   );
   const [annotationField, setAnnotationField] = useState<AnnotationField>(defaultFieldId);
+  const [resolvedImageSrc, setResolvedImageSrc] = useState("");
   const [annotationNotes, setAnnotationNotes] = useState(initialNotes ?? "人工标注用于训练池。");
   const [drawingState, setDrawingState] = useState<DrawingState | null>(null);
   const [isSavingTraining, setIsSavingTraining] = useState(false);
@@ -496,6 +498,33 @@ export function TrainingAnnotationWorkbench({
     ro.observe(el);
     return () => ro.disconnect();
   }, [open, bumpLayout]);
+
+  useEffect(() => {
+    if (!open || !imageSrc) {
+      setResolvedImageSrc("");
+      return;
+    }
+
+    let cancelled = false;
+    setResolvedImageSrc("");
+
+    void (async () => {
+      try {
+        const nextImageSrc = await ensureImageDataUrlFromSource(imageSrc);
+        if (!cancelled) {
+          setResolvedImageSrc(nextImageSrc);
+        }
+      } catch {
+        if (!cancelled) {
+          setResolvedImageSrc("");
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [open, imageSrc]);
 
   useEffect(() => {
     if (!open) {
@@ -819,13 +848,13 @@ export function TrainingAnnotationWorkbench({
   }
 
   async function previewFillFromAnnotations() {
-    if (!open || !imageSrc || !visibleAnnotationBoxes.length) {
+    if (!open || !resolvedImageSrc || !visibleAnnotationBoxes.length) {
       onError?.("\u8bf7\u5148\u5b8c\u6210\u6846\u9009\u5e76\u786e\u4fdd\u56fe\u7247\u5df2\u52a0\u8f7d\u3002");
       return;
     }
     setIsPreviewFillLoading(true);
     try {
-      const imageDataUrl = await imageSourceToDataUrl(imageSrc);
+      const imageDataUrl = await imageSourceToDataUrl(resolvedImageSrc);
       const res = await fetch(buildApiPath("/api/training/preview-fill"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -928,7 +957,7 @@ export function TrainingAnnotationWorkbench({
   }
 
   async function saveAnnotationToTrainingPool() {
-    if (!open || !imageName || !imageSrc) {
+    if (!open || !imageName || !resolvedImageSrc) {
       onError?.("\u5f53\u524d\u6ca1\u6709\u53ef\u4fdd\u5b58\u7684\u6807\u6ce8\u3002");
       return;
     }
@@ -943,7 +972,7 @@ export function TrainingAnnotationWorkbench({
     try {
       const tableFieldValues = annotationMode === "table" ? parsedTableFieldValues : undefined;
       const finalSeed = annotationMode === "table" ? tableModeSeed : manualToFinalSeed(manualRecord);
-      const imageDataUrl = await imageSourceToDataUrl(imageSrc);
+      const imageDataUrl = await imageSourceToDataUrl(resolvedImageSrc);
       const response = await fetch(buildApiPath("/api/training/save"), {
         method: "POST",
         headers: {
@@ -1099,11 +1128,11 @@ export function TrainingAnnotationWorkbench({
                 onTouchEnd={finishDrawingTouch}
                 onTouchCancel={() => setDrawingState(null)}
               >
-              {imageSrc ? (
+              {resolvedImageSrc ? (
                 // eslint-disable-next-line @next/next/no-img-element
                 <img
                   ref={imageRef}
-                  src={imageSrc}
+                  src={resolvedImageSrc}
                   alt={imageName}
                   draggable={false}
                   onLoad={bumpLayout}
@@ -1330,7 +1359,7 @@ export function TrainingAnnotationWorkbench({
                 type="button"
                 className="w-full rounded-xl border border-violet-300 bg-violet-50 px-4 py-3 text-sm font-medium text-violet-900 hover:bg-violet-100 disabled:cursor-not-allowed disabled:opacity-50"
                 onClick={() => void previewFillFromAnnotations()}
-                disabled={isPreviewFillLoading || isSavingTraining || !imageSrc || visibleAnnotationBoxes.length === 0}
+                disabled={isPreviewFillLoading || isSavingTraining || !resolvedImageSrc || visibleAnnotationBoxes.length === 0}
               >
                 {isPreviewFillLoading ? "试填识别中…" : "AI 试填预览（自动判断单条/完整表格）"}
               </button>

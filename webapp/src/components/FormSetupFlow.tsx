@@ -31,6 +31,11 @@ import {
   type TableFieldDefinition,
   type TableFieldType,
 } from "@/lib/table-fields";
+import {
+  ensureImageDataUrlFromSource,
+  prepareVisualUpload,
+  SUPPORTED_VISUAL_UPLOAD_ACCEPT,
+} from "@/lib/client-visual-upload";
 
 type FormResponse = {
   form?: FormDefinition | null;
@@ -375,17 +380,9 @@ export function FormSetupFlow({ initialForm }: { initialForm: FormDefinition }) 
     let cancelled = false;
     const pendingNames = imageNames.filter((imageName) => !trainingThumbnailMap[imageName]);
 
-    setTrainingThumbnailMap((current) => {
-      const next = Object.fromEntries(
-        Object.entries(current).filter(([imageName]) => imageNames.includes(imageName)),
-      );
-      for (const imageName of pendingNames) {
-        if (!next[imageName]) {
-          next[imageName] = buildTrainingImageRawUrl(formId, imageName);
-        }
-      }
-      return next;
-    });
+    setTrainingThumbnailMap((current) =>
+      Object.fromEntries(Object.entries(current).filter(([imageName]) => imageNames.includes(imageName))),
+    );
 
     if (!pendingNames.length) {
       return;
@@ -404,13 +401,10 @@ export function FormSetupFlow({ initialForm }: { initialForm: FormDefinition }) 
           if (!response.ok || !nextDataUrl || cancelled) {
             continue;
           }
-          const resolvedDataUrl: string = nextDataUrl;
+          const resolvedDataUrl = await ensureImageDataUrlFromSource(nextDataUrl);
           setTrainingThumbnailMap((current) => {
             const existing = current[imageName];
-            if (existing === resolvedDataUrl) {
-              return current;
-            }
-            if (existing && !existing.includes("&raw=1")) {
+            if (existing === resolvedDataUrl || existing) {
               return current;
             }
             return { ...current, [imageName]: resolvedDataUrl };
@@ -627,7 +621,9 @@ export function FormSetupFlow({ initialForm }: { initialForm: FormDefinition }) 
     setIsImportingImage(true);
     setErrorMessage("");
     try {
-      const imageDataUrl = await readFileAsDataUrl(file);
+      const prepared = await prepareVisualUpload(file);
+      const imageDataUrl = await readFileAsDataUrl(prepared.file);
+      URL.revokeObjectURL(prepared.previewUrl);
       const response = await fetch("/api/forms/template-from-image", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -696,7 +692,7 @@ export function FormSetupFlow({ initialForm }: { initialForm: FormDefinition }) 
       notes: existingExample?.notes || "人工标注用于训练池。",
     });
     setAnnotationImageName(imageName);
-    setAnnotationImageSrc(previewUrl);
+    setAnnotationImageSrc(await ensureImageDataUrlFromSource(previewUrl));
   }
 
   function closeAnnotationPanel() {
@@ -718,11 +714,11 @@ export function FormSetupFlow({ initialForm }: { initialForm: FormDefinition }) 
     try {
       const nextUploads = await Promise.all(
         Array.from(fileList).map(async (file, index) => {
-          const previewUrl = URL.createObjectURL(file);
+          const prepared = await prepareVisualUpload(file);
           return {
             id: `${Date.now()}-${index}-${Math.random().toString(36).slice(2, 8)}`,
-            file,
-            previewUrl,
+            file: prepared.file,
+            previewUrl: prepared.previewUrl,
           };
         }),
       );
@@ -817,7 +813,7 @@ export function FormSetupFlow({ initialForm }: { initialForm: FormDefinition }) 
 
               <div className="mt-4">
                 <UploadDropArea
-                  accept="image/*"
+                  accept={SUPPORTED_VISUAL_UPLOAD_ACCEPT}
                   multiple
                   disabled={!activeTableFields.length}
                   active={activeDropTarget === "source-image"}
@@ -891,13 +887,19 @@ export function FormSetupFlow({ initialForm }: { initialForm: FormDefinition }) 
                     className="overflow-hidden rounded-2xl border border-slate-200 bg-slate-50 text-left transition hover:border-slate-300 hover:bg-white"
                   >
                     <div className="relative aspect-[4/3] bg-slate-200">
-                      <Image
-                        src={trainingThumbnailMap[item.imageName] || buildTrainingImageRawUrl(formId, item.imageName)}
-                        alt={item.imageName}
-                        fill
-                        className="object-cover"
-                        unoptimized
-                      />
+                      {trainingThumbnailMap[item.imageName] ? (
+                        <Image
+                          src={trainingThumbnailMap[item.imageName]}
+                          alt={item.imageName}
+                          fill
+                          className="object-cover"
+                          unoptimized
+                        />
+                      ) : (
+                        <div className="flex h-full items-center justify-center px-4 text-center text-xs text-slate-400">
+                          缩略图加载中
+                        </div>
+                      )}
                     </div>
                     <div className="p-3">
                       <div className="truncate text-sm font-medium text-slate-700">{item.imageName}</div>
@@ -942,7 +944,7 @@ export function FormSetupFlow({ initialForm }: { initialForm: FormDefinition }) 
                 onHoverChange={(active) => setActiveDropTarget(active ? "template-excel" : null)}
               />
               <UploadDropArea
-                accept="image/*"
+                accept={SUPPORTED_VISUAL_UPLOAD_ACCEPT}
                 disabled={isImportingImage}
                 active={activeDropTarget === "template-image"}
                 title={isImportingImage ? "正在识别模板截图..." : "拖拽或点击上传模板截图"}

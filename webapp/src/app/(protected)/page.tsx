@@ -30,6 +30,12 @@ import {
   type TableFieldDefinition,
 } from "@/lib/table-fields";
 import { DEFAULT_FORM_ID, buildFormTrainingHref, normalizeFormId } from "@/lib/forms";
+import {
+  ensureImageDataUrlFromSource,
+  prepareVisualUpload,
+  SUPPORTED_VISUAL_UPLOAD_ACCEPT,
+  SUPPORTED_VISUAL_UPLOAD_HELPER,
+} from "@/lib/client-visual-upload";
 
 type UploadItem = {
   id: string;
@@ -644,13 +650,11 @@ function HomeContent() {
     try {
       const nextUploads = await Promise.all(
         Array.from(fileList).map(async (file, index) => {
-          // 立即将文件读取到内存中，避免微信等应用清理临时文件导致 File 对象失效（拖拽图片破损问题）
-          const buffer = await file.arrayBuffer();
-          const clonedFile = new File([buffer], file.name, { type: file.type, lastModified: file.lastModified });
+          const prepared = await prepareVisualUpload(file);
           return {
-            id: `${clonedFile.name}-${clonedFile.lastModified}-${index}-${Date.now()}`,
-            file: clonedFile,
-            previewUrl: URL.createObjectURL(clonedFile),
+            id: `${prepared.file.name}-${prepared.file.lastModified}-${index}-${Date.now()}`,
+            file: prepared.file,
+            previewUrl: prepared.previewUrl,
           };
         })
       );
@@ -665,10 +669,10 @@ function HomeContent() {
         });
         return merged;
       });
-      setNoticeMessage(`已加入 ${nextUploads.length} 张图片。`);
+      setNoticeMessage(`已加入 ${nextUploads.length} 个文件。`);
       setErrorMessage("");
     } catch {
-      setErrorMessage("读取图片内容失败，可能是文件已被其他程序移动或删除，请重试。");
+      setErrorMessage("读取文件内容失败，请确认文件格式受支持后重试。");
     }
   }
   handleFilesRef.current = handleFiles;
@@ -1072,7 +1076,7 @@ function HomeContent() {
 
   async function resolveAnnotationImage(imageName: string, previewUrl?: string) {
     if (previewUrl) {
-      return previewUrl;
+      return await ensureImageDataUrlFromSource(previewUrl);
     }
 
       const response = await fetch(withFormId(`/api/training/image?imageName=${encodeURIComponent(imageName)}`));
@@ -1080,7 +1084,7 @@ function HomeContent() {
     if (!response.ok || !payload.dataUrl) {
       throw new Error(payload.error || "无法读取训练图片。");
     }
-    return payload.dataUrl;
+    return await ensureImageDataUrlFromSource(payload.dataUrl);
   }
 
   async function openAnnotationPanel(record: PodRecord, _anchorElement?: HTMLElement) {
@@ -1528,8 +1532,8 @@ function HomeContent() {
         <section className="grid min-h-[calc(100vh-170px)] grid-cols-1 gap-4 xl:grid-cols-[420px_minmax(0,1fr)]">
           <div ref={uploadPanelRef} className="flex min-h-0 flex-col rounded-3xl border border-slate-200 bg-white shadow-sm">
             <div className="border-b border-slate-200 px-5 py-4">
-              <h2 className="text-lg font-semibold">图片上传区</h2>
-              <p className="mt-1 text-sm text-slate-500">支持批量上传 JPG / PNG，支持直接 Ctrl+V 粘贴截图。</p>
+              <h2 className="text-lg font-semibold">图片 / PDF 上传区</h2>
+              <p className="mt-1 text-sm text-slate-500">支持批量上传 PNG / JPG / JPEG / WEBP / PDF，支持直接 Ctrl+V 粘贴截图。</p>
             </div>
 
             <div className="space-y-4 p-5">
@@ -1544,11 +1548,17 @@ function HomeContent() {
                 onDragLeave={handleDragLeave}
                 onDrop={handleDrop}
               >
-                <span className="text-sm font-medium">点击、拖拽或粘贴上传图片</span>
+                <span className="text-sm font-medium">点击、拖拽或粘贴上传图片 / PDF</span>
                 <span className="mt-1 text-xs text-slate-500">
-                  {isDraggingFiles ? "松开鼠标即可上传图片" : "可一次选择多张，或直接 Ctrl+V 粘贴"}
+                  {isDraggingFiles ? "松开鼠标即可上传文件" : `可一次选择多张，或直接 Ctrl+V 粘贴图片。${SUPPORTED_VISUAL_UPLOAD_HELPER}`}
                 </span>
-                <input className="hidden" type="file" accept="image/*" multiple onChange={(event) => void handleFiles(event.target.files)} />
+                <input
+                  className="hidden"
+                  type="file"
+                  accept={SUPPORTED_VISUAL_UPLOAD_ACCEPT}
+                  multiple
+                  onChange={(event) => void handleFiles(event.target.files)}
+                />
               </label>
 
               <div className="flex flex-wrap gap-2">
