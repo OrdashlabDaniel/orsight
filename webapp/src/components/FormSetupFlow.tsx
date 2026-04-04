@@ -286,7 +286,12 @@ export function FormSetupFlow({ initialForm }: { initialForm: FormDefinition }) 
   uploadsRef.current = uploads;
 
   const activeTableFields = useMemo(() => getActiveTableFields(tableFields), [tableFields]);
-  const deletedFieldDrafts = useMemo(() => fieldDrafts.filter((field) => !field.active), [fieldDrafts]);
+  const deletedFieldDrafts = useMemo(() => {
+    if ((form.templateSource ?? "blank") === "blank" && !fieldDrafts.some((field) => field.active)) {
+      return [];
+    }
+    return fieldDrafts.filter((field) => !field.active);
+  }, [fieldDrafts, form.templateSource]);
 
   useEffect(() => {
     return () => {
@@ -313,9 +318,11 @@ export function FormSetupFlow({ initialForm }: { initialForm: FormDefinition }) 
       preserveEmpty: true,
       appendMissingBuiltIns: false,
     });
-    setTableFields(nextFields);
-    setFieldDrafts(cloneFieldDrafts(nextFields));
-  }, [apiPathBuilder]);
+    const sanitizedFields =
+      (form.templateSource ?? "blank") === "blank" && !nextFields.some((field) => field.active) ? [] : nextFields;
+    setTableFields(sanitizedFields);
+    setFieldDrafts(cloneFieldDrafts(sanitizedFields));
+  }, [apiPathBuilder, form.templateSource]);
 
   const loadTrainingStatus = useCallback(async () => {
     const response = await fetch(apiPathBuilder("/api/training/status"), { cache: "no-store" });
