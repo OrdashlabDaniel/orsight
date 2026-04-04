@@ -51,6 +51,13 @@ type DrawingState = {
   space: "image" | "container";
 };
 
+type ViewportPanState = {
+  startX: number;
+  startY: number;
+  scrollLeft: number;
+  scrollTop: number;
+};
+
 type ImageLayout = {
   cw: number;
   ch: number;
@@ -342,7 +349,11 @@ export function TrainingAnnotationWorkbench({
   const [drawingState, setDrawingState] = useState<DrawingState | null>(null);
   const [isSavingTraining, setIsSavingTraining] = useState(false);
   const [isPreviewFillLoading, setIsPreviewFillLoading] = useState(false);
-  const [annotationZoom, setAnnotationZoom] = useState(150);
+  const [annotationZoom, setAnnotationZoom] = useState(100);
+  const [annotationInteractionMode, setAnnotationInteractionMode] = useState<"draw" | "pan">("draw");
+  const [isPanningViewport, setIsPanningViewport] = useState(false);
+  const [imageNaturalSize, setImageNaturalSize] = useState({ width: 0, height: 0 });
+  const [imageViewportSize, setImageViewportSize] = useState({ width: 0, height: 0 });
   const [undoStack, setUndoStack] = useState<WorkbenchAnnotationBox[][]>([]);
   const [layoutTick, setLayoutTick] = useState(0);
   const bumpLayout = useCallback(() => setLayoutTick((t) => t + 1), []);
@@ -354,6 +365,20 @@ export function TrainingAnnotationWorkbench({
     () => parseTableFieldTexts(tableFieldTexts, activeFieldDefinitions),
     [tableFieldTexts, activeFieldDefinitions],
   );
+  const renderedImageSize = useMemo(() => {
+    if (!imageNaturalSize.width || !imageNaturalSize.height || !imageViewportSize.width || !imageViewportSize.height) {
+      return null;
+    }
+    const fitScale = Math.min(
+      imageViewportSize.width / imageNaturalSize.width,
+      imageViewportSize.height / imageNaturalSize.height,
+    );
+    const scale = fitScale * (annotationZoom / 100);
+    return {
+      width: Math.max(1, Math.round(imageNaturalSize.width * scale)),
+      height: Math.max(1, Math.round(imageNaturalSize.height * scale)),
+    };
+  }, [annotationZoom, imageNaturalSize, imageViewportSize]);
   const tableModeSeed = useMemo(
     () => buildSeedFromTableFieldValues(parsedTableFieldValues, activeFieldDefinitions),
     [parsedTableFieldValues, activeFieldDefinitions],
@@ -362,8 +387,10 @@ export function TrainingAnnotationWorkbench({
   const buildApiPath = useCallback((path: string) => (apiPathBuilder ? apiPathBuilder(path) : path), [apiPathBuilder]);
 
   const annotationCanvasRef = useRef<HTMLDivElement | null>(null);
+  const annotationViewportRef = useRef<HTMLDivElement | null>(null);
   const imageRef = useRef<HTMLImageElement | null>(null);
   const seedJsonRef = useRef<string>("");
+  const viewportPanStateRef = useRef<ViewportPanState | null>(null);
 
   function getImageLayout(): ImageLayout | null {
     const container = annotationCanvasRef.current;
@@ -378,12 +405,7 @@ export function TrainingAnnotationWorkbench({
     }
     const nw = img.naturalWidth;
     const nh = img.naturalHeight;
-    const scale = Math.min(cw / nw, ch / nh);
-    const dispW = nw * scale;
-    const dispH = nh * scale;
-    const offX = (cw - dispW) / 2;
-    const offY = (ch - dispH) / 2;
-    return { cw, ch, nw, nh, dispW, dispH, offX, offY };
+    return { cw, ch, nw, nh, dispW: cw, dispH: ch, offX: 0, offY: 0 };
   }
 
   function clientToImageNorm(clientX: number, clientY: number): { x: number; y: number } | null {
@@ -490,11 +512,22 @@ export function TrainingAnnotationWorkbench({
     if (!open) {
       return;
     }
-    const el = annotationCanvasRef.current;
+    const el = annotationViewportRef.current;
     if (!el) {
       return;
     }
-    const ro = new ResizeObserver(() => bumpLayout());
+    const updateViewportSize = () => {
+      const next = {
+        width: Math.max(0, el.clientWidth - 24),
+        height: Math.max(0, el.clientHeight - 24),
+      };
+      setImageViewportSize((current) =>
+        current.width === next.width && current.height === next.height ? current : next,
+      );
+      bumpLayout();
+    };
+    updateViewportSize();
+    const ro = new ResizeObserver(updateViewportSize);
     ro.observe(el);
     return () => ro.disconnect();
   }, [open, bumpLayout]);
@@ -502,11 +535,13 @@ export function TrainingAnnotationWorkbench({
   useEffect(() => {
     if (!open || !imageSrc) {
       setResolvedImageSrc("");
+      setImageNaturalSize({ width: 0, height: 0 });
       return;
     }
 
     let cancelled = false;
     setResolvedImageSrc("");
+    setImageNaturalSize({ width: 0, height: 0 });
 
     void (async () => {
       try {
@@ -551,7 +586,10 @@ export function TrainingAnnotationWorkbench({
     setAnnotationNotes(initialNotes ?? "人工标注用于训练池。");
     setAnnotationField(pickAnnotationField(initialField, activeFieldDefinitions));
     setUndoStack([]);
-    setAnnotationZoom(150);
+    setAnnotationZoom(100);
+    setAnnotationInteractionMode("draw");
+    setIsPanningViewport(false);
+    viewportPanStateRef.current = null;
     setDrawingState(null);
   }, [open, initialSeed, initialAnnotationMode, initialTableFieldValues, initialBoxes, initialFieldAggregations, initialNotes, initialField, activeFieldDefinitions, activeFieldIdSet]);
 
@@ -568,8 +606,29 @@ export function TrainingAnnotationWorkbench({
 
   const handleClose = useCallback(() => {
     setDrawingState(null);
+    setIsPanningViewport(false);
+    viewportPanStateRef.current = null;
     onClose();
   }, [onClose]);
+
+  const endViewportPan = useCallback(() => {
+    viewportPanStateRef.current = null;
+    setIsPanningViewport(false);
+  }, []);
+
+  const startViewportPan = useCallback((clientX: number, clientY: number) => {
+    const viewport = annotationViewportRef.current;
+    if (!viewport) {
+      return;
+    }
+    viewportPanStateRef.current = {
+      startX: clientX,
+      startY: clientY,
+      scrollLeft: viewport.scrollLeft,
+      scrollTop: viewport.scrollTop,
+    };
+    setIsPanningViewport(true);
+  }, []);
 
   function applyAnnotationBoxesChange(updater: (current: WorkbenchAnnotationBox[]) => WorkbenchAnnotationBox[]) {
     setAnnotationBoxes((current) => {
@@ -631,6 +690,47 @@ export function TrainingAnnotationWorkbench({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [open, handleClose, undoLastAnnotationBoxChange]);
 
+  useEffect(() => {
+    if (!open || !isPanningViewport) {
+      return;
+    }
+    function updateViewportPan(clientX: number, clientY: number) {
+      const viewport = annotationViewportRef.current;
+      const panState = viewportPanStateRef.current;
+      if (!viewport || !panState) {
+        return;
+      }
+      viewport.scrollLeft = panState.scrollLeft - (clientX - panState.startX);
+      viewport.scrollTop = panState.scrollTop - (clientY - panState.startY);
+    }
+    function handleMouseMove(event: MouseEvent) {
+      updateViewportPan(event.clientX, event.clientY);
+    }
+    function handleTouchMove(event: TouchEvent) {
+      const touch = event.touches[0];
+      if (!touch) {
+        return;
+      }
+      event.preventDefault();
+      updateViewportPan(touch.clientX, touch.clientY);
+    }
+    function handlePanEnd() {
+      endViewportPan();
+    }
+    window.addEventListener("mousemove", handleMouseMove);
+    window.addEventListener("mouseup", handlePanEnd);
+    window.addEventListener("touchmove", handleTouchMove, { passive: false });
+    window.addEventListener("touchend", handlePanEnd);
+    window.addEventListener("touchcancel", handlePanEnd);
+    return () => {
+      window.removeEventListener("mousemove", handleMouseMove);
+      window.removeEventListener("mouseup", handlePanEnd);
+      window.removeEventListener("touchmove", handleTouchMove);
+      window.removeEventListener("touchend", handlePanEnd);
+      window.removeEventListener("touchcancel", handlePanEnd);
+    };
+  }, [endViewportPan, isPanningViewport, open]);
+
   function getAnnotationFieldValue(field: AnnotationField) {
     if (annotationMode === "table") {
       const value = parsedTableFieldValues?.[field]?.[0];
@@ -671,6 +771,11 @@ export function TrainingAnnotationWorkbench({
     if (event.button !== 0) {
       return;
     }
+    if (annotationInteractionMode === "pan") {
+      event.preventDefault();
+      startViewportPan(event.clientX, event.clientY);
+      return;
+    }
     const point = getPointerNorm(event.clientX, event.clientY);
     setDrawingState({
       startX: point.x,
@@ -682,7 +787,7 @@ export function TrainingAnnotationWorkbench({
   }
 
   function updateDrawing(event: React.MouseEvent<HTMLDivElement>) {
-    if (!drawingState) {
+    if (annotationInteractionMode === "pan" || !drawingState) {
       return;
     }
 
@@ -700,6 +805,12 @@ export function TrainingAnnotationWorkbench({
 
   function beginDrawingTouch(event: React.TouchEvent<HTMLDivElement>) {
     if (event.touches.length !== 1) return;
+    if (annotationInteractionMode === "pan") {
+      const touch = event.touches[0];
+      event.preventDefault();
+      startViewportPan(touch.clientX, touch.clientY);
+      return;
+    }
     const t = event.touches[0];
     const point = getPointerNorm(t.clientX, t.clientY);
     event.preventDefault();
@@ -713,7 +824,7 @@ export function TrainingAnnotationWorkbench({
   }
 
   function updateDrawingTouch(event: React.TouchEvent<HTMLDivElement>) {
-    if (!drawingState || event.touches.length !== 1) return;
+    if (annotationInteractionMode === "pan" || !drawingState || event.touches.length !== 1) return;
     const t = event.touches[0];
     const point = getPointerNorm(t.clientX, t.clientY);
     if (point.space !== drawingState.space) {
@@ -728,6 +839,11 @@ export function TrainingAnnotationWorkbench({
   }
 
   function finishDrawingTouch(event: React.TouchEvent<HTMLDivElement>) {
+    if (annotationInteractionMode === "pan") {
+      event.preventDefault();
+      endViewportPan();
+      return;
+    }
     event.preventDefault();
     const t = event.changedTouches[0];
     let endX: number | undefined;
@@ -1034,7 +1150,7 @@ export function TrainingAnnotationWorkbench({
       aria-modal="true"
       aria-labelledby="annotation-dialog-title"
     >
-      <div className="my-auto flex max-h-[92vh] w-full max-w-6xl flex-col overflow-hidden rounded-3xl border border-slate-200 bg-white p-5 shadow-2xl">
+      <div className="my-auto flex max-h-[95vh] w-full max-w-[min(96vw,1720px)] flex-col overflow-hidden rounded-3xl border border-slate-200 bg-white p-5 shadow-2xl">
         <div className="sticky top-0 z-10 mb-4 flex flex-wrap items-center justify-between gap-3 bg-white pb-2">
           <div>
             <h2 id="annotation-dialog-title" className="text-lg font-semibold">
@@ -1072,14 +1188,38 @@ export function TrainingAnnotationWorkbench({
         </div>
         </div>
 
-        <div className="grid min-h-0 flex-1 gap-4 overflow-y-auto pr-1 lg:grid-cols-[minmax(0,1fr)_min(100%,380px)]">
+        <div className="grid min-h-0 flex-1 gap-4 overflow-y-auto pr-1 lg:grid-cols-[minmax(0,1.4fr)_min(100%,440px)]">
           <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
             <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
               <div>
                 <div className="text-sm font-medium text-slate-700">标注图片：{imageName}</div>
                 <div className="mt-1 text-xs text-slate-500">保存后，模型参考时会直接看到带框的人工标注图。</div>
+                <div className="mt-1 text-xs text-slate-500">默认会尽量完整显示整张图；放大后可切换到拖动画面，再拖拽查看局部。</div>
               </div>
               <div className="flex flex-wrap items-center gap-2">
+                <div className="inline-flex rounded-lg border border-slate-300 bg-white p-1">
+                  <button
+                    type="button"
+                    className={`rounded-md px-2.5 py-1.5 text-xs font-medium ${
+                      annotationInteractionMode === "draw" ? "bg-slate-900 text-white" : "text-slate-700 hover:bg-slate-100"
+                    }`}
+                    onClick={() => {
+                      endViewportPan();
+                      setAnnotationInteractionMode("draw");
+                    }}
+                  >
+                    画框
+                  </button>
+                  <button
+                    type="button"
+                    className={`rounded-md px-2.5 py-1.5 text-xs font-medium ${
+                      annotationInteractionMode === "pan" ? "bg-slate-900 text-white" : "text-slate-700 hover:bg-slate-100"
+                    }`}
+                    onClick={() => setAnnotationInteractionMode("pan")}
+                  >
+                    拖动画面
+                  </button>
+                </div>
                 <button
                   type="button"
                   className="rounded-lg border border-slate-300 px-2.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-white disabled:cursor-not-allowed disabled:opacity-50"
@@ -1091,15 +1231,18 @@ export function TrainingAnnotationWorkbench({
                 <button
                   type="button"
                   className="rounded-lg border border-slate-300 px-2.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-white disabled:cursor-not-allowed disabled:opacity-50"
-                  onClick={() => setAnnotationZoom((current) => Math.max(100, current - 25))}
-                  disabled={annotationZoom <= 100}
+                  onClick={() => setAnnotationZoom((current) => Math.max(50, current - 25))}
+                  disabled={annotationZoom <= 50}
                 >
                   缩小
                 </button>
                 <button
                   type="button"
                   className="rounded-lg border border-slate-300 px-2.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-white"
-                  onClick={() => setAnnotationZoom(150)}
+                  onClick={() => {
+                    endViewportPan();
+                    setAnnotationZoom(100);
+                  }}
                 >
                   {annotationZoom}%
                 </button>
@@ -1113,11 +1256,22 @@ export function TrainingAnnotationWorkbench({
                 </button>
               </div>
             </div>
-            <div className="min-h-[min(55vh,520px)] max-h-[65vh] overflow-auto rounded-xl bg-black/5 p-2">
+            <div ref={annotationViewportRef} className="min-h-[min(68vh,760px)] max-h-[76vh] overflow-auto rounded-xl bg-black/5 p-3">
+              <div className={`min-h-full min-w-full ${annotationZoom <= 100 ? "flex items-center justify-center" : "block"}`}>
               <div
                 ref={annotationCanvasRef}
-                className="relative min-w-full cursor-crosshair select-none [touch-action:none]"
-                style={{ width: `${annotationZoom}%` }}
+                className={`relative select-none [touch-action:none] ${
+                  annotationInteractionMode === "pan"
+                    ? isPanningViewport
+                      ? "cursor-grabbing"
+                      : "cursor-grab"
+                    : "cursor-crosshair"
+                }`}
+                style={
+                  renderedImageSize
+                    ? { width: `${renderedImageSize.width}px`, height: `${renderedImageSize.height}px` }
+                    : { width: "100%" }
+                }
                 data-layout-tick={layoutTick}
                 onMouseDown={beginDrawing}
                 onMouseMove={updateDrawing}
@@ -1126,7 +1280,10 @@ export function TrainingAnnotationWorkbench({
                 onTouchStart={beginDrawingTouch}
                 onTouchMove={updateDrawingTouch}
                 onTouchEnd={finishDrawingTouch}
-                onTouchCancel={() => setDrawingState(null)}
+                onTouchCancel={() => {
+                  setDrawingState(null);
+                  endViewportPan();
+                }}
               >
               {resolvedImageSrc ? (
                 // eslint-disable-next-line @next/next/no-img-element
@@ -1135,8 +1292,16 @@ export function TrainingAnnotationWorkbench({
                   src={resolvedImageSrc}
                   alt={imageName}
                   draggable={false}
-                  onLoad={bumpLayout}
-                  className="pointer-events-none block h-auto w-full"
+                  onLoad={(event) => {
+                    setImageNaturalSize({
+                      width: event.currentTarget.naturalWidth,
+                      height: event.currentTarget.naturalHeight,
+                    });
+                    bumpLayout();
+                  }}
+                  className={`pointer-events-none block object-contain ${
+                    renderedImageSize ? "h-full w-full" : "h-auto w-full"
+                  }`}
                 />
               ) : (
                 <div className="flex min-h-[200px] items-center justify-center text-sm text-slate-400">加载图片中…</div>
@@ -1173,6 +1338,7 @@ export function TrainingAnnotationWorkbench({
                   })}
                 />
               ) : null}
+            </div>
             </div>
             </div>
           </div>
