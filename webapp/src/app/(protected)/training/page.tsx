@@ -102,7 +102,8 @@ function TrainingModeContent() {
   const [uploads, setUploads] = useState<UploadItem[]>([]);
   const [selectedUploadId, setSelectedUploadId] = useState<string | null>(null);
   const [trainingThumbnailMap, setTrainingThumbnailMap] = useState<Record<string, string>>({});
-  
+  const [trainingThumbnailErrorMap, setTrainingThumbnailErrorMap] = useState<Record<string, boolean>>({});
+
   const [trainingStatus, setTrainingStatus] = useState<TrainingStatusResponse | null>(null);
   const [isDraggingFiles, setIsDraggingFiles] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
@@ -192,50 +193,24 @@ function TrainingModeContent() {
   useEffect(() => {
     const imageNames = trainingStatus?.items.map((item) => item.imageName) || [];
     if (!imageNames.length) {
+      setTrainingThumbnailMap({});
+      setTrainingThumbnailErrorMap({});
       return;
     }
 
-    let cancelled = false;
-    const pendingNames = imageNames.filter((imageName) => !trainingThumbnailMap[imageName]);
-
-    setTrainingThumbnailMap((current) =>
-      Object.fromEntries(Object.entries(current).filter(([imageName]) => imageNames.includes(imageName))),
-    );
-
-    if (!pendingNames.length) {
-      return;
-    }
-
-    void (async () => {
-      for (const imageName of pendingNames) {
-        if (cancelled) {
-          return;
-        }
-
-        try {
-          const response = await fetch(withFormId(`/api/training/image?imageName=${encodeURIComponent(imageName)}`));
-          const payload = (await response.json()) as { dataUrl?: string; error?: string };
-          if (!response.ok || !payload.dataUrl || cancelled) {
-            continue;
-          }
-          const resolvedDataUrl = await ensureImageDataUrlFromSource(payload.dataUrl);
-          setTrainingThumbnailMap((current) => {
-            const existing = current[imageName];
-            if (existing === resolvedDataUrl || existing) {
-              return current;
-            }
-            return { ...current, [imageName]: resolvedDataUrl };
-          });
-        } catch {
-          // Ignore thumbnail failures; clicking the card will still open the full image.
-        }
+    setTrainingThumbnailMap(() => {
+      const next: Record<string, string> = {};
+      for (const imageName of imageNames) {
+        next[imageName] = buildTrainingImageThumbnailUrl(imageName);
       }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [trainingStatus, trainingThumbnailMap]);
+      return next;
+    });
+    setTrainingThumbnailErrorMap((current) =>
+      Object.fromEntries(
+        Object.entries(current).filter(([imageName, failed]) => imageNames.includes(imageName) && failed),
+      ),
+    );
+  }, [trainingStatus, withFormId]);
 
   async function loadTableFieldConfig() {
     try {
@@ -449,7 +424,7 @@ function TrainingModeContent() {
 
   useEffect(() => {
     void loadTrainingStatus();
-  }, []);
+  }, [currentFormId]);
 
   const handleFilesRef = useRef<((fileList: FileList | File[] | null) => Promise<void>) | null>(null);
 
@@ -571,10 +546,14 @@ function TrainingModeContent() {
 
   async function resolveAnnotationImage(imageName: string, previewUrl?: string) {
     if (previewUrl) {
-      return await ensureImageDataUrlFromSource(previewUrl);
+      try {
+        return await ensureImageDataUrlFromSource(previewUrl);
+      } catch {
+        // Fall back to the JSON data-url endpoint if the raw preview request fails.
+      }
     }
 
-      const response = await fetch(withFormId(`/api/training/image?imageName=${encodeURIComponent(imageName)}`));
+    const response = await fetch(withFormId(`/api/training/image?imageName=${encodeURIComponent(imageName)}`));
     const payload = (await response.json()) as { dataUrl?: string; error?: string };
     if (!response.ok || !payload.dataUrl) {
       throw new Error(payload.error || "无法读取训练图片。");
@@ -584,6 +563,27 @@ function TrainingModeContent() {
 
   function buildTrainingImageRawUrl(imageName: string) {
     return withFormId(`/api/training/image?imageName=${encodeURIComponent(imageName)}&raw=1`);
+  }
+
+  function buildTrainingImageThumbnailUrl(imageName: string, cacheBust?: number) {
+    return withFormId(
+      `/api/training/image?imageName=${encodeURIComponent(imageName)}&raw=1&thumbnail=1${cacheBust ? `&v=${cacheBust}` : ""}`,
+    );
+  }
+
+  function retryTrainingThumbnail(imageName: string) {
+    setTrainingThumbnailErrorMap((current) => {
+      if (!current[imageName]) {
+        return current;
+      }
+      const next = { ...current };
+      delete next[imageName];
+      return next;
+    });
+    setTrainingThumbnailMap((current) => ({
+      ...current,
+      [imageName]: buildTrainingImageThumbnailUrl(imageName, Date.now()),
+    }));
   }
 
   function handleImageClick(upload: UploadItem) {
@@ -608,7 +608,7 @@ function TrainingModeContent() {
       removeUploadAfterSaveRef.current = item.id;
     } else {
       imageName = item.imageName;
-      previewUrl = trainingThumbnailMap[item.imageName] || buildTrainingImageRawUrl(item.imageName);
+      previewUrl = buildTrainingImageRawUrl(item.imageName);
       existingExample = item.example;
       removeUploadAfterSaveRef.current = null;
     }
@@ -1045,18 +1045,40 @@ function TrainingModeContent() {
                       className="group relative flex aspect-square flex-col overflow-hidden rounded-2xl border border-slate-200 bg-slate-50 text-left transition-all hover:border-blue-400 hover:shadow-md"
                     >
                       <div className="relative flex-1 bg-slate-100">
-                        {trainingThumbnailMap[item.imageName] ? (
+                        {!trainingThumbnailErrorMap[item.imageName] ? (
                           <Image
-                            src={trainingThumbnailMap[item.imageName]}
+                            src={trainingThumbnailMap[item.imageName] || buildTrainingImageThumbnailUrl(item.imageName)}
                             alt={item.imageName}
                             fill
                             unoptimized
                             className="object-cover"
+                            onLoad={() => {
+                              setTrainingThumbnailErrorMap((current) => {
+                                if (!current[item.imageName]) {
+                                  return current;
+                                }
+                                const next = { ...current };
+                                delete next[item.imageName];
+                                return next;
+                              });
+                            }}
+                            onError={() => {
+                              setTrainingThumbnailErrorMap((current) =>
+                                current[item.imageName] ? current : { ...current, [item.imageName]: true },
+                              );
+                            }}
                           />
                         ) : (
-                          <div className="flex h-full items-center justify-center p-4 text-center text-xs text-slate-400 break-all">
+                          <button
+                            type="button"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              retryTrainingThumbnail(item.imageName);
+                            }}
+                            className="flex h-full w-full items-center justify-center p-4 text-center text-xs text-slate-400 break-all hover:bg-slate-200/70 hover:text-slate-500"
+                          >
                             缩略图加载中
-                          </div>
+                          </button>
                         )}
                       </div>
                       <div className="border-t border-slate-200 bg-white px-3 py-2">

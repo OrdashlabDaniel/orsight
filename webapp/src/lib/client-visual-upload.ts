@@ -50,6 +50,11 @@ function isPdfSource(value: string) {
   return lower.startsWith("data:application/pdf") || lower.endsWith(".pdf");
 }
 
+function replaceFileExtension(fileName: string, nextExtension: string) {
+  const baseName = fileName.replace(/\.[^.]+$/, "") || fileName;
+  return `${baseName}${nextExtension.startsWith(".") ? nextExtension : `.${nextExtension}`}`;
+}
+
 async function blobToDataUrl(blob: Blob) {
   return await new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
@@ -129,7 +134,7 @@ export async function prepareVisualUpload(file: File): Promise<PreparedVisualUpl
   }
 
   const pngBlob = await renderPdfBlobToPngBlob(file);
-  const renderedFile = new File([pngBlob], file.name, {
+  const renderedFile = new File([pngBlob], replaceFileExtension(file.name, ".png"), {
     type: "image/png",
     lastModified: file.lastModified,
   });

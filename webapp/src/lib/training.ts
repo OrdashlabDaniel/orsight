@@ -91,6 +91,11 @@ export type GlobalRules = {
   workingRules?: string;
 };
 
+export type TrainingImageBinary = {
+  buffer: Buffer;
+  mimeType: string;
+};
+
 const GLOBAL_RULES_KEY = "__global_rules__";
 
 function emptyGlobalRules(): GlobalRules {
@@ -289,7 +294,7 @@ export async function listTrainingImages(formId = DEFAULT_FORM_ID) {
   }
 
   return data
-    .filter((file) => /\.(png|jpg|jpeg|webp)$/i.test(file.name))
+    .filter((file) => /\.(png|jpg|jpeg|webp|pdf)$/i.test(file.name))
     .map((file) => ({
       imageName: file.name,
       absolutePath:
@@ -298,29 +303,11 @@ export async function listTrainingImages(formId = DEFAULT_FORM_ID) {
 }
 
 export async function getTrainingImageDataUrl(imageName: string, formId = DEFAULT_FORM_ID): Promise<string | null> {
-  const normalizedFormId = normalizeFormId(formId);
-  const storagePath = getFormImageStoragePath(normalizedFormId, imageName);
-  const admin = getSupabaseAdmin();
-  if (!isSupabaseConfigured() || !admin) {
-    return getLocalTrainingImageDataUrl(imageName, normalizedFormId);
-  }
-
-  const { data, error } = await admin.storage
-    .from("training-images")
-    .download(storagePath);
-
-  if (error || !data) {
-    console.error("Error downloading image:", error);
+  const binary = await getTrainingImageBinary(imageName, formId);
+  if (!binary) {
     return null;
   }
-
-  const buffer = await data.arrayBuffer();
-  const base64 = Buffer.from(buffer).toString("base64");
-
-  const extension = imageName.split(".").pop()?.toLowerCase();
-  const mimeType = extension === "png" ? "image/png" : extension === "webp" ? "image/webp" : "image/jpeg";
-
-  return `data:${mimeType};base64,${base64}`;
+  return `data:${binary.mimeType};base64,${binary.buffer.toString("base64")}`;
 }
 
 export async function saveTrainingImageDataUrl(imageName: string, dataUrl: string, formId = DEFAULT_FORM_ID) {
@@ -367,6 +354,31 @@ export async function getTrainingPoolStatus(formId = DEFAULT_FORM_ID) {
       labeled: exampleMap.has(image.imageName),
       example: exampleMap.get(image.imageName) || null,
     })),
+  };
+}
+
+export async function getTrainingImageBinary(
+  imageName: string,
+  formId = DEFAULT_FORM_ID,
+): Promise<TrainingImageBinary | null> {
+  const normalizedFormId = normalizeFormId(formId);
+  const storagePath = getFormImageStoragePath(normalizedFormId, imageName);
+  const admin = getSupabaseAdmin();
+  if (!isSupabaseConfigured() || !admin) {
+    return getLocalTrainingImageBinary(imageName, normalizedFormId);
+  }
+
+  const { data, error } = await admin.storage.from("training-images").download(storagePath);
+
+  if (error || !data) {
+    console.error("Error downloading image:", error);
+    return null;
+  }
+
+  const buffer = Buffer.from(await data.arrayBuffer());
+  return {
+    buffer,
+    mimeType: detectMimeTypeFromBuffer(buffer, imageName, data.type),
   };
 }
 
@@ -441,34 +453,12 @@ function listLocalTrainingImages(formId = DEFAULT_FORM_ID) {
 
   return fs
     .readdirSync(dirPath)
-    .filter((fileName) => /\.(png|jpg|jpeg|webp)$/i.test(fileName))
+    .filter((fileName) => /\.(png|jpg|jpeg|webp|pdf)$/i.test(fileName))
     .sort()
     .map((fileName) => ({
       imageName: fileName,
       absolutePath: path.join(dirPath, fileName),
     }));
-}
-
-function getLocalTrainingImageDataUrl(imageName: string, formId = DEFAULT_FORM_ID): string | null {
-  const dirPath = resolveTrainingImageDir(formId);
-  if (!dirPath) {
-    return null;
-  }
-
-  const filePath = path.join(dirPath, imageName);
-  if (!fs.existsSync(filePath)) {
-    return null;
-  }
-
-  const extension = path.extname(filePath).toLowerCase();
-  const mimeType =
-    extension === ".png"
-      ? "image/png"
-      : extension === ".webp"
-        ? "image/webp"
-        : "image/jpeg";
-  const buffer = fs.readFileSync(filePath);
-  return `data:${mimeType};base64,${buffer.toString("base64")}`;
 }
 
 function saveLocalTrainingImageDataUrl(imageName: string, dataUrl: string, formId = DEFAULT_FORM_ID) {
@@ -483,6 +473,58 @@ function saveLocalTrainingImageDataUrl(imageName: string, dataUrl: string, formI
 
   const buffer = Buffer.from(matched[2], "base64");
   fs.writeFileSync(path.join(dirPath, imageName), buffer);
+}
+
+function getLocalTrainingImageBinary(imageName: string, formId = DEFAULT_FORM_ID): TrainingImageBinary | null {
+  const dirPath = resolveTrainingImageDir(formId);
+  if (!dirPath) {
+    return null;
+  }
+
+  const filePath = path.join(dirPath, imageName);
+  if (!fs.existsSync(filePath)) {
+    return null;
+  }
+
+  const buffer = fs.readFileSync(filePath);
+  return {
+    buffer,
+    mimeType: detectMimeTypeFromBuffer(buffer, filePath),
+  };
+}
+
+function inferMimeTypeFromName(fileName: string | undefined | null) {
+  const extension = path.extname(fileName || "").toLowerCase();
+  switch (extension) {
+    case ".png":
+      return "image/png";
+    case ".webp":
+      return "image/webp";
+    case ".pdf":
+      return "application/pdf";
+    default:
+      return "image/jpeg";
+  }
+}
+
+function detectMimeTypeFromBuffer(buffer: Buffer, fileName?: string | null, fallbackMimeType?: string | null) {
+  if (buffer.length >= 8 && buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
+    return "image/png";
+  }
+  if (buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
+    return "image/jpeg";
+  }
+  if (
+    buffer.length >= 12 &&
+    buffer.subarray(0, 4).toString("ascii") === "RIFF" &&
+    buffer.subarray(8, 12).toString("ascii") === "WEBP"
+  ) {
+    return "image/webp";
+  }
+  if (buffer.length >= 5 && buffer.subarray(0, 5).toString("ascii") === "%PDF-") {
+    return "application/pdf";
+  }
+  return fallbackMimeType || inferMimeTypeFromName(fileName);
 }
 
 const TRAINING_FIELD_LABELS: Record<string, string> = {
