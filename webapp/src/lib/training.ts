@@ -3,6 +3,16 @@ import path from "node:path";
 import sharp from "sharp";
 
 import type { AgentAsset, AgentThreadTurn } from "./agent-context-types";
+import {
+  DEFAULT_FORM_ID,
+  FORM_IMAGE_ROOT,
+  getFormExampleStorageKey,
+  getFormExampleStorageKeyPrefix,
+  getFormGlobalRulesStorageKey,
+  getFormImageStoragePath,
+  isReservedTrainingStorageKey,
+  normalizeFormId,
+} from "./forms";
 import { getSupabaseAdmin, isSupabaseConfigured } from "./supabase";
 import type { TableFieldDefinition } from "./table-fields";
 
@@ -81,24 +91,82 @@ export type GlobalRules = {
   workingRules?: string;
 };
 
+export type TrainingImageBinary = {
+  buffer: Buffer;
+  mimeType: string;
+};
+
 const GLOBAL_RULES_KEY = "__global_rules__";
 
-export async function loadGlobalRules(): Promise<GlobalRules> {
+function emptyGlobalRules(): GlobalRules {
+  return { instructions: "", documents: [] };
+}
+
+function globalRulesCandidatePaths(formId = DEFAULT_FORM_ID) {
+  if (normalizeFormId(formId) !== DEFAULT_FORM_ID) {
+    return [
+      path.join(process.cwd(), "training", "forms", formId, "global-rules.json"),
+      path.resolve(process.cwd(), "..", "training", "forms", formId, "global-rules.json"),
+    ];
+  }
+  return [
+    path.join(process.cwd(), "training", "global-rules.json"),
+    path.resolve(process.cwd(), "..", "training", "global-rules.json"),
+  ];
+}
+
+function resolveGlobalRulesPath(formId = DEFAULT_FORM_ID) {
+  return (
+    globalRulesCandidatePaths(formId).find((filePath) => fs.existsSync(filePath)) ||
+    globalRulesCandidatePaths(formId)[1]
+  );
+}
+
+function loadLocalGlobalRules(formId = DEFAULT_FORM_ID): GlobalRules {
+  const filePath = resolveGlobalRulesPath(formId);
+  if (!fs.existsSync(filePath)) {
+    return emptyGlobalRules();
+  }
+
+  try {
+    const payload = JSON.parse(fs.readFileSync(filePath, "utf8")) as GlobalRules;
+    return {
+      instructions: typeof payload.instructions === "string" ? payload.instructions : "",
+      documents: Array.isArray(payload.documents) ? payload.documents : [],
+      guidanceHistory: Array.isArray(payload.guidanceHistory) ? payload.guidanceHistory : undefined,
+      agentThread: Array.isArray(payload.agentThread) ? payload.agentThread : undefined,
+      workingRules: typeof payload.workingRules === "string" ? payload.workingRules : undefined,
+      tableFields: Array.isArray(payload.tableFields) ? (payload.tableFields as TableFieldDefinition[]) : undefined,
+    };
+  } catch {
+    return emptyGlobalRules();
+  }
+}
+
+function saveLocalGlobalRules(rules: GlobalRules, formId = DEFAULT_FORM_ID) {
+  const filePath = resolveGlobalRulesPath(formId);
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, JSON.stringify(rules, null, 2), "utf8");
+}
+
+export async function loadGlobalRules(formId = DEFAULT_FORM_ID): Promise<GlobalRules> {
+  const normalizedFormId = normalizeFormId(formId);
+  const storageKey =
+    normalizedFormId === DEFAULT_FORM_ID ? GLOBAL_RULES_KEY : getFormGlobalRulesStorageKey(normalizedFormId);
   const admin = getSupabaseAdmin();
   if (!isSupabaseConfigured() || !admin) {
-    // Fallback to local if needed, but for now just return empty
-    return { instructions: "", documents: [] };
+    return loadLocalGlobalRules(normalizedFormId);
   }
 
   try {
     const { data, error } = await admin
       .from("training_examples")
       .select("data")
-      .eq("image_name", GLOBAL_RULES_KEY)
+      .eq("image_name", storageKey)
       .single();
 
     if (error || !data) {
-      return { instructions: "", documents: [] };
+      return emptyGlobalRules();
     }
 
     const row = data.data as GlobalRules;
@@ -112,13 +180,17 @@ export async function loadGlobalRules(): Promise<GlobalRules> {
     };
   } catch (error) {
     console.error("Exception loading global rules:", error);
-    return { instructions: "", documents: [] };
+    return loadLocalGlobalRules(normalizedFormId);
   }
 }
 
-export async function saveGlobalRules(rules: GlobalRules) {
+export async function saveGlobalRules(rules: GlobalRules, formId = DEFAULT_FORM_ID) {
+  const normalizedFormId = normalizeFormId(formId);
+  const storageKey =
+    normalizedFormId === DEFAULT_FORM_ID ? GLOBAL_RULES_KEY : getFormGlobalRulesStorageKey(normalizedFormId);
   const admin = getSupabaseAdmin();
   if (!isSupabaseConfigured() || !admin) {
+    saveLocalGlobalRules(rules, normalizedFormId);
     return;
   }
 
@@ -126,7 +198,7 @@ export async function saveGlobalRules(rules: GlobalRules) {
     .from("training_examples")
     .upsert(
       {
-        image_name: GLOBAL_RULES_KEY,
+        image_name: storageKey,
         data: rules,
       },
       { onConflict: "image_name" },
@@ -137,41 +209,53 @@ export async function saveGlobalRules(rules: GlobalRules) {
   }
 }
 
-export async function loadTrainingExamples(): Promise<TrainingExample[]> {
+export async function loadTrainingExamples(formId = DEFAULT_FORM_ID): Promise<TrainingExample[]> {
+  const normalizedFormId = normalizeFormId(formId);
+  const exampleKeyPrefix = getFormExampleStorageKeyPrefix(normalizedFormId);
   const admin = getSupabaseAdmin();
   if (!isSupabaseConfigured() || !admin) {
-    return loadLocalTrainingExamples().filter(ex => ex.imageName !== GLOBAL_RULES_KEY);
+    return loadLocalTrainingExamples(normalizedFormId);
   }
 
   try {
-    const { data, error } = await admin
-      .from("training_examples")
-      .select("data")
-      .neq("image_name", GLOBAL_RULES_KEY);
+    const query = admin.from("training_examples").select("image_name,data");
+    const { data, error } =
+      normalizedFormId === DEFAULT_FORM_ID
+        ? await query
+        : await query.like("image_name", `${exampleKeyPrefix}%`);
 
     if (error) {
       console.error("Error loading examples from Supabase:", error);
-      return loadLocalTrainingExamples().filter(ex => ex.imageName !== GLOBAL_RULES_KEY);
+      return loadLocalTrainingExamples(normalizedFormId);
     }
 
-    return data.map((row) => row.data as TrainingExample);
+    return data
+      .filter((row) => {
+        if (normalizedFormId !== DEFAULT_FORM_ID) {
+          return typeof row.image_name === "string" && row.image_name.startsWith(exampleKeyPrefix);
+        }
+        return typeof row.image_name === "string" && !isReservedTrainingStorageKey(row.image_name);
+      })
+      .map((row) => row.data as TrainingExample);
   } catch (error) {
     console.error("Exception loading examples:", error);
-    return loadLocalTrainingExamples().filter(ex => ex.imageName !== GLOBAL_RULES_KEY);
+    return loadLocalTrainingExamples(normalizedFormId);
   }
 }
 
-export async function saveTrainingExamples(examples: TrainingExample[]) {
-  saveLocalTrainingExamples(examples);
+export async function saveTrainingExamples(examples: TrainingExample[], formId = DEFAULT_FORM_ID) {
+  saveLocalTrainingExamples(examples, formId);
 }
 
-export async function upsertTrainingExample(example: TrainingExample) {
+export async function upsertTrainingExample(example: TrainingExample, formId = DEFAULT_FORM_ID) {
+  const normalizedFormId = normalizeFormId(formId);
+  const storageKey = getFormExampleStorageKey(normalizedFormId, example.imageName);
   const admin = getSupabaseAdmin();
   if (!isSupabaseConfigured() || !admin) {
-    const current = loadLocalTrainingExamples();
+    const current = loadLocalTrainingExamples(normalizedFormId);
     const next = current.filter((item) => item.imageName !== example.imageName);
     next.push(example);
-    saveLocalTrainingExamples(next);
+    saveLocalTrainingExamples(next, normalizedFormId);
     return next;
   }
 
@@ -179,7 +263,7 @@ export async function upsertTrainingExample(example: TrainingExample) {
     .from("training_examples")
     .upsert(
       {
-        image_name: example.imageName,
+        image_name: storageKey,
         data: example,
       },
       { onConflict: "image_name" },
@@ -189,18 +273,20 @@ export async function upsertTrainingExample(example: TrainingExample) {
     throw new Error(`Failed to save to Supabase: ${error.message}`);
   }
 
-  return await loadTrainingExamples();
+  return await loadTrainingExamples(normalizedFormId);
 }
 
-export async function listTrainingImages() {
+export async function listTrainingImages(formId = DEFAULT_FORM_ID) {
+  const normalizedFormId = normalizeFormId(formId);
   const admin = getSupabaseAdmin();
   if (!isSupabaseConfigured() || !admin) {
-    return listLocalTrainingImages();
+    return listLocalTrainingImages(normalizedFormId);
   }
 
+  const listPath = normalizedFormId === DEFAULT_FORM_ID ? undefined : `${FORM_IMAGE_ROOT}/${normalizedFormId}`;
   const { data, error } = await admin.storage
     .from("training-images")
-    .list();
+    .list(listPath);
 
   if (error) {
     console.error("Error listing images:", error);
@@ -208,41 +294,28 @@ export async function listTrainingImages() {
   }
 
   return data
-    .filter((file) => /\.(png|jpg|jpeg|webp)$/i.test(file.name))
+    .filter((file) => /\.(png|jpg|jpeg|webp|pdf)$/i.test(file.name))
     .map((file) => ({
       imageName: file.name,
-      absolutePath: file.name,
+      absolutePath:
+        normalizedFormId === DEFAULT_FORM_ID ? file.name : getFormImageStoragePath(normalizedFormId, file.name),
     }));
 }
 
-export async function getTrainingImageDataUrl(imageName: string): Promise<string | null> {
-  const admin = getSupabaseAdmin();
-  if (!isSupabaseConfigured() || !admin) {
-    return getLocalTrainingImageDataUrl(imageName);
-  }
-
-  const { data, error } = await admin.storage
-    .from("training-images")
-    .download(imageName);
-
-  if (error || !data) {
-    console.error("Error downloading image:", error);
+export async function getTrainingImageDataUrl(imageName: string, formId = DEFAULT_FORM_ID): Promise<string | null> {
+  const binary = await getTrainingImageBinary(imageName, formId);
+  if (!binary) {
     return null;
   }
-
-  const buffer = await data.arrayBuffer();
-  const base64 = Buffer.from(buffer).toString("base64");
-
-  const extension = imageName.split(".").pop()?.toLowerCase();
-  const mimeType = extension === "png" ? "image/png" : extension === "webp" ? "image/webp" : "image/jpeg";
-
-  return `data:${mimeType};base64,${base64}`;
+  return `data:${binary.mimeType};base64,${binary.buffer.toString("base64")}`;
 }
 
-export async function saveTrainingImageDataUrl(imageName: string, dataUrl: string) {
+export async function saveTrainingImageDataUrl(imageName: string, dataUrl: string, formId = DEFAULT_FORM_ID) {
+  const normalizedFormId = normalizeFormId(formId);
+  const storagePath = getFormImageStoragePath(normalizedFormId, imageName);
   const admin = getSupabaseAdmin();
   if (!isSupabaseConfigured() || !admin) {
-    saveLocalTrainingImageDataUrl(imageName, dataUrl);
+    saveLocalTrainingImageDataUrl(imageName, dataUrl, normalizedFormId);
     return;
   }
 
@@ -257,7 +330,7 @@ export async function saveTrainingImageDataUrl(imageName: string, dataUrl: strin
 
   const { error } = await admin.storage
     .from("training-images")
-    .upload(imageName, buffer, {
+    .upload(storagePath, buffer, {
       contentType: mimeType,
       upsert: true,
     });
@@ -267,10 +340,10 @@ export async function saveTrainingImageDataUrl(imageName: string, dataUrl: strin
   }
 }
 
-export async function getTrainingPoolStatus() {
-  const examples = await loadTrainingExamples();
+export async function getTrainingPoolStatus(formId = DEFAULT_FORM_ID) {
+  const examples = await loadTrainingExamples(formId);
   const exampleMap = new Map(examples.map((example) => [example.imageName, example]));
-  const images = await listTrainingImages();
+  const images = await listTrainingImages(formId);
 
   return {
     totalImages: images.length,
@@ -284,31 +357,68 @@ export async function getTrainingPoolStatus() {
   };
 }
 
-function examplesCandidatePaths() {
+export async function getTrainingImageBinary(
+  imageName: string,
+  formId = DEFAULT_FORM_ID,
+): Promise<TrainingImageBinary | null> {
+  const normalizedFormId = normalizeFormId(formId);
+  const storagePath = getFormImageStoragePath(normalizedFormId, imageName);
+  const admin = getSupabaseAdmin();
+  if (!isSupabaseConfigured() || !admin) {
+    return getLocalTrainingImageBinary(imageName, normalizedFormId);
+  }
+
+  const { data, error } = await admin.storage.from("training-images").download(storagePath);
+
+  if (error || !data) {
+    console.error("Error downloading image:", error);
+    return null;
+  }
+
+  const buffer = Buffer.from(await data.arrayBuffer());
+  return {
+    buffer,
+    mimeType: detectMimeTypeFromBuffer(buffer, imageName, data.type),
+  };
+}
+
+function examplesCandidatePaths(formId = DEFAULT_FORM_ID) {
+  if (normalizeFormId(formId) !== DEFAULT_FORM_ID) {
+    return [
+      path.join(process.cwd(), "training", "forms", formId, "examples.json"),
+      path.resolve(process.cwd(), "..", "training", "forms", formId, "examples.json"),
+    ];
+  }
   return [
     path.join(process.cwd(), "training", "examples.json"),
     path.resolve(process.cwd(), "..", "training", "examples.json"),
   ];
 }
 
-function trainingImageCandidatePaths() {
+function trainingImageCandidatePaths(formId = DEFAULT_FORM_ID) {
+  if (normalizeFormId(formId) !== DEFAULT_FORM_ID) {
+    return [
+      path.join(process.cwd(), "image", "training-ai", "forms", formId),
+      path.resolve(process.cwd(), "..", "image", "training-ai", "forms", formId),
+    ];
+  }
   return [
     path.join(process.cwd(), "image", "training-ai"),
     path.resolve(process.cwd(), "..", "image", "training-ai"),
   ];
 }
 
-function resolveExamplesPath(): string {
-  const existing = examplesCandidatePaths().find((filePath) => fs.existsSync(filePath));
-  return existing || examplesCandidatePaths()[1];
+function resolveExamplesPath(formId = DEFAULT_FORM_ID): string {
+  const existing = examplesCandidatePaths(formId).find((filePath) => fs.existsSync(filePath));
+  return existing || examplesCandidatePaths(formId)[1];
 }
 
-function resolveTrainingImageDir(): string | null {
-  return trainingImageCandidatePaths().find((dirPath) => fs.existsSync(dirPath)) || null;
+function resolveTrainingImageDir(formId = DEFAULT_FORM_ID): string | null {
+  return trainingImageCandidatePaths(formId).find((dirPath) => fs.existsSync(dirPath)) || null;
 }
 
-function loadLocalTrainingExamples(): TrainingExample[] {
-  for (const filePath of examplesCandidatePaths()) {
+function loadLocalTrainingExamples(formId = DEFAULT_FORM_ID): TrainingExample[] {
+  for (const filePath of examplesCandidatePaths(formId)) {
     if (!fs.existsSync(filePath)) {
       continue;
     }
@@ -317,7 +427,9 @@ function loadLocalTrainingExamples(): TrainingExample[] {
       const payload = JSON.parse(fs.readFileSync(filePath, "utf8")) as {
         examples?: TrainingExample[];
       };
-      return Array.isArray(payload.examples) ? payload.examples : [];
+      return Array.isArray(payload.examples)
+        ? payload.examples.filter((example) => example.imageName !== GLOBAL_RULES_KEY)
+        : [];
     } catch {
       return [];
     }
@@ -326,22 +438,22 @@ function loadLocalTrainingExamples(): TrainingExample[] {
   return [];
 }
 
-function saveLocalTrainingExamples(examples: TrainingExample[]) {
-  const filePath = resolveExamplesPath();
+function saveLocalTrainingExamples(examples: TrainingExample[], formId = DEFAULT_FORM_ID) {
+  const filePath = resolveExamplesPath(formId);
   const dirPath = path.dirname(filePath);
   fs.mkdirSync(dirPath, { recursive: true });
   fs.writeFileSync(filePath, JSON.stringify({ examples }, null, 2), "utf8");
 }
 
-function listLocalTrainingImages() {
-  const dirPath = resolveTrainingImageDir();
+function listLocalTrainingImages(formId = DEFAULT_FORM_ID) {
+  const dirPath = resolveTrainingImageDir(formId);
   if (!dirPath) {
     return [];
   }
 
   return fs
     .readdirSync(dirPath)
-    .filter((fileName) => /\.(png|jpg|jpeg|webp)$/i.test(fileName))
+    .filter((fileName) => /\.(png|jpg|jpeg|webp|pdf)$/i.test(fileName))
     .sort()
     .map((fileName) => ({
       imageName: fileName,
@@ -349,30 +461,9 @@ function listLocalTrainingImages() {
     }));
 }
 
-function getLocalTrainingImageDataUrl(imageName: string): string | null {
-  const dirPath = resolveTrainingImageDir();
-  if (!dirPath) {
-    return null;
-  }
-
-  const filePath = path.join(dirPath, imageName);
-  if (!fs.existsSync(filePath)) {
-    return null;
-  }
-
-  const extension = path.extname(filePath).toLowerCase();
-  const mimeType =
-    extension === ".png"
-      ? "image/png"
-      : extension === ".webp"
-        ? "image/webp"
-        : "image/jpeg";
-  const buffer = fs.readFileSync(filePath);
-  return `data:${mimeType};base64,${buffer.toString("base64")}`;
-}
-
-function saveLocalTrainingImageDataUrl(imageName: string, dataUrl: string) {
-  const dirPath = resolveTrainingImageDir() || path.resolve(process.cwd(), "..", "image", "training-ai");
+function saveLocalTrainingImageDataUrl(imageName: string, dataUrl: string, formId = DEFAULT_FORM_ID) {
+  const dirPath =
+    resolveTrainingImageDir(formId) || trainingImageCandidatePaths(formId)[1];
   fs.mkdirSync(dirPath, { recursive: true });
 
   const matched = dataUrl.match(/^data:(.+);base64,(.+)$/);
@@ -382,6 +473,58 @@ function saveLocalTrainingImageDataUrl(imageName: string, dataUrl: string) {
 
   const buffer = Buffer.from(matched[2], "base64");
   fs.writeFileSync(path.join(dirPath, imageName), buffer);
+}
+
+function getLocalTrainingImageBinary(imageName: string, formId = DEFAULT_FORM_ID): TrainingImageBinary | null {
+  const dirPath = resolveTrainingImageDir(formId);
+  if (!dirPath) {
+    return null;
+  }
+
+  const filePath = path.join(dirPath, imageName);
+  if (!fs.existsSync(filePath)) {
+    return null;
+  }
+
+  const buffer = fs.readFileSync(filePath);
+  return {
+    buffer,
+    mimeType: detectMimeTypeFromBuffer(buffer, filePath),
+  };
+}
+
+function inferMimeTypeFromName(fileName: string | undefined | null) {
+  const extension = path.extname(fileName || "").toLowerCase();
+  switch (extension) {
+    case ".png":
+      return "image/png";
+    case ".webp":
+      return "image/webp";
+    case ".pdf":
+      return "application/pdf";
+    default:
+      return "image/jpeg";
+  }
+}
+
+function detectMimeTypeFromBuffer(buffer: Buffer, fileName?: string | null, fallbackMimeType?: string | null) {
+  if (buffer.length >= 8 && buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
+    return "image/png";
+  }
+  if (buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
+    return "image/jpeg";
+  }
+  if (
+    buffer.length >= 12 &&
+    buffer.subarray(0, 4).toString("ascii") === "RIFF" &&
+    buffer.subarray(8, 12).toString("ascii") === "WEBP"
+  ) {
+    return "image/webp";
+  }
+  if (buffer.length >= 5 && buffer.subarray(0, 5).toString("ascii") === "%PDF-") {
+    return "application/pdf";
+  }
+  return fallbackMimeType || inferMimeTypeFromName(fileName);
 }
 
 const TRAINING_FIELD_LABELS: Record<string, string> = {
@@ -684,6 +827,7 @@ export async function buildVisualReferencePack(
     maxBoxHintExamples?: number;
     fieldLabels?: Record<string, string>;
     activeFieldIds?: string[];
+    formId?: string;
   },
 ): Promise<{
   hintText: string;
@@ -706,7 +850,7 @@ export async function buildVisualReferencePack(
         break;
       }
 
-      const originalDataUrl = await getTrainingImageDataUrl(example.imageName);
+      const originalDataUrl = await getTrainingImageDataUrl(example.imageName, options?.formId);
       if (!originalDataUrl) {
         continue;
       }
@@ -903,6 +1047,7 @@ function normalizeAgentAssets(raw: unknown): AgentAsset[] {
 export async function buildAgentThreadReferenceImages(
   thread: AgentThreadTurn[] | undefined | null,
   limit?: number,
+  formId = DEFAULT_FORM_ID,
 ): Promise<Array<{ imageName: string; caption: string; dataUrl: string }>> {
   const max =
     limit ??
@@ -925,7 +1070,7 @@ export async function buildAgentThreadReferenceImages(
 
   const refs: Array<{ imageName: string; caption: string; dataUrl: string }> = [];
   for (const imageName of order) {
-    const dataUrl = await getTrainingImageDataUrl(imageName);
+    const dataUrl = await getTrainingImageDataUrl(imageName, formId);
     if (!dataUrl) continue;
     refs.push({
       imageName,

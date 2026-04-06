@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import sharp from "sharp";
 
 import { getAuthUserOrSkip } from "@/lib/auth-server";
+import { getFormIdFromFormData } from "@/lib/form-request";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import {
   type ExtractionIssue,
@@ -85,23 +86,25 @@ function getConsistencyAttemptCount(): number {
 }
 
 type ExtractVisionContext = {
+  formId: string;
   examples: TrainingExample[];
   visualPack: Awaited<ReturnType<typeof buildVisualReferencePack>>;
   imageGuidance: Array<{ example: TrainingExample; fingerprint: number[] }>;
   tableFields: TableFieldDefinition[];
 };
 
-async function buildExtractVisionContext(): Promise<ExtractVisionContext> {
-  const [examples, rawTableFields] = await Promise.all([loadTrainingExamples(), loadTableFields()]);
+async function buildExtractVisionContext(formId: string): Promise<ExtractVisionContext> {
+  const [examples, rawTableFields] = await Promise.all([loadTrainingExamples(formId), loadTableFields(formId)]);
   const tableFields = getActiveTableFields(rawTableFields);
   const [visualPack, imageGuidance] = await Promise.all([
     buildVisualReferencePack(examples, {
       fieldLabels: getFieldLabelMap(tableFields),
       activeFieldIds: tableFields.map((field) => field.id),
+      formId,
     }),
-    buildTrainingImageGuidance(examples),
+    buildTrainingImageGuidance(examples, formId),
   ]);
-  return { examples, visualPack, imageGuidance, tableFields };
+  return { formId, examples, visualPack, imageGuidance, tableFields };
 }
 
 function mergeParallelRefineReasons(base: PodRecord, ...refined: PodRecord[]): string | null {
@@ -448,11 +451,14 @@ async function imageFingerprintFromBuffer(bytes: Buffer): Promise<number[]> {
   return Array.from(raw, (value) => value / 255);
 }
 
-async function buildTrainingImageGuidance(examples: TrainingExample[]): Promise<FingerprintedTrainingExample[]> {
+async function buildTrainingImageGuidance(
+  examples: TrainingExample[],
+  formId: string,
+): Promise<FingerprintedTrainingExample[]> {
   const candidates = examples.filter(hasImageCoordBoxes);
   const loaded = await Promise.all(
     candidates.map(async (example) => {
-      const dataUrl = await getTrainingImageDataUrl(example.imageName);
+      const dataUrl = await getTrainingImageDataUrl(example.imageName, formId);
       if (!dataUrl) return null;
       const bytes = parseDataUrlToBuffer(dataUrl);
       if (!bytes) return null;
@@ -1565,6 +1571,7 @@ async function buildVisualPackForCurrentImage(file: File, ctx: ExtractVisionCont
   return buildVisualReferencePack(similarExamples, {
     fieldLabels: getFieldLabelMap(ctx.tableFields),
     activeFieldIds: ctx.tableFields.map((field) => field.id),
+    formId: ctx.formId,
   });
 }
 
@@ -2443,6 +2450,7 @@ export async function POST(request: Request) {
     }
 
     const formData = await request.formData();
+    const formId = getFormIdFromFormData(formData);
     const mode = String(formData.get("mode") || "primary");
     const files = formData
       .getAll("files")
@@ -2456,7 +2464,7 @@ export async function POST(request: Request) {
     const records: PodRecord[] = [];
     const issues: ExtractionIssue[] = [];
 
-    const visionCtx = await buildExtractVisionContext();
+    const visionCtx = await buildExtractVisionContext(formId);
     const examples = visionCtx.examples;
 
     for (const file of files) {

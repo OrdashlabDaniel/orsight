@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { getAuthUserOrSkip } from "@/lib/auth-server";
+import { getFormIdFromRequest } from "@/lib/form-request";
 import {
   buildAgentThreadPromptSection,
   loadGlobalRules,
@@ -21,6 +22,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "请先登录。" }, { status: 401 });
     }
 
+    const formId = getFormIdFromRequest(request);
     if (!OPENAI_API_KEY) {
       return NextResponse.json({ error: "未配置 OPENAI_API_KEY。" }, { status: 503 });
     }
@@ -52,7 +54,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "没有有效的对话内容。" }, { status: 400 });
     }
 
-    const rules = mergeLegacyIntoAgentThreadIfEmpty(await loadGlobalRules());
+    const rules = mergeLegacyIntoAgentThreadIfEmpty(await loadGlobalRules(formId));
     const docSnippets =
       rules.documents?.length > 0
         ? rules.documents
