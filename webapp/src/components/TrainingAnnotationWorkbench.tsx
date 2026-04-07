@@ -1150,7 +1150,7 @@ export function TrainingAnnotationWorkbench({
       aria-modal="true"
       aria-labelledby="annotation-dialog-title"
     >
-      <div className="my-auto flex max-h-[95vh] w-full max-w-[min(96vw,1720px)] flex-col overflow-hidden rounded-3xl border border-slate-200 bg-white p-5 shadow-2xl">
+      <div className="my-auto flex max-h-[96vh] w-full max-w-[min(99vw,1880px)] flex-col overflow-hidden rounded-3xl border border-slate-200 bg-white p-5 shadow-2xl">
         <div className="sticky top-0 z-10 mb-4 flex flex-wrap items-center justify-between gap-3 bg-white pb-2">
           <div>
             <h2 id="annotation-dialog-title" className="text-lg font-semibold">
@@ -1188,7 +1188,7 @@ export function TrainingAnnotationWorkbench({
         </div>
         </div>
 
-        <div className="grid min-h-0 flex-1 gap-4 overflow-y-auto pr-1 lg:grid-cols-[minmax(0,1.4fr)_min(100%,440px)]">
+        <div className="grid min-h-0 flex-1 gap-4 overflow-y-auto pr-1 lg:grid-cols-[minmax(0,1.9fr)_minmax(360px,430px)] xl:grid-cols-[minmax(0,2.2fr)_minmax(360px,420px)]">
           <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
             <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
               <div>
@@ -1256,7 +1256,7 @@ export function TrainingAnnotationWorkbench({
                 </button>
               </div>
             </div>
-            <div ref={annotationViewportRef} className="min-h-[min(68vh,760px)] max-h-[76vh] overflow-auto rounded-xl bg-black/5 p-3">
+            <div ref={annotationViewportRef} className="min-h-[min(72vh,860px)] max-h-[82vh] overflow-auto rounded-xl bg-black/5 p-3">
               <div className={`min-h-full min-w-full ${annotationZoom <= 100 ? "flex items-center justify-center" : "block"}`}>
               <div
                 ref={annotationCanvasRef}

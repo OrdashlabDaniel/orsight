@@ -13,6 +13,7 @@ import {
   type FieldAggregation,
   type WorkbenchAnnotationBox,
 } from "@/components/TrainingAnnotationWorkbench";
+import { RecognitionAgentDock } from "@/components/RecognitionAgentDock";
 import {
   type ExtractionIssue,
   type ExtractionResponse,
@@ -118,21 +119,6 @@ type WindowWithSavePicker = Window &
       }>;
     }) => Promise<SaveFilePickerHandle>;
   };
-
-export const editableColumns: Array<{
-  key: keyof Pick<PodRecord, "date" | "route" | "driver" | "taskCode" | "total" | "unscanned" | "exceptions" | "waybillStatus">;
-  label: string;
-  type?: "text" | "number";
-}> = [
-  { key: "date", label: "日期" },
-  { key: "route", label: "抽查路线" },
-  { key: "driver", label: "抽查司机" },
-  { key: "taskCode", label: "任务编码" },
-  { key: "total", label: "运单数量", type: "number" },
-  { key: "unscanned", label: "未收数量", type: "number" },
-  { key: "exceptions", label: "错扫数量", type: "number" },
-  { key: "waybillStatus", label: "响应更新状态" },
-];
 
 function podRecordToAnnotationSeed(record: PodRecord): AnnotationWorkbenchSeed {
   return {
@@ -2099,6 +2085,8 @@ function HomeContent() {
             }}
           />
         ) : null}
+
+        <RecognitionAgentDock formId={currentFormId} modeLabel="填表模式" />
       </div>
     </main>
   );
