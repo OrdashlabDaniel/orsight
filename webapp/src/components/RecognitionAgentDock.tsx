@@ -61,6 +61,7 @@ export function RecognitionAgentDock({
   const [agentThread, setAgentThread] = useState<AgentThreadTurn[]>([]);
   const [workingRules, setWorkingRules] = useState("");
   const [workingRulesDirty, setWorkingRulesDirty] = useState(false);
+  const [showRulesEditor, setShowRulesEditor] = useState(false);
   const [agentInput, setAgentInput] = useState("");
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
   const [dragActive, setDragActive] = useState(false);
