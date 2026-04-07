@@ -14,6 +14,7 @@ import {
   type TableAnnotationFieldValues,
   type WorkbenchAnnotationBox,
 } from "@/components/TrainingAnnotationWorkbench";
+import { RecognitionAgentDock } from "@/components/RecognitionAgentDock";
 import type { AgentAsset, AgentThreadTurn } from "@/lib/agent-context-types";
 import {
   DEFAULT_TABLE_FIELDS,
@@ -129,12 +130,9 @@ function TrainingModeContent() {
   const [isSavingTraining, setIsSavingTraining] = useState(false);
 
   const [globalRules, setGlobalRules] = useState<{
-    instructions: string;
-    documents: Array<{ name: string; content: string }>;
-    guidanceHistory?: Array<{ role: "user" | "assistant"; content: string; ts: string }>;
     agentThread?: AgentThreadTurn[];
     workingRules?: string;
-  }>({ instructions: "", documents: [], agentThread: [], workingRules: "" });
+  }>({ agentThread: [], workingRules: "" });
   const [agentInput, setAgentInput] = useState("");
   const [pendingAgentFiles, setPendingAgentFiles] = useState<Array<{ id: string; file: File }>>([]);
   const [agentDragActive, setAgentDragActive] = useState(false);
@@ -243,12 +241,15 @@ function TrainingModeContent() {
       const res = await fetch(withFormId("/api/training/rules"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(globalRules),
+        body: JSON.stringify({
+          workingRules: globalRules.workingRules ?? "",
+          agentThread: globalRules.agentThread ?? [],
+        }),
       });
       if (!res.ok) throw new Error("保存失败");
-      setNoticeMessage("填表工作规则已保存，将在下次识别时生效。");
+      setNoticeMessage("识别规则已保存，将在下次识别时生效。");
     } catch {
-      setErrorMessage("保存工作规则失败。");
+      setErrorMessage("保存识别规则失败。");
     } finally {
       setIsSavingRules(false);
     }
@@ -381,12 +382,15 @@ function TrainingModeContent() {
         const saveRes = await fetch(withFormId("/api/training/rules"), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(updated),
+          body: JSON.stringify({
+            workingRules: updated.workingRules ?? "",
+            agentThread: updated.agentThread ?? [],
+          }),
         });
         if (!saveRes.ok) throw new Error("自动保存失败");
-        setNoticeMessage("工作规则已按本轮对话升级并写入填表流程；效果不好可继续在这里说明，Agent 会再优化。");
+        setNoticeMessage("识别规则已按本轮对话升级并写入识别流程；效果不好可继续在这里说明，Agent 会再优化。");
       } catch {
-        setErrorMessage("规则已更新到界面，但自动保存失败，请点击「保存工作规则」。");
+        setErrorMessage("识别规则已更新到界面，但自动保存失败，请点击「保存识别规则」。");
       } finally {
         setIsSavingRules(false);
       }
@@ -400,7 +404,7 @@ function TrainingModeContent() {
   function clearAgentThread() {
     setGlobalRules((p) => ({ ...p, agentThread: [] }));
     setPendingAgentFiles([]);
-    setNoticeMessage("已清空对话记录（工作规则未清空）。若也要重置规则，请手动删除上方规则正文后保存。");
+    setNoticeMessage("已清空对话记录（识别规则未清空）。若也要重置规则，请手动删除上方规则正文后保存。");
   }
 
   function handleAgentComposerPaste(event: React.ClipboardEvent<HTMLTextAreaElement>) {
@@ -717,23 +721,24 @@ function TrainingModeContent() {
           <div className="flex flex-col gap-4">
             <div className="flex min-h-0 flex-col rounded-3xl border border-slate-200 bg-white shadow-sm">
               <div className="border-b border-slate-200 px-5 py-4">
-                <h2 className="text-lg font-semibold">填表 Agent</h2>
+                <h2 className="text-lg font-semibold">识别规则 Agent</h2>
                 <p className="mt-1 text-sm text-slate-500">
-                  像 Cursor 一样对话：说明你的业务、错判案例或丢入截图/文档。Agent 会<strong>生成并升级「填表工作规则」</strong>并
-                  <strong>自动写入识别流程</strong>——不是存聊天记录。效果不好就再来聊，规则会持续迭代。
+                  像 Cursor 一样对话：告诉模型应该如何识别、哪些字段容易错判、看到什么标签才算哪个字段。Agent 只会
+                  <strong>生成并升级「识别规则」</strong>并<strong>自动写入识别流程</strong>；页面结构、接口、存储、权限、
+                  字段清单等软件架构不会在这里被改动。
                 </p>
               </div>
               <div className="flex min-h-0 flex-1 flex-col gap-3 p-5">
                 <div>
-                  <label className="mb-1 block text-xs font-medium text-slate-700">当前填表工作规则（已内化到填表识别）</label>
+                  <label className="mb-1 block text-xs font-medium text-slate-700">当前识别规则（仅影响识别准确性与判定方式）</label>
                   <textarea
                     className="min-h-[120px] w-full resize-y rounded-xl border border-slate-300 px-3 py-2 text-xs leading-relaxed outline-none focus:border-blue-500"
-                    placeholder="对话后 Agent 会在这里写入完整规则；你也可以直接手改。"
+                    placeholder="对话后 Agent 会在这里整理可编辑的识别规则；你也可以直接手改。这里不会修改页面、接口、存储或字段结构。"
                     value={globalRules.workingRules ?? ""}
                     onChange={(e) => setGlobalRules({ ...globalRules, workingRules: e.target.value })}
                     disabled={agentChatLoading}
                   />
-                  <p className="mt-1 text-[11px] text-slate-400">识别时优先使用本段正文；附件仍会作为参考图进入视觉模型。</p>
+                  <p className="mt-1 text-[11px] text-slate-400">识别时优先使用本段正文；这里只允许改截图识别规则，附件仍会作为参考图进入视觉模型。</p>
                 </div>
 
                 <div className="flex min-h-[200px] max-h-72 flex-1 flex-col overflow-hidden rounded-xl border border-slate-200 bg-slate-50">
@@ -745,7 +750,7 @@ function TrainingModeContent() {
                   </div>
                   <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3 text-sm">
                     {(globalRules.agentThread?.length ?? 0) === 0 ? (
-                      <p className="text-xs text-slate-400">还没有消息。直接说明你的业务规则、常见错判，或丢入现场截图 / 说明文档。</p>
+                      <p className="text-xs text-slate-400">还没有消息。直接说明识别约定、常见错判，或丢入现场截图 / 说明文档；这里只会调整识别规则，不会改软件架构。</p>
                     ) : (
                       (globalRules.agentThread || []).map((turn) => (
                         <div
@@ -816,7 +821,7 @@ function TrainingModeContent() {
                   )}
                   <textarea
                     className="mb-2 min-h-[88px] w-full resize-y rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-blue-500"
-                    placeholder="例如：我们 POD 屏上「应领件数」在第二屏中间，反光严重时优先看左上角小字…"
+                    placeholder="例如：我们 POD 屏上「应领件数」在第二屏中间，反光严重时优先看左上角小字；如果标签不明确就留空并复核…"
                     value={agentInput}
                     onChange={(e) => setAgentInput(e.target.value)}
                     onPaste={handleAgentComposerPaste}
@@ -856,7 +861,7 @@ function TrainingModeContent() {
                   onClick={() => void saveGlobalRules()}
                   disabled={isSavingRules || agentChatLoading}
                 >
-                  {isSavingRules ? "保存中…" : "保存工作规则"}
+                  {isSavingRules ? "保存中…" : "保存识别规则"}
                 </button>
               </div>
             </div>
@@ -1137,6 +1142,8 @@ function TrainingModeContent() {
             }}
           />
         ) : null}
+
+        <RecognitionAgentDock formId={currentFormId} modeLabel="训练模式" />
       </div>
     </main>
   );

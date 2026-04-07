@@ -9,8 +9,14 @@ import {
   saveGlobalRules,
   seedWorkingRulesFromLegacy,
   type GlobalRules,
-  type GuidanceTurn,
 } from "@/lib/training";
+
+function buildEditableRecognitionRulesPayload(rules: GlobalRules) {
+  return {
+    workingRules: typeof rules.workingRules === "string" ? rules.workingRules : "",
+    agentThread: Array.isArray(rules.agentThread) ? normalizeAgentThread(rules.agentThread) : [],
+  };
+}
 
 export async function GET(request: Request) {
   try {
@@ -21,11 +27,11 @@ export async function GET(request: Request) {
 
     const formId = getFormIdFromRequest(request);
     const rules = seedWorkingRulesFromLegacy(mergeLegacyIntoAgentThreadIfEmpty(await loadGlobalRules(formId)));
-    return NextResponse.json(rules);
+    return NextResponse.json(buildEditableRecognitionRulesPayload(rules));
   } catch (error) {
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Failed to load global rules." },
-      { status: 500 }
+      { error: error instanceof Error ? error.message : "Failed to load recognition rules." },
+      { status: 500 },
     );
   }
 }
@@ -38,76 +44,30 @@ export async function POST(request: Request) {
     }
 
     const formId = getFormIdFromRequest(request);
-    const payload = (await request.json()) as GlobalRules & { guidanceHistory?: unknown };
+    const payload = (await request.json()) as Partial<GlobalRules>;
     const current = await loadGlobalRules(formId);
 
-    function normalizeGuidance(raw: unknown): GuidanceTurn[] {
-      if (!Array.isArray(raw)) {
-        return [];
-      }
-      return raw
-        .filter((t): t is GuidanceTurn => {
-          if (!t || typeof t !== "object") return false;
-          const g = t as Record<string, unknown>;
-          return (
-            (g.role === "user" || g.role === "assistant") &&
-            typeof g.content === "string" &&
-            typeof g.ts === "string"
-          );
-        })
-        .map((t) => ({
-          role: t.role,
-          content: t.content.slice(0, 16000),
-          ts: t.ts,
-        }));
-    }
-
-    const nextGuidance = Object.prototype.hasOwnProperty.call(payload, "guidanceHistory")
-      ? normalizeGuidance(payload.guidanceHistory)
-      : current.guidanceHistory;
-
-    const nextAgentThread = Object.prototype.hasOwnProperty.call(payload, "agentThread")
-      ? normalizeAgentThread(payload.agentThread)
-      : current.agentThread;
-
     const rulesToSave: GlobalRules = {
-      instructions: typeof payload.instructions === "string" ? payload.instructions : current.instructions,
-      documents: Array.isArray(payload.documents)
-        ? payload.documents.map((doc) => ({
-            name: typeof doc.name === "string" ? doc.name : "Unnamed Document",
-            content: typeof doc.content === "string" ? doc.content : "",
-          }))
-        : current.documents,
+      instructions: current.instructions,
+      documents: Array.isArray(current.documents) ? current.documents.map((doc) => ({ ...doc })) : [],
+      guidanceHistory: Array.isArray(current.guidanceHistory) ? [...current.guidanceHistory] : [],
+      tableFields: Array.isArray(current.tableFields) ? [...current.tableFields] : current.tableFields,
+      workingRules: Object.prototype.hasOwnProperty.call(payload, "workingRules")
+        ? typeof payload.workingRules === "string"
+          ? payload.workingRules.slice(0, 50000)
+          : ""
+        : current.workingRules,
+      agentThread: Object.prototype.hasOwnProperty.call(payload, "agentThread")
+        ? normalizeAgentThread(payload.agentThread)
+        : current.agentThread,
     };
 
-    if (nextGuidance !== undefined) {
-      rulesToSave.guidanceHistory = nextGuidance;
-    }
-
-    if (nextAgentThread !== undefined) {
-      rulesToSave.agentThread = nextAgentThread;
-    }
-
-    if (Object.prototype.hasOwnProperty.call(payload, "workingRules")) {
-      rulesToSave.workingRules =
-        typeof payload.workingRules === "string" ? payload.workingRules.slice(0, 50000) : "";
-    } else if (current.workingRules !== undefined) {
-      rulesToSave.workingRules = current.workingRules;
-    }
-
-    if (Array.isArray(payload.tableFields)) {
-      rulesToSave.tableFields = payload.tableFields;
-    } else if (current.tableFields !== undefined) {
-      rulesToSave.tableFields = current.tableFields;
-    }
-
     await saveGlobalRules(rulesToSave, formId);
-
-    return NextResponse.json({ ok: true });
+    return NextResponse.json({ ok: true, ...buildEditableRecognitionRulesPayload(rulesToSave) });
   } catch (error) {
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Failed to save global rules." },
-      { status: 500 }
+      { error: error instanceof Error ? error.message : "Failed to save recognition rules." },
+      { status: 500 },
     );
   }
 }

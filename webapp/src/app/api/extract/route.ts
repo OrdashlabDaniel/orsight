@@ -17,10 +17,14 @@ import {
   validateRecord,
 } from "@/lib/pod";
 import {
+  buildEditableRecognitionRulesSection,
   buildVisualReferencePack,
   type FieldAggregation,
   getTrainingImageDataUrl,
+  loadGlobalRules,
   loadTrainingExamples,
+  mergeLegacyIntoAgentThreadIfEmpty,
+  seedWorkingRulesFromLegacy,
   type TrainingBox,
   type TrainingExample,
   type TrainingField,
@@ -91,10 +95,15 @@ type ExtractVisionContext = {
   visualPack: Awaited<ReturnType<typeof buildVisualReferencePack>>;
   imageGuidance: Array<{ example: TrainingExample; fingerprint: number[] }>;
   tableFields: TableFieldDefinition[];
+  editableRecognitionRulesText: string;
 };
 
 async function buildExtractVisionContext(formId: string): Promise<ExtractVisionContext> {
-  const [examples, rawTableFields] = await Promise.all([loadTrainingExamples(formId), loadTableFields(formId)]);
+  const [examples, rawTableFields, globalRules] = await Promise.all([
+    loadTrainingExamples(formId),
+    loadTableFields(formId),
+    loadGlobalRules(formId),
+  ]);
   const tableFields = getActiveTableFields(rawTableFields);
   const [visualPack, imageGuidance] = await Promise.all([
     buildVisualReferencePack(examples, {
@@ -104,7 +113,15 @@ async function buildExtractVisionContext(formId: string): Promise<ExtractVisionC
     }),
     buildTrainingImageGuidance(examples, formId),
   ]);
-  return { formId, examples, visualPack, imageGuidance, tableFields };
+  const normalizedRules = seedWorkingRulesFromLegacy(mergeLegacyIntoAgentThreadIfEmpty(globalRules));
+  return {
+    formId,
+    examples,
+    visualPack,
+    imageGuidance,
+    tableFields,
+    editableRecognitionRulesText: buildEditableRecognitionRulesSection(normalizedRules),
+  };
 }
 
 function mergeParallelRefineReasons(base: PodRecord, ...refined: PodRecord[]): string | null {
@@ -1424,7 +1441,7 @@ async function callVisionModel(
   const bytes = Buffer.from(await file.arrayBuffer());
   const dataUrl = `data:${file.type || "image/jpeg"};base64,${bytes.toString("base64")}`;
   const visualPack = await buildVisualPackForCurrentImage(file, ctx);
-  const baseText = `${SIMPLE_EXTRACTION_PROMPT}${SIMPLE_EXTRACTION_STRICT_APPENDIX}${TASK_CODE_RECOVERY_APPENDIX}${buildRecognitionModeDynamicFieldPrompt(ctx.tableFields)}${visualPack.hintText}`;
+  const baseText = `${SIMPLE_EXTRACTION_PROMPT}${SIMPLE_EXTRACTION_STRICT_APPENDIX}${TASK_CODE_RECOVERY_APPENDIX}${buildRecognitionModeDynamicFieldPrompt(ctx.tableFields)}${ctx.editableRecognitionRulesText}${visualPack.hintText}`;
 
   const userContent: OpenAIMessageContent[] = [{ type: "text", text: baseText }];
   for (const ref of visualPack.referenceImages) {
