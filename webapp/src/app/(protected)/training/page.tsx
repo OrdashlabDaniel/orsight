@@ -104,6 +104,7 @@ function TrainingModeContent() {
   const [selectedUploadId, setSelectedUploadId] = useState<string | null>(null);
   const [trainingThumbnailMap, setTrainingThumbnailMap] = useState<Record<string, string>>({});
   const [trainingThumbnailErrorMap, setTrainingThumbnailErrorMap] = useState<Record<string, boolean>>({});
+  const [deletingImageName, setDeletingImageName] = useState<string | null>(null);
 
   const [trainingStatus, setTrainingStatus] = useState<TrainingStatusResponse | null>(null);
   const [isDraggingFiles, setIsDraggingFiles] = useState(false);
@@ -599,6 +600,53 @@ function TrainingModeContent() {
     void openAnnotationPanel(item);
   }
 
+  async function handleDeleteTrainingItem(item: TrainingStatusItem, event: { stopPropagation(): void }) {
+    event.stopPropagation();
+    if (deletingImageName) {
+      return;
+    }
+
+    const confirmed = window.confirm(`确定要从训练池中删除图片「${item.imageName}」吗？对应标注也会一起删除。`);
+    if (!confirmed) {
+      return;
+    }
+
+    setDeletingImageName(item.imageName);
+    setErrorMessage("");
+    try {
+      const response = await fetch(
+        withFormId(`/api/training/image?imageName=${encodeURIComponent(item.imageName)}`),
+        { method: "DELETE" },
+      );
+      const payload = (await response.json()) as { error?: string };
+      if (!response.ok) {
+        throw new Error(payload.error || "删除训练池图片失败。");
+      }
+
+      if (annotatingItem && !("file" in annotatingItem) && annotatingItem.imageName === item.imageName) {
+        closeRecordPopup();
+      }
+
+      setTrainingThumbnailMap((current) => {
+        const next = { ...current };
+        delete next[item.imageName];
+        return next;
+      });
+      setTrainingThumbnailErrorMap((current) => {
+        const next = { ...current };
+        delete next[item.imageName];
+        return next;
+      });
+
+      await loadTrainingStatus();
+      setNoticeMessage(`已从训练池删除图片：${item.imageName}`);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "删除训练池图片失败。");
+    } finally {
+      setDeletingImageName(null);
+    }
+  }
+
   async function openAnnotationPanel(item: UploadItem | TrainingStatusItem) {
     setAnnotatingItem(item);
 
@@ -1049,6 +1097,24 @@ function TrainingModeContent() {
                       onClick={() => handleTrainingItemClick(item)}
                       className="group relative flex aspect-square flex-col overflow-hidden rounded-2xl border border-slate-200 bg-slate-50 text-left transition-all hover:border-blue-400 hover:shadow-md"
                     >
+                      <span
+                        role="button"
+                        tabIndex={0}
+                        onClick={(event) => void handleDeleteTrainingItem(item, event)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter" || event.key === " ") {
+                            event.preventDefault();
+                            void handleDeleteTrainingItem(item, event);
+                          }
+                        }}
+                        aria-disabled={deletingImageName === item.imageName}
+                        aria-label={`删除 ${item.imageName}`}
+                        className={`absolute right-2 top-2 z-10 rounded-full border border-rose-200 bg-white/95 px-2 py-1 text-[11px] font-medium text-rose-600 shadow-sm transition hover:bg-rose-50 ${
+                          deletingImageName === item.imageName ? "pointer-events-none opacity-60" : ""
+                        }`}
+                      >
+                        {deletingImageName === item.imageName ? "删除中..." : "删除"}
+                      </span>
                       <div className="relative flex-1 bg-slate-100">
                         {!trainingThumbnailErrorMap[item.imageName] ? (
                           <Image

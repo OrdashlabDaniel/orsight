@@ -3,7 +3,7 @@ import sharp from "sharp";
 
 import { getAuthUserOrSkip } from "@/lib/auth-server";
 import { getFormIdFromRequest } from "@/lib/form-request";
-import { getTrainingImageBinary, getTrainingImageDataUrl } from "@/lib/training";
+import { deleteTrainingPoolImage, getTrainingImageBinary, getTrainingImageDataUrl } from "@/lib/training";
 
 export async function GET(request: Request) {
   const { user, skipAuth } = await getAuthUserOrSkip();
@@ -56,4 +56,31 @@ export async function GET(request: Request) {
   }
 
   return NextResponse.json({ imageName, dataUrl });
+}
+
+export async function DELETE(request: Request) {
+  try {
+    const { user, skipAuth } = await getAuthUserOrSkip();
+    if (!skipAuth && !user) {
+      return NextResponse.json({ error: "请先登录。" }, { status: 401 });
+    }
+
+    const { searchParams } = new URL(request.url);
+    const imageName = searchParams.get("imageName");
+    const formId = getFormIdFromRequest(request);
+
+    if (!imageName) {
+      return NextResponse.json({ error: "Missing imageName." }, { status: 400 });
+    }
+
+    await deleteTrainingPoolImage(imageName, formId);
+    return NextResponse.json({ ok: true, imageName });
+  } catch (error) {
+    return NextResponse.json(
+      {
+        error: error instanceof Error ? error.message : "Failed to delete training image.",
+      },
+      { status: 500 },
+    );
+  }
 }

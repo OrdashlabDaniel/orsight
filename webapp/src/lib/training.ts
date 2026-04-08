@@ -403,6 +403,95 @@ export async function saveTrainingImageDataUrl(imageName: string, dataUrl: strin
   }
 }
 
+function removeImageAssetsFromAgentThread(thread: AgentThreadTurn[] | undefined, imageName: string) {
+  if (!Array.isArray(thread) || thread.length === 0) {
+    return { changed: false, thread: thread || [] };
+  }
+
+  let changed = false;
+  const nextThread = thread.map((turn) => {
+    if (!Array.isArray(turn.assets) || turn.assets.length === 0) {
+      return turn;
+    }
+
+    const nextAssets = turn.assets.filter(
+      (asset) => !(asset.kind === "image" && asset.imageName === imageName),
+    );
+    if (nextAssets.length === turn.assets.length) {
+      return turn;
+    }
+
+    changed = true;
+    if (nextAssets.length === 0) {
+      const nextTurn = { ...turn };
+      delete nextTurn.assets;
+      return nextTurn;
+    }
+
+    return {
+      ...turn,
+      assets: nextAssets,
+    };
+  });
+
+  return { changed, thread: nextThread };
+}
+
+async function pruneTrainingImageFromGlobalRules(imageName: string, formId = DEFAULT_FORM_ID) {
+  const rules = await loadGlobalRules(formId);
+  const { changed, thread } = removeImageAssetsFromAgentThread(rules.agentThread, imageName);
+  if (!changed) {
+    return;
+  }
+  await saveGlobalRules(
+    {
+      ...rules,
+      agentThread: thread,
+    },
+    formId,
+  );
+}
+
+export async function deleteTrainingPoolImage(imageName: string, formId = DEFAULT_FORM_ID) {
+  const normalizedFormId = normalizeFormId(formId);
+  const storageKey = getFormExampleStorageKey(normalizedFormId, imageName);
+  const storagePath = getFormImageStoragePath(normalizedFormId, imageName);
+  const admin = getSupabaseAdmin();
+
+  if (!isSupabaseConfigured() || !admin) {
+    for (const dirPath of trainingImageCandidatePaths(normalizedFormId)) {
+      const filePath = path.join(dirPath, imageName);
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+      }
+    }
+
+    const currentExamples = loadLocalTrainingExamples(normalizedFormId);
+    const nextExamples = currentExamples.filter((example) => example.imageName !== imageName);
+    if (nextExamples.length !== currentExamples.length) {
+      saveLocalTrainingExamples(nextExamples, normalizedFormId);
+    }
+
+    await pruneTrainingImageFromGlobalRules(imageName, normalizedFormId);
+    return;
+  }
+
+  const [removeImageResult, removeExampleResult] = await Promise.all([
+    admin.storage.from("training-images").remove([storagePath]),
+    admin.from("training_examples").delete().eq("image_name", storageKey),
+  ]);
+
+  if (removeImageResult.error && !/not[\s-]?found/i.test(removeImageResult.error.message || "")) {
+    throw new Error(`Failed to delete training image: ${removeImageResult.error.message}`);
+  }
+
+  if (removeExampleResult.error) {
+    throw new Error(`Failed to delete training annotation: ${removeExampleResult.error.message}`);
+  }
+
+  await pruneTrainingImageFromGlobalRules(imageName, normalizedFormId);
+}
+
 export async function getTrainingPoolStatus(formId = DEFAULT_FORM_ID) {
   const examples = await loadTrainingExamples(formId);
   const exampleMap = new Map(examples.map((example) => [example.imageName, example]));
