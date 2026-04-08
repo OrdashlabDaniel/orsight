@@ -120,6 +120,8 @@ type WindowWithSavePicker = Window &
     }) => Promise<SaveFilePickerHandle>;
   };
 
+const EXTRACTION_BATCH_SIZE = 5;
+
 function podRecordToAnnotationSeed(record: PodRecord): AnnotationWorkbenchSeed {
   return {
     date: record.date ?? "",
@@ -583,33 +585,39 @@ function HomeContent() {
     const allRecords: PodRecord[] = [];
     const allIssues: ExtractionIssue[] = [];
     let loadedTrainingExamples = 0;
-    let currentIndex = 0;
+    const batches = Array.from(
+      { length: Math.ceil(files.length / EXTRACTION_BATCH_SIZE) },
+      (_, index) => files.slice(index * EXTRACTION_BATCH_SIZE, (index + 1) * EXTRACTION_BATCH_SIZE),
+    ).filter((batch) => batch.length > 0);
+    let currentBatchIndex = 0;
 
     setProgress({ completed: 0, total: files.length });
 
     async function worker() {
-      while (currentIndex < files.length) {
-        const index = currentIndex;
-        currentIndex += 1;
-        const file = files[index];
+      while (currentBatchIndex < batches.length) {
+        const batchIndex = currentBatchIndex;
+        currentBatchIndex += 1;
+        const batch = batches[batchIndex];
 
         try {
-          const payload = await requestExtraction([file], mode);
+          const payload = await requestExtraction(batch, mode);
           allRecords.push(...(payload.records || []));
           allIssues.push(...(payload.issues || []));
-          loadedTrainingExamples = payload.trainingExamplesLoaded || loadedTrainingExamples;
+          loadedTrainingExamples = Math.max(loadedTrainingExamples, payload.trainingExamplesLoaded || 0);
         } catch (error) {
-          allIssues.push({
-            imageName: file.name,
-            level: "error",
-            message: error instanceof Error ? error.message : "识别失败。",
+          batch.forEach((file) => {
+            allIssues.push({
+              imageName: file.name,
+              level: "error",
+              message: error instanceof Error ? error.message : "识别失败。",
+            });
           });
         } finally {
           setProgress((current) =>
             current
               ? {
                   ...current,
-                  completed: Math.min(current.completed + 1, current.total),
+                  completed: Math.min(current.completed + batch.length, current.total),
                 }
               : current,
           );
@@ -617,7 +625,7 @@ function HomeContent() {
       }
     }
 
-    await Promise.all(Array.from({ length: Math.min(concurrency, files.length) }, () => worker()));
+    await Promise.all(Array.from({ length: Math.min(concurrency, batches.length) }, () => worker()));
 
     return {
       records: allRecords,

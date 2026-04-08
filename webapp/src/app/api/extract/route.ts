@@ -28,6 +28,7 @@ import {
   type TrainingBox,
   type TrainingExample,
   type TrainingField,
+  withTrainingImageRequestCache,
 } from "@/lib/training";
 import {
   getActiveTableFields,
@@ -96,6 +97,8 @@ type ExtractVisionContext = {
   imageGuidance: Array<{ example: TrainingExample; fingerprint: number[] }>;
   tableFields: TableFieldDefinition[];
   editableRecognitionRulesText: string;
+  currentImageVisualPacks: WeakMap<File, Promise<Awaited<ReturnType<typeof buildVisualReferencePack>>>>;
+  currentImageSimilarExamples: WeakMap<File, Promise<TrainingExample[]>>;
 };
 
 async function buildExtractVisionContext(formId: string): Promise<ExtractVisionContext> {
@@ -121,6 +124,8 @@ async function buildExtractVisionContext(formId: string): Promise<ExtractVisionC
     imageGuidance,
     tableFields,
     editableRecognitionRulesText: buildEditableRecognitionRulesSection(normalizedRules),
+    currentImageVisualPacks: new WeakMap(),
+    currentImageSimilarExamples: new WeakMap(),
   };
 }
 
@@ -578,7 +583,7 @@ async function runLiveAggregationRefine(
     return { records, collapsed: false };
   }
 
-  const similarExamples = await selectMostSimilarTrainingExamples(file, ctx, 3);
+  const similarExamples = await loadSimilarTrainingExamplesForCurrentImage(file, ctx, 3);
   const aggregationExample =
     similarExamples.map(pickLiveAggregationExample).find((example): example is TrainingExample => Boolean(example)) ||
     ctx.examples.map(pickLiveAggregationExample).find((example): example is TrainingExample => Boolean(example));
@@ -1509,6 +1514,34 @@ async function callVisionModel(
   };
 }
 
+function hasSameExampleSet(left: TrainingExample[], right: TrainingExample[]) {
+  if (left.length !== right.length) {
+    return false;
+  }
+
+  const leftNames = new Set(left.map((example) => example.imageName));
+  return right.every((example) => leftNames.has(example.imageName));
+}
+
+async function loadSimilarTrainingExamplesForCurrentImage(
+  file: File,
+  ctx: ExtractVisionContext,
+  limit = Math.max(1, Number.parseInt(process.env.TRAINING_VISUAL_REF_IMAGES || "4", 10) || 4),
+) {
+  const cached = ctx.currentImageSimilarExamples.get(file);
+  if (cached) {
+    return cached;
+  }
+
+  const promise = selectMostSimilarTrainingExamples(file, ctx, limit).catch((error) => {
+    ctx.currentImageSimilarExamples.delete(file);
+    throw error;
+  });
+
+  ctx.currentImageSimilarExamples.set(file, promise);
+  return promise;
+}
+
 function sanitizeStationTeamRecord(record: PodRecord): PodRecord {
   const stationTeam = normalizeText(record.stationTeam);
   if (!stationTeam) {
@@ -1575,21 +1608,29 @@ function enforceTaskCodeIntegrity(record: PodRecord): PodRecord {
 }
 
 async function buildVisualPackForCurrentImage(file: File, ctx: ExtractVisionContext) {
-  const similarExamples = await selectMostSimilarTrainingExamples(
-    file,
-    ctx,
-    Math.max(1, Number.parseInt(process.env.TRAINING_VISUAL_REF_IMAGES || "4", 10) || 4),
-  );
-
-  if (!similarExamples.length) {
-    return ctx.visualPack;
+  const cached = ctx.currentImageVisualPacks.get(file);
+  if (cached) {
+    return cached;
   }
 
-  return buildVisualReferencePack(similarExamples, {
-    fieldLabels: getFieldLabelMap(ctx.tableFields),
-    activeFieldIds: ctx.tableFields.map((field) => field.id),
-    formId: ctx.formId,
+  const promise = (async () => {
+    const similarExamples = await loadSimilarTrainingExamplesForCurrentImage(file, ctx);
+    if (!similarExamples.length || hasSameExampleSet(similarExamples, ctx.examples)) {
+      return ctx.visualPack;
+    }
+
+    return buildVisualReferencePack(similarExamples, {
+      fieldLabels: getFieldLabelMap(ctx.tableFields),
+      activeFieldIds: ctx.tableFields.map((field) => field.id),
+      formId: ctx.formId,
+    });
+  })().catch((error) => {
+    ctx.currentImageVisualPacks.delete(file);
+    throw error;
   });
+
+  ctx.currentImageVisualPacks.set(file, promise);
+  return promise;
 }
 
 type RecoveryFieldId = keyof Pick<
@@ -2460,91 +2501,92 @@ async function runConsistencyCheck(file: File, model: string, ctx: ExtractVision
 }
 
 export async function POST(request: Request) {
-  try {
-    const { user, skipAuth } = await getAuthUserOrSkip();
-    if (!skipAuth && !user) {
-      return NextResponse.json({ error: "请先登录后再使用识别功能。" }, { status: 401 });
-    }
-
-    const formData = await request.formData();
-    const formId = getFormIdFromFormData(formData);
-    const mode = String(formData.get("mode") || "primary");
-    const files = formData
-      .getAll("files")
-      .filter((value): value is File => value instanceof File);
-    const model = mode === "review" ? OPENAI_REVIEW_MODEL : OPENAI_PRIMARY_MODEL;
-
-    if (!files.length) {
-      return NextResponse.json({ error: "No files uploaded." }, { status: 400 });
-    }
-
-    const records: PodRecord[] = [];
-    const issues: ExtractionIssue[] = [];
-
-    const visionCtx = await buildExtractVisionContext(formId);
-    const examples = visionCtx.examples;
-
-    for (const file of files) {
-      const recognitionResult = await callVisionModel(file, model, visionCtx);
-      let checkedRecords = recognitionResult.records.map((rawRecord, index) => mapRecord(file.name, rawRecord, index));
-
-      let totalPromptTokens = recognitionResult.usage?.prompt_tokens || 0;
-      let totalCompletionTokens = recognitionResult.usage?.completion_tokens || 0;
-      let totalTokens = recognitionResult.usage?.total_tokens || 0;
-
-      if (!checkedRecords.length) {
-        issues.push({
-          imageName: file.name,
-          message: "AI 没有返回任何记录，请人工复核。",
-          level: "error",
-          code: "empty_result",
-        });
-        continue;
+  return withTrainingImageRequestCache(async () => {
+    try {
+      const { user, skipAuth } = await getAuthUserOrSkip();
+      if (!skipAuth && !user) {
+        return NextResponse.json({ error: "请先登录后再使用识别功能。" }, { status: 401 });
       }
 
-      const recoveryResult = await recoverMissingFieldsFromVision(file, model, visionCtx, checkedRecords);
-      checkedRecords = recoveryResult.records
-        .map(repairRouteVersusStationTeamRecord)
-        .map(sanitizeStationTeamRecord);
-      checkedRecords = propagateSharedImageFields(checkedRecords);
-      checkedRecords = checkedRecords.map(enforceTaskCodeIntegrity);
-      checkedRecords = deriveWaybillStatus(checkedRecords);
+      const formData = await request.formData();
+      const formId = getFormIdFromFormData(formData);
+      const mode = String(formData.get("mode") || "primary");
+      const files = formData
+        .getAll("files")
+        .filter((value): value is File => value instanceof File);
+      const model = mode === "review" ? OPENAI_REVIEW_MODEL : OPENAI_PRIMARY_MODEL;
 
-      totalPromptTokens += recoveryResult.usage?.prompt_tokens || 0;
-      totalCompletionTokens += recoveryResult.usage?.completion_tokens || 0;
-      totalTokens += recoveryResult.usage?.total_tokens || 0;
+      if (!files.length) {
+        return NextResponse.json({ error: "No files uploaded." }, { status: 400 });
+      }
 
-      if (user?.id) {
-        const admin = getSupabaseAdmin();
-        if (admin) {
-          admin.from("usage_logs").insert({
-            user_id: user.id,
-            action_type: "extract_table",
-            image_count: 1,
-            prompt_tokens: totalPromptTokens,
-            completion_tokens: totalCompletionTokens,
-            total_tokens: totalTokens,
-            model_used: model,
-          }).then(({ error }) => {
-            if (error) console.error("Failed to log usage:", error);
+      const records: PodRecord[] = [];
+      const issues: ExtractionIssue[] = [];
+
+      const visionCtx = await buildExtractVisionContext(formId);
+      const examples = visionCtx.examples;
+
+      for (const file of files) {
+        const recognitionResult = await callVisionModel(file, model, visionCtx);
+        let checkedRecords = recognitionResult.records.map((rawRecord, index) => mapRecord(file.name, rawRecord, index));
+
+        let totalPromptTokens = recognitionResult.usage?.prompt_tokens || 0;
+        let totalCompletionTokens = recognitionResult.usage?.completion_tokens || 0;
+        let totalTokens = recognitionResult.usage?.total_tokens || 0;
+
+        if (!checkedRecords.length) {
+          issues.push({
+            imageName: file.name,
+            message: "AI 没有返回任何记录，请人工复核。",
+            level: "error",
+            code: "empty_result",
           });
+          continue;
         }
+
+        const recoveryResult = await recoverMissingFieldsFromVision(file, model, visionCtx, checkedRecords);
+        checkedRecords = recoveryResult.records
+          .map(repairRouteVersusStationTeamRecord)
+          .map(sanitizeStationTeamRecord);
+        checkedRecords = propagateSharedImageFields(checkedRecords);
+        checkedRecords = checkedRecords.map(enforceTaskCodeIntegrity);
+        checkedRecords = deriveWaybillStatus(checkedRecords);
+
+        totalPromptTokens += recoveryResult.usage?.prompt_tokens || 0;
+        totalCompletionTokens += recoveryResult.usage?.completion_tokens || 0;
+        totalTokens += recoveryResult.usage?.total_tokens || 0;
+
+        if (user?.id) {
+          const admin = getSupabaseAdmin();
+          if (admin) {
+            admin.from("usage_logs").insert({
+              user_id: user.id,
+              action_type: "extract_table",
+              image_count: 1,
+              prompt_tokens: totalPromptTokens,
+              completion_tokens: totalCompletionTokens,
+              total_tokens: totalTokens,
+              model_used: model,
+            }).then(({ error }) => {
+              if (error) console.error("Failed to log usage:", error);
+            });
+          }
+        }
+
+        checkedRecords.forEach((record) => {
+          records.push(record);
+          issues.push(...validateRecord(record));
+        });
       }
 
-      checkedRecords.forEach((record) => {
-        records.push(record);
-        issues.push(...validateRecord(record));
+      return NextResponse.json({
+        records,
+        issues,
+        modelUsed: model,
+        mode,
+        trainingExamplesLoaded: examples.length,
       });
-    }
-
-    return NextResponse.json({
-      records,
-      issues,
-      modelUsed: model,
-      mode,
-      trainingExamplesLoaded: examples.length,
-    });
-    const validLabels = new Set(["应领件数", "应收件数", "运单数量"]);
+      const validLabels = new Set(["应领件数", "应收件数", "运单数量"]);
     for (const file of files) {
       const consistencyResult = await runConsistencyCheck(file, model, visionCtx);
       let workingRecords = consistencyResult.records;
@@ -2645,12 +2687,13 @@ export async function POST(request: Request) {
       mode,
       trainingExamplesLoaded: examples.length,
     });
-  } catch (error) {
-    return NextResponse.json(
-      {
-        error: error instanceof Error ? error.message : "Unknown extraction error.",
-      },
-      { status: 500 },
-    );
-  }
+    } catch (error) {
+      return NextResponse.json(
+        {
+          error: error instanceof Error ? error.message : "Unknown extraction error.",
+        },
+        { status: 500 },
+      );
+    }
+  });
 }
