@@ -456,6 +456,10 @@ function HomeContent() {
     return n > 1 ? n : 0;
   }
 
+  function getSourceRecordIds(record: PodRecord) {
+    return record.sourceRecordIds?.length ? record.sourceRecordIds : [record.id];
+  }
+
   function getRecordIssues(record: PodRecord) {
     const sourceImageNames = getSourceImageNames(record);
     return issues.filter(
@@ -877,7 +881,7 @@ function HomeContent() {
       const organized = organizeRecords(payload.records || []);
       const dedupeMessage =
         organized.duplicateCount > 0
-          ? `，已合并 ${organized.duplicateCount} 条跨图重复（不同截图中日期、路线、司机与收取数据完全一致）`
+          ? `，已合并 ${organized.duplicateCount} 条跨图重复（同一任务在不同界面状态或截图中的重复记录已自动归并）`
           : "";
       setNoticeMessage(
         `AI 已完成识别，共生成 ${organized.records.length} 条记录${dedupeMessage}。批量识别已并发加速；每张图内训练池裁剪为并行、训练数据每请求只加载一次。默认模型 ${payload.modelUsed || primaryModelName}。`,
@@ -926,7 +930,7 @@ function HomeContent() {
       const organized = organizeRecords(nextRecords);
       const dedupeMessage =
         organized.duplicateCount > 0
-          ? `，已合并 ${organized.duplicateCount} 条跨图重复（不同截图中日期、路线、司机与收取数据完全一致）`
+          ? `，已合并 ${organized.duplicateCount} 条跨图重复（同一任务在不同界面状态或截图中的重复记录已自动归并）`
           : "";
       setNoticeMessage(
         `已使用 ${payload.modelUsed || reviewModelName} 重新识别 ${sourceImageNames.length} 张图片${dedupeMessage}。`,
@@ -984,7 +988,7 @@ function HomeContent() {
       const organized = organizeRecords(nextRecords);
       const dedupeMessage =
         organized.duplicateCount > 0
-          ? `，已合并 ${organized.duplicateCount} 条跨图重复（不同截图中日期、路线、司机与收取数据完全一致）`
+          ? `，已合并 ${organized.duplicateCount} 条跨图重复（同一任务在不同界面状态或截图中的重复记录已自动归并）`
           : "";
       setNoticeMessage(
         `已使用 ${payload.modelUsed || reviewModelName} 批量再次识别 ${matchedUploads.length} 张待复核图片${dedupeMessage}。`,
@@ -1271,20 +1275,9 @@ function HomeContent() {
     }
 
     const sourceImageNames = getSourceImageNames(record);
+    const sourceRecordIds = new Set(getSourceRecordIds(record));
     setRecords((current) =>
-      current.filter(
-        (currentRecord) =>
-          !(
-            currentRecord.date === record.date &&
-            currentRecord.route === record.route &&
-            currentRecord.driver === record.driver &&
-            (currentRecord.taskCode || "") === (record.taskCode || "") &&
-            currentRecord.total === record.total &&
-            currentRecord.unscanned === record.unscanned &&
-            currentRecord.exceptions === record.exceptions &&
-            sourceImageNames.some((name) => currentRecord.imageName.includes(name))
-          ),
-      ),
+      current.filter((currentRecord) => !sourceRecordIds.has(currentRecord.id)),
     );
     setIssues((current) =>
       current.filter(
@@ -1908,21 +1901,19 @@ function HomeContent() {
                                   查看图片
                                 </button>
                                 {needsManualAnnotation(record) ? (
-                                  <>
-                                    <button
-                                      className="rounded-lg border border-blue-300 bg-blue-50 px-3 py-1.5 text-xs font-medium text-blue-700 hover:bg-blue-100"
-                                      onClick={(event) => void openAnnotationPanel(record, event.currentTarget)}
-                                    >
-                                      打开标注
-                                    </button>
-                                    <button
-                                      className="rounded-lg border border-rose-300 bg-rose-50 px-3 py-1.5 text-xs font-medium text-rose-700 hover:bg-rose-100"
-                                      onClick={() => deleteRecord(record)}
-                                    >
-                                      删除条目
-                                    </button>
-                                  </>
+                                  <button
+                                    className="rounded-lg border border-blue-300 bg-blue-50 px-3 py-1.5 text-xs font-medium text-blue-700 hover:bg-blue-100"
+                                    onClick={(event) => void openAnnotationPanel(record, event.currentTarget)}
+                                  >
+                                    打开标注
+                                  </button>
                                 ) : null}
+                                <button
+                                  className="rounded-lg border border-rose-300 bg-rose-50 px-3 py-1.5 text-xs font-medium text-rose-700 hover:bg-rose-100"
+                                  onClick={() => deleteRecord(record)}
+                                >
+                                  删除条目
+                                </button>
                               </div>
                             </td>
                             {activeTableFields.map((column) => (

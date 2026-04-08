@@ -16,6 +16,8 @@ export type PodRecord = {
   reviewReason?: string | null;
   /** 仅跨图合并行：由多张图合并为一条时，为合并前的条数（≥2） */
   mergedSourceCount?: number;
+  /** 仅前端组织结果使用：合并后包含的原始记录 id 列表 */
+  sourceRecordIds?: string[];
 };
 
 export type ExtractionIssue = {
@@ -311,6 +313,86 @@ function mergeTextList(currentValue: string, nextValue: string, separator: strin
   return Array.from(values).join(separator);
 }
 
+function normalizeComparableText(value: string | undefined) {
+  return (value || "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .toLocaleLowerCase("en-US");
+}
+
+function normalizeComparableDate(value: string | undefined) {
+  const raw = (value || "").trim();
+  if (!raw) {
+    return "";
+  }
+
+  const slashMatch = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (slashMatch) {
+    const [, month, day, year] = slashMatch;
+    return `${Number(month)}/${Number(day)}/${year}`;
+  }
+
+  const dashMatch = raw.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (dashMatch) {
+    const [, year, month, day] = dashMatch;
+    return `${Number(month)}/${Number(day)}/${year}`;
+  }
+
+  return raw;
+}
+
+function normalizeComparableCustomFieldValues(values: Record<string, string | number | ""> | undefined) {
+  if (!values) {
+    return {};
+  }
+
+  return Object.fromEntries(
+    Object.entries(values)
+      .sort(([left], [right]) => left.localeCompare(right, "en"))
+      .map(([key, value]) => [
+        key,
+        typeof value === "string" ? value.trim() : value,
+      ]),
+  );
+}
+
+function exactDuplicateKey(record: PodRecord) {
+  return JSON.stringify({
+    date: normalizeComparableDate(record.date),
+    route: normalizeComparableText(record.route),
+    driver: normalizeComparableText(record.driver),
+    taskCode: normalizeTaskCode(record.taskCode || ""),
+    total: record.total,
+    unscanned: record.unscanned,
+    exceptions: record.exceptions,
+    waybillStatus: normalizeComparableText(record.waybillStatus),
+    totalSourceLabel: normalizeComparableText(record.totalSourceLabel),
+    stationTeam: normalizeComparableText(record.stationTeam),
+    customFieldValues: normalizeComparableCustomFieldValues(record.customFieldValues),
+  });
+}
+
+/**
+ * 同一任务在不同界面状态下，日期格式、状态字段或站点车队可能有差异；
+ * 只要任务编码 + 路线 + 司机 + 核心数量一致，就优先视为同一业务记录。
+ */
+function taskDuplicateKey(record: PodRecord) {
+  const taskCode = normalizeTaskCode(record.taskCode || "");
+  if (!taskCode) {
+    return null;
+  }
+
+  return JSON.stringify({
+    taskCode,
+    route: normalizeComparableText(record.route),
+    driver: normalizeComparableText(record.driver),
+    total: record.total,
+    unscanned: record.unscanned,
+    exceptions: record.exceptions,
+    customFieldValues: normalizeComparableCustomFieldValues(record.customFieldValues),
+  });
+}
+
 function mergeDuplicateRecordGroup(group: PodRecord[]): PodRecord {
   const base = { ...group[0]! };
   for (let i = 1; i < group.length; i++) {
@@ -324,28 +406,14 @@ function mergeDuplicateRecordGroup(group: PodRecord[]): PodRecord {
     base.customFieldValues = mergeCustomFieldValues(base.customFieldValues, next.customFieldValues);
   }
   base.mergedSourceCount = group.length;
+  base.sourceRecordIds = group.map((item) => item.id);
   return base;
 }
 
 export function organizeRecords(records: PodRecord[]): OrganizedRecordsResult {
-  const keyWithoutImage = (record: PodRecord) =>
-    JSON.stringify({
-      date: record.date,
-      route: record.route,
-      driver: record.driver,
-      taskCode: record.taskCode || "",
-      total: record.total,
-      unscanned: record.unscanned,
-      exceptions: record.exceptions,
-      waybillStatus: record.waybillStatus,
-      totalSourceLabel: record.totalSourceLabel || "",
-      stationTeam: record.stationTeam || "",
-      customFieldValues: record.customFieldValues || {},
-    });
-
   const byBizKey = new Map<string, PodRecord[]>();
   for (const record of records) {
-    const k = keyWithoutImage(record);
+    const k = taskDuplicateKey(record) || exactDuplicateKey(record);
     const list = byBizKey.get(k) ?? [];
     list.push(record);
     byBizKey.set(k, list);
