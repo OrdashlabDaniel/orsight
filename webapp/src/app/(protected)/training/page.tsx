@@ -15,7 +15,6 @@ import {
   type WorkbenchAnnotationBox,
 } from "@/components/TrainingAnnotationWorkbench";
 import { RecognitionAgentDock } from "@/components/RecognitionAgentDock";
-import type { AgentAsset, AgentThreadTurn } from "@/lib/agent-context-types";
 import {
   DEFAULT_TABLE_FIELDS,
   getActiveTableFields,
@@ -30,19 +29,6 @@ import {
   SUPPORTED_VISUAL_UPLOAD_ACCEPT,
 } from "@/lib/client-visual-upload";
 
-function formatTurnForChatApi(turn: AgentThreadTurn): string {
-  let s = turn.content;
-  if (turn.assets?.length) {
-    for (const a of turn.assets) {
-      if (a.kind === "image") {
-        s += `\n[附图：${a.name}，存储名 ${a.imageName}]`;
-      } else {
-        s += `\n[文档：${a.name} 摘录]\n${a.excerpt.slice(0, 4000)}`;
-      }
-    }
-  }
-  return s;
-}
 
 type UploadItem = {
   id: string;
@@ -123,22 +109,9 @@ function TrainingModeContent() {
     notes: string;
   } | null>(null);
 
-  const goToFillMode = useCallback(() => {
-    window.location.assign(buildFormFillHref(currentFormId));
-  }, [currentFormId]);
   const removeUploadAfterSaveRef = useRef<string | null>(null);
 
   const [isSavingTraining, setIsSavingTraining] = useState(false);
-
-  const [globalRules, setGlobalRules] = useState<{
-    agentThread?: AgentThreadTurn[];
-    workingRules?: string;
-  }>({ agentThread: [], workingRules: "" });
-  const [agentInput, setAgentInput] = useState("");
-  const [pendingAgentFiles, setPendingAgentFiles] = useState<Array<{ id: string; file: File }>>([]);
-  const [agentDragActive, setAgentDragActive] = useState(false);
-  const [agentChatLoading, setAgentChatLoading] = useState(false);
-  const [isSavingRules, setIsSavingRules] = useState(false);
 
   const activeTableFields = getActiveTableFields(tableFields);
   const setupFieldDefinition = activeTableFields.find((field) => field.id === setupField) || null;
@@ -186,10 +159,6 @@ function TrainingModeContent() {
   }, [isFieldOnboarding]);
 
   useEffect(() => {
-    void loadGlobalRules();
-  }, [currentFormId]);
-
-  useEffect(() => {
     const imageNames = trainingStatus?.items.map((item) => item.imageName) || [];
     if (!imageNames.length) {
       setTrainingThumbnailMap({});
@@ -216,205 +185,15 @@ function TrainingModeContent() {
       const res = await fetch(withFormId("/api/table-fields"));
       const data = (await res.json()) as { error?: string; tableFields?: TableFieldDefinition[] };
       if (!res.ok) {
-        throw new Error(data.error || "表格项目配置读取失败。");
+        setTableFields(DEFAULT_TABLE_FIELDS);
+        return;
       }
       setTableFields(data.tableFields?.length ? data.tableFields : DEFAULT_TABLE_FIELDS);
-    } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "表格项目配置读取失败。");
-    }
-  }
-
-  async function loadGlobalRules() {
-    try {
-      const res = await fetch(withFormId("/api/training/rules"));
-      if (res.ok) {
-        const data = await res.json();
-        setGlobalRules(data);
-      }
-    } catch (e) {
-      console.error("Failed to load global rules", e);
-    }
-  }
-
-  async function saveGlobalRules() {
-    setIsSavingRules(true);
-    try {
-      const res = await fetch(withFormId("/api/training/rules"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          workingRules: globalRules.workingRules ?? "",
-          agentThread: globalRules.agentThread ?? [],
-        }),
-      });
-      if (!res.ok) throw new Error("保存失败");
-      setNoticeMessage("识别规则已保存，将在下次识别时生效。");
     } catch {
-      setErrorMessage("保存识别规则失败。");
-    } finally {
-      setIsSavingRules(false);
+      setTableFields(DEFAULT_TABLE_FIELDS);
     }
   }
 
-  function addPendingAgentFiles(files: File[]) {
-    const allowed = files.filter((f) => {
-      const n = f.name.toLowerCase();
-      return f.type.startsWith("image/") || /\.(txt|csv|md|pdf|doc|docx)$/i.test(n);
-    });
-    if (allowed.length < files.length) {
-      setErrorMessage("部分文件已忽略：仅支持图片与 PDF / Word / TXT / CSV / Markdown。");
-    }
-    if (allowed.length === 0) return;
-    setPendingAgentFiles((p) => [...p, ...allowed.map((file) => ({ id: crypto.randomUUID(), file }))]);
-  }
-
-  async function processFileToAgentAsset(file: File): Promise<AgentAsset | null> {
-    const maxBytes = 12 * 1024 * 1024;
-    if (file.size > maxBytes) {
-      throw new Error(`「${file.name}」超过 12MB。`);
-    }
-    if (file.type.startsWith("image/")) {
-      const fd = new FormData();
-      fd.append("file", file);
-      fd.append("formId", currentFormId);
-      const res = await fetch("/api/training/context-asset", { method: "POST", body: fd });
-      const payload = (await res.json()) as { error?: string; imageName?: string; originalName?: string };
-      if (!res.ok) {
-        throw new Error(payload.error || "图片上传失败");
-      }
-      if (!payload.imageName) {
-        throw new Error("图片上传未返回文件名");
-      }
-      return {
-        kind: "image",
-        name: file.name || payload.originalName || "image",
-        imageName: payload.imageName,
-      };
-    }
-    if (/\.(txt|csv|md)$/i.test(file.name)) {
-      const excerpt = (await file.text()).slice(0, 12000);
-      if (!excerpt.trim()) return null;
-      return { kind: "document", name: file.name, excerpt };
-    }
-    if (/\.(pdf|doc|docx)$/i.test(file.name)) {
-      const fd = new FormData();
-      fd.append("file", file);
-      const res = await fetch("/api/training/parse-document", { method: "POST", body: fd });
-      const payload = (await res.json()) as { text?: string; error?: string; warning?: string };
-      if (!res.ok) {
-        throw new Error(payload.error || "文档解析失败");
-      }
-      const excerpt = (payload.text || "").trim().slice(0, 12000);
-      if (!excerpt) {
-        throw new Error(payload.warning || "文档中未提取到文字");
-      }
-      return { kind: "document", name: file.name, excerpt };
-    }
-    return null;
-  }
-
-  async function sendAgentMessage() {
-    const text = agentInput.trim();
-    if ((!text && pendingAgentFiles.length === 0) || agentChatLoading) return;
-    setAgentChatLoading(true);
-    setErrorMessage("");
-    try {
-      const assets: AgentAsset[] = [];
-      for (const { file } of pendingAgentFiles) {
-        const a = await processFileToAgentAsset(file);
-        if (a) assets.push(a);
-      }
-      setPendingAgentFiles([]);
-
-      const userTurn: AgentThreadTurn = {
-        id: crypto.randomUUID(),
-        role: "user",
-        content: text || "（仅附件）",
-        ts: new Date().toISOString(),
-        ...(assets.length > 0 ? { assets } : {}),
-      };
-
-      const thread = [...(globalRules.agentThread || []), userTurn];
-      const forApi = thread.map((t) => ({ role: t.role, content: formatTurnForChatApi(t) }));
-
-      const res = await fetch(withFormId("/api/training/guidance-chat"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          messages: forApi,
-          currentWorkingRules: globalRules.workingRules ?? "",
-        }),
-      });
-      const data = (await res.json()) as {
-        error?: string;
-        assistantReply?: string;
-        revisedWorkingRules?: string;
-        suggestedRules?: string;
-      };
-      if (!res.ok) {
-        throw new Error(data.error || "发送失败");
-      }
-
-      let nextWorking = (data.revisedWorkingRules ?? "").trim();
-      if (!nextWorking && typeof data.suggestedRules === "string" && data.suggestedRules.trim()) {
-        nextWorking = `${globalRules.workingRules || ""}\n\n【本轮补充】\n${data.suggestedRules.trim()}`.trim();
-      }
-      if (!nextWorking) {
-        nextWorking = (globalRules.workingRules || "").trim();
-      }
-
-      const assistantTurn: AgentThreadTurn = {
-        id: crypto.randomUUID(),
-        role: "assistant",
-        content: data.assistantReply || "",
-        ts: new Date().toISOString(),
-      };
-
-      const updated = {
-        ...globalRules,
-        workingRules: nextWorking,
-        agentThread: [...(globalRules.agentThread || []), userTurn, assistantTurn],
-      };
-      setGlobalRules(updated);
-      setAgentInput("");
-
-      setIsSavingRules(true);
-      try {
-        const saveRes = await fetch(withFormId("/api/training/rules"), {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            workingRules: updated.workingRules ?? "",
-            agentThread: updated.agentThread ?? [],
-          }),
-        });
-        if (!saveRes.ok) throw new Error("自动保存失败");
-        setNoticeMessage("识别规则已按本轮对话升级并写入识别流程；效果不好可继续在这里说明，Agent 会再优化。");
-      } catch {
-        setErrorMessage("识别规则已更新到界面，但自动保存失败，请点击「保存识别规则」。");
-      } finally {
-        setIsSavingRules(false);
-      }
-    } catch (err) {
-      setErrorMessage(err instanceof Error ? err.message : "发送失败");
-    } finally {
-      setAgentChatLoading(false);
-    }
-  }
-
-  function clearAgentThread() {
-    setGlobalRules((p) => ({ ...p, agentThread: [] }));
-    setPendingAgentFiles([]);
-    setNoticeMessage("已清空对话记录（识别规则未清空）。若也要重置规则，请手动删除上方规则正文后保存。");
-  }
-
-  function handleAgentComposerPaste(event: React.ClipboardEvent<HTMLTextAreaElement>) {
-    const files = Array.from(event.clipboardData?.files || []).filter((f) => f.type.startsWith("image/"));
-    if (files.length > 0) {
-      event.preventDefault();
-      addPendingAgentFiles(files);
-    }
-  }
 
   const uploadPanelRef = useRef<HTMLDivElement | null>(null);
 
@@ -473,11 +252,11 @@ function TrainingModeContent() {
       const response = await fetch(withFormId("/api/training/status"));
       const payload = (await response.json()) as TrainingStatusResponse & { error?: string };
       if (!response.ok) {
-        throw new Error(payload.error || "训练池状态读取失败。");
+
       }
       setTrainingStatus(payload);
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "训练池状态读取失败。");
+
     }
   }
 
@@ -508,14 +287,14 @@ function TrainingModeContent() {
         });
         return merged;
       });
-      setNoticeMessage(`已加入 ${nextUploads.length} 张待标注图片。`);
+
       setErrorMessage("");
       if (isFieldOnboarding && nextUploads[0]) {
         setSelectedUploadId(nextUploads[0].id);
         void openAnnotationPanel(nextUploads[0]);
       }
     } catch {
-      setErrorMessage("读取图片内容失败，可能是文件已被其他程序移动或删除，请重试。");
+
     }
   }
   handleFilesRef.current = handleFiles;
@@ -606,7 +385,7 @@ function TrainingModeContent() {
       return;
     }
 
-    const confirmed = window.confirm(`确定要从训练池中删除图片「${item.imageName}」吗？对应标注也会一起删除。`);
+    const confirmed = window.confirm(`确定删除训练图片「${item.imageName}」吗？删除后不可恢复。`);
     if (!confirmed) {
       return;
     }
@@ -620,7 +399,7 @@ function TrainingModeContent() {
       );
       const payload = (await response.json()) as { error?: string };
       if (!response.ok) {
-        throw new Error(payload.error || "删除训练池图片失败。");
+
       }
 
       if (annotatingItem && !("file" in annotatingItem) && annotatingItem.imageName === item.imageName) {
@@ -639,9 +418,9 @@ function TrainingModeContent() {
       });
 
       await loadTrainingStatus();
-      setNoticeMessage(`已从训练池删除图片：${item.imageName}`);
+
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "删除训练池图片失败。");
+
     } finally {
       setDeletingImageName(null);
     }
@@ -724,7 +503,7 @@ function TrainingModeContent() {
     return await new Promise<string>((resolve, reject) => {
       const reader = new FileReader();
       reader.onloadend = () => resolve(String(reader.result));
-      reader.onerror = () => reject(new Error("图片读取失败。"));
+
       reader.readAsDataURL(blob);
     });
   }
@@ -737,31 +516,40 @@ function TrainingModeContent() {
             <Link href="/forms" className="font-medium text-blue-600 hover:underline">
               ← 返回填表池
             </Link>
-            <button
-              type="button"
-              onClick={goToFillMode}
+            <Link
+              href={buildFormFillHref(currentFormId)}
               className="font-medium text-slate-700 hover:text-slate-900 hover:underline"
             >
               切换到填表模式
-            </button>
+            </Link>
           </div>
+
           <h1 className="text-2xl font-semibold">OrSight - 训练模式</h1>
           <p className="mt-2 text-sm text-slate-600">
-            在此模式下，您可以上传图片并手动标注字段，这些图片将长期存入云端训练池，作为 AI 识别的引导示例。
+            上传与业务一致的截图，在标注工作台中画框并保存标准输出。训练池会在下次识别时作为提示与参考图使用；请尽量使用「位图坐标」框（coordSpace: image）以便裁剪增强生效。
           </p>
           {setupFieldDefinition ? (
             <div className="mt-4 rounded-2xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-800">
-              <div className="font-medium">当前正在扩展新表格项目：{setupFieldDefinition.label}</div>
+              <div className="font-medium">正在为「{setupFieldDefinition.label}」准备第一条训练样本</div>
               <div className="mt-1">
-                请先上传一张范例图片。上传后系统会自动打开标注工作台，并默认选中“{setupFieldDefinition.label}”。
-                你只需要框出这个表格项目所在的位置，并在右侧填写最终要写入表格的内容。
+                请上传能代表该项目的真实截图，打开标注工作台后框选「{setupFieldDefinition.label}」在图中的位置并保存。
               </div>
             </div>
           ) : null}
           <div className="mt-3 flex flex-wrap gap-2 text-xs">
-            <span className="rounded-full bg-blue-100 px-3 py-1 text-blue-700">训练池图片：{trainingStatus?.totalImages || 0}</span>
-            <span className="rounded-full bg-emerald-100 px-3 py-1 text-emerald-700">已标注：{trainingStatus?.labeledImages || 0}</span>
-            <span className="rounded-full bg-amber-100 px-3 py-1 text-amber-700">未标注：{trainingStatus?.unlabeledImages || 0}</span>
+            {trainingStatus ? (
+              <>
+                <span className="rounded-full bg-slate-100 px-3 py-1 text-slate-700">
+                  训练图片：{trainingStatus.totalImages}
+                </span>
+                <span className="rounded-full bg-emerald-100 px-3 py-1 text-emerald-700">
+                  已标注：{trainingStatus.labeledImages}
+                </span>
+                <span className="rounded-full bg-amber-100 px-3 py-1 text-amber-700">
+                  未标注：{trainingStatus.unlabeledImages}
+                </span>
+              </>
+            ) : null}
           </div>
         </header>
 
@@ -769,155 +557,24 @@ function TrainingModeContent() {
           <div className="flex flex-col gap-4">
             <div className="flex min-h-0 flex-col rounded-3xl border border-slate-200 bg-white shadow-sm">
               <div className="border-b border-slate-200 px-5 py-4">
-                <h2 className="text-lg font-semibold">识别规则 Agent</h2>
-                <p className="mt-1 text-sm text-slate-500">
-                  像 Cursor 一样对话：告诉模型应该如何识别、哪些字段容易错判、看到什么标签才算哪个字段。Agent 只会
-                  <strong>生成并升级「识别规则」</strong>并<strong>自动写入识别流程</strong>；页面结构、接口、存储、权限、
-                  字段清单等软件架构不会在这里被改动。
-                </p>
+                <h2 className="text-lg font-semibold">训练池说明</h2>
+                <p className="mt-1 text-sm text-slate-500">训练样本与图片会写入当前表单对应的训练池（Supabase 或本地目录）。</p>
               </div>
-              <div className="flex min-h-0 flex-1 flex-col gap-3 p-5">
-                <div>
-                  <label className="mb-1 block text-xs font-medium text-slate-700">当前识别规则（仅影响识别准确性与判定方式）</label>
-                  <textarea
-                    className="min-h-[120px] w-full resize-y rounded-xl border border-slate-300 px-3 py-2 text-xs leading-relaxed outline-none focus:border-blue-500"
-                    placeholder="对话后 Agent 会在这里整理可编辑的识别规则；你也可以直接手改。这里不会修改页面、接口、存储或字段结构。"
-                    value={globalRules.workingRules ?? ""}
-                    onChange={(e) => setGlobalRules({ ...globalRules, workingRules: e.target.value })}
-                    disabled={agentChatLoading}
-                  />
-                  <p className="mt-1 text-[11px] text-slate-400">识别时优先使用本段正文；这里只允许改截图识别规则，附件仍会作为参考图进入视觉模型。</p>
-                </div>
-
-                <div className="flex min-h-[200px] max-h-72 flex-1 flex-col overflow-hidden rounded-xl border border-slate-200 bg-slate-50">
-                  <div className="flex items-center justify-between border-b border-slate-200 px-3 py-2">
-                    <span className="text-xs font-medium text-slate-600">对话</span>
-                    <button type="button" className="text-xs text-slate-500 hover:text-rose-600" onClick={clearAgentThread}>
-                      清空
-                    </button>
-                  </div>
-                  <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3 text-sm">
-                    {(globalRules.agentThread?.length ?? 0) === 0 ? (
-                      <p className="text-xs text-slate-400">还没有消息。直接说明识别约定、常见错判，或丢入现场截图 / 说明文档；这里只会调整识别规则，不会改软件架构。</p>
-                    ) : (
-                      (globalRules.agentThread || []).map((turn) => (
-                        <div
-                          key={turn.id}
-                          className={`rounded-lg px-3 py-2 ${
-                            turn.role === "user" ? "ml-2 bg-blue-50 text-slate-800" : "mr-2 bg-white text-slate-700 shadow-sm"
-                          }`}
-                        >
-                          <div className="mb-1 text-[10px] font-medium uppercase tracking-wide text-slate-400">
-                            {turn.role === "user" ? "你" : "Agent"}
-                          </div>
-                          {turn.assets?.map((a) => (
-                            <div
-                              key={`${turn.id}-${a.kind}-${a.name}`}
-                              className="mb-1 rounded border border-slate-200 bg-white/80 px-2 py-1 text-xs text-slate-600"
-                            >
-                              {a.kind === "image" ? `图片：${a.name}` : `文档：${a.name}（已提取文字）`}
-                            </div>
-                          ))}
-                          <p className="whitespace-pre-wrap break-words">{turn.content}</p>
-                        </div>
-                      ))
-                    )}
-                  </div>
-                </div>
-
-                <div
-                  className={`rounded-xl border-2 border-dashed p-3 transition-colors ${
-                    agentDragActive ? "border-blue-400 bg-blue-50/50" : "border-slate-200 bg-white"
-                  }`}
-                  onDragOver={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    setAgentDragActive(true);
-                  }}
-                  onDragLeave={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    setAgentDragActive(false);
-                  }}
-                  onDrop={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    setAgentDragActive(false);
-                    addPendingAgentFiles(Array.from(e.dataTransfer.files || []));
-                  }}
-                >
-                  {pendingAgentFiles.length > 0 ? (
-                    <ul className="mb-2 flex flex-wrap gap-2">
-                      {pendingAgentFiles.map(({ id, file }) => (
-                        <li
-                          key={id}
-                          className="flex items-center gap-1 rounded-full bg-slate-100 px-2 py-1 text-xs text-slate-700"
-                        >
-                          <span className="max-w-[140px] truncate">{file.name}</span>
-                          <button
-                            type="button"
-                            className="text-rose-500 hover:text-rose-700"
-                            onClick={() => setPendingAgentFiles((p) => p.filter((x) => x.id !== id))}
-                          >
-                            ×
-                          </button>
-                        </li>
-                      ))}
-                    </ul>
-                  ) : (
-                    <p className="mb-2 text-center text-xs text-slate-400">拖文件到此处，或使用下方按钮选择</p>
-                  )}
-                  <textarea
-                    className="mb-2 min-h-[88px] w-full resize-y rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-blue-500"
-                    placeholder="例如：我们 POD 屏上「应领件数」在第二屏中间，反光严重时优先看左上角小字；如果标签不明确就留空并复核…"
-                    value={agentInput}
-                    onChange={(e) => setAgentInput(e.target.value)}
-                    onPaste={handleAgentComposerPaste}
-                    disabled={agentChatLoading}
-                  />
-                  <div className="flex flex-wrap items-center gap-2">
-                    <label className="cursor-pointer rounded-lg border border-slate-300 bg-slate-50 px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-100">
-                      添加文件
-                      <input
-                        type="file"
-                        multiple
-                        className="hidden"
-                        accept="image/*,.txt,.csv,.md,.pdf,.doc,.docx"
-                        onChange={(e) => {
-                          const list = e.target.files;
-                          if (list?.length) addPendingAgentFiles(Array.from(list));
-                          e.target.value = "";
-                        }}
-                      />
-                    </label>
-                    <button
-                      type="button"
-                      className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:bg-slate-400"
-                      onClick={() => void sendAgentMessage()}
-                      disabled={
-                        agentChatLoading || (!agentInput.trim() && pendingAgentFiles.length === 0)
-                      }
-                    >
-                      {agentChatLoading ? "发送中…" : "发送"}
-                    </button>
-                  </div>
-                </div>
-
-                <button
-                  type="button"
-                  className="rounded-xl bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-blue-300"
-                  onClick={() => void saveGlobalRules()}
-                  disabled={isSavingRules || agentChatLoading}
-                >
-                  {isSavingRules ? "保存中…" : "保存识别规则"}
-                </button>
+              <div className="space-y-3 p-5 text-sm leading-6 text-slate-600">
+                <p>左侧上传待标注图片，保存无框样本可先入库；点击缩略图打开工作台画框并保存标准答案。</p>
+                <p>右侧网格为已入库图片；绿色「已标注」表示该图在训练池中有结构化样本。</p>
+                <p>
+                  右下角「识别管家」与填表页共用：可在此用自然语言调整本填表的识别规则（按当前表单隔离），特殊场景下不必离开训练页。
+                </p>
+                <p>删除图片会同时移除 Storage 中的文件及对应样本记录，请谨慎操作。</p>
               </div>
             </div>
 
+
             <div ref={uploadPanelRef} className="flex min-h-0 flex-1 flex-col rounded-3xl border border-slate-200 bg-white shadow-sm">
               <div className="border-b border-slate-200 px-5 py-4">
-                <h2 className="text-lg font-semibold">待标注图片</h2>
-                <p className="mt-1 text-sm text-slate-500">上传或粘贴需要加入训练池的图片。</p>
+                <h2 className="text-lg font-semibold">待标注上传区</h2>
+                <p className="mt-1 text-sm text-slate-500">支持 PNG / JPG / JPEG / WEBP / PDF；可拖拽、点击选择或 Ctrl+V 粘贴截图。</p>
               </div>
 
               <div className="space-y-4 p-5">
@@ -932,9 +589,9 @@ function TrainingModeContent() {
                   onDragLeave={handleDragLeave}
                   onDrop={handleDrop}
                 >
-                  <span className="text-sm font-medium">点击、拖拽或粘贴上传图片</span>
+                  <span className="text-sm font-medium">点击、拖拽或粘贴上传图片 / PDF</span>
                   <span className="mt-1 text-xs text-slate-500">
-                    {isDraggingFiles ? "松开鼠标即可上传图片" : "可一次选择多张，或直接 Ctrl+V 粘贴"}
+                    {isDraggingFiles ? "松开鼠标即可上传文件" : "可一次选择多张，或直接 Ctrl+V 粘贴图片。"}
                   </span>
                   <input
                     className="hidden"
@@ -950,7 +607,7 @@ function TrainingModeContent() {
                     className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-700 disabled:cursor-not-allowed disabled:bg-slate-400"
                     onClick={async () => {
                       if (!uploads.length) {
-                        setErrorMessage("请先上传图片。");
+                        setErrorMessage("请先上传至少一张图片。");
                         return;
                       }
                       setIsSavingTraining(true);
@@ -966,7 +623,7 @@ function TrainingModeContent() {
                               body: JSON.stringify({
                                 imageName: upload.file.name,
                                 imageDataUrl,
-                                notes: "直接存入训练池，未标注",
+
                               output: {
                                 date: "",
                                 route: "",
@@ -989,17 +646,17 @@ function TrainingModeContent() {
                           }
                         }
                         await loadTrainingStatus();
-                        setNoticeMessage(`成功将 ${successCount} 张图片直接存入训练池！`);
+
                         clearAll();
                       } catch (error) {
-                        setErrorMessage(error instanceof Error ? error.message : "批量存入失败。");
+
                       } finally {
                         setIsSavingTraining(false);
                       }
                     }}
                     disabled={isSavingTraining || !uploads.length}
                   >
-                    {isSavingTraining ? "保存中..." : "全部直接存入训练池"}
+                    {isSavingTraining ? "保存中…" : "保存到训练池（无框）"}
                   </button>
                   <button
                     className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-medium hover:bg-slate-50"
@@ -1026,7 +683,7 @@ function TrainingModeContent() {
                           setErrorMessage("剪贴板中没有图片。");
                         }
                       } catch {
-                        setErrorMessage("无法读取剪贴板，请确保已授予浏览器权限，或直接使用 Ctrl+V 快捷键粘贴。");
+                        setErrorMessage("无法读取剪贴板，请授予权限或使用 Ctrl+V 粘贴。");
                       }
                     }}
                   >
@@ -1066,13 +723,13 @@ function TrainingModeContent() {
                                   {(upload.file.size / 1024).toFixed(1)} KB
                                 </div>
                               </div>
-                              <div className="text-xs font-medium text-blue-600">点击标注</div>
+
                             </button>
                           </li>
                         ))}
                       </ul>
                     ) : (
-                      <div className="px-4 py-8 text-center text-sm text-slate-500">上传后这里会显示待标注图片</div>
+                      <div className="px-4 py-8 text-center text-sm text-slate-500">上传后这里会显示待标注列表</div>
                     )}
                   </div>
                 </div>
@@ -1083,8 +740,8 @@ function TrainingModeContent() {
           <div className="flex min-h-0 flex-col rounded-3xl border border-slate-200 bg-white shadow-sm">
             <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-5 py-4">
               <div>
-                <h2 className="text-lg font-semibold">云端训练池</h2>
-                <p className="mt-1 text-sm text-slate-500">这里展示已存入云端的训练图片。点击可查看或修改标注。</p>
+                <h2 className="text-lg font-semibold">训练池图片</h2>
+                <p className="mt-1 text-sm text-slate-500">点击缩略图打开标注；右上角可删除入库图片。</p>
               </div>
             </div>
 
@@ -1108,12 +765,12 @@ function TrainingModeContent() {
                           }
                         }}
                         aria-disabled={deletingImageName === item.imageName}
-                        aria-label={`删除 ${item.imageName}`}
+
                         className={`absolute right-2 top-2 z-10 rounded-full border border-rose-200 bg-white/95 px-2 py-1 text-[11px] font-medium text-rose-600 shadow-sm transition hover:bg-rose-50 ${
                           deletingImageName === item.imageName ? "pointer-events-none opacity-60" : ""
                         }`}
                       >
-                        {deletingImageName === item.imageName ? "删除中..." : "删除"}
+                        删除
                       </span>
                       <div className="relative flex-1 bg-slate-100">
                         {!trainingThumbnailErrorMap[item.imageName] ? (
@@ -1148,7 +805,7 @@ function TrainingModeContent() {
                             }}
                             className="flex h-full w-full items-center justify-center p-4 text-center text-xs text-slate-400 break-all hover:bg-slate-200/70 hover:text-slate-500"
                           >
-                            缩略图加载中
+                            缩略图加载失败，点击重试
                           </button>
                         )}
                       </div>
@@ -1172,8 +829,8 @@ function TrainingModeContent() {
                   ))}
                 </div>
               ) : (
-                <div className="flex h-full items-center justify-center text-sm text-slate-500">
-                  训练池中暂无图片。
+                <div className="flex h-full min-h-[200px] items-center justify-center text-sm text-slate-500">
+                  暂无训练图片。可在左侧上传后点击「保存到训练池」，或从其他环境同步训练数据。
                 </div>
               )}
             </div>
@@ -1199,7 +856,7 @@ function TrainingModeContent() {
             onError={setErrorMessage}
             onSaved={async ({ totalExamples }) => {
               await loadTrainingStatus();
-              setNoticeMessage(`标注已存入训练池，当前训练样本总数 ${totalExamples || 0}。`);
+
               const uploadId = removeUploadAfterSaveRef.current;
               removeUploadAfterSaveRef.current = null;
               if (uploadId) {

@@ -23,8 +23,6 @@ type PersistedRecognitionAgentDraft = {
   agentThread?: AgentThreadTurn[];
   agentInput?: string;
   pendingAttachments?: PendingAttachment[];
-  workingRules?: string;
-  workingRulesDirty?: boolean;
 };
 
 type ImagePreviewState = {
@@ -33,22 +31,27 @@ type ImagePreviewState = {
 };
 
 function formatTurnForChatApi(turn: AgentThreadTurn): string {
-  let text = turn.content;
+  let text = turn.content ?? "";
   if (turn.assets?.length) {
     for (const asset of turn.assets) {
       if (asset.kind === "image") {
-        text += `\n[附图：${asset.name}，存储名 ${asset.imageName}]`;
+        text += `\n[附图 ${asset.name}，存储名 ${asset.imageName}，服务端会在视觉阶段附带该图]`;
       } else {
-        text += `\n[文档：${asset.name} 摘录]\n${asset.excerpt.slice(0, 4000)}`;
+        const ex =
+          asset.excerpt.length > 4000 ? `${asset.excerpt.slice(0, 4000)}…` : asset.excerpt;
+        text += `\n[文档 ${asset.name} 摘录]\n${ex}`;
       }
     }
+  }
+  if (turn.role === "assistant" && turn.suggestedRules?.trim()) {
+    text += `\n（整理出的可执行补充规则）\n${turn.suggestedRules.trim()}`;
   }
   return text;
 }
 
 export function RecognitionAgentDock({
   formId = DEFAULT_FORM_ID,
-  modeLabel = "当前填表",
+  modeLabel,
 }: RecognitionAgentDockProps) {
   const draftStorageKey = useMemo(() => `${RECOGNITION_AGENT_DRAFT_PREFIX}${formId}`, [formId]);
   const withFormId = useMemo(
@@ -60,15 +63,12 @@ export function RecognitionAgentDock({
   const [isOpen, setIsOpen] = useState(false);
   const [agentThread, setAgentThread] = useState<AgentThreadTurn[]>([]);
   const [workingRules, setWorkingRules] = useState("");
-  const [workingRulesDirty, setWorkingRulesDirty] = useState(false);
-  const [showRulesEditor, setShowRulesEditor] = useState(false);
   const [agentInput, setAgentInput] = useState("");
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
   const [dragActive, setDragActive] = useState(false);
   const [isLoadingRules, setIsLoadingRules] = useState(false);
   const [isPreparingAttachments, setIsPreparingAttachments] = useState(false);
   const [isSending, setIsSending] = useState(false);
-  const [isSavingRules, setIsSavingRules] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
   const [noticeMessage, setNoticeMessage] = useState("");
   const [draftHydrated, setDraftHydrated] = useState(false);
@@ -94,7 +94,6 @@ export function RecognitionAgentDock({
         setAgentInput("");
         setPendingAttachments([]);
         setWorkingRules("");
-        setWorkingRulesDirty(false);
         setDraftHydrated(true);
         return;
       }
@@ -103,19 +102,12 @@ export function RecognitionAgentDock({
       setAgentThread(Array.isArray(parsed.agentThread) ? parsed.agentThread : []);
       setAgentInput(typeof parsed.agentInput === "string" ? parsed.agentInput : "");
       setPendingAttachments(Array.isArray(parsed.pendingAttachments) ? parsed.pendingAttachments : []);
-      if (typeof parsed.workingRules === "string") {
-        setWorkingRules(parsed.workingRules);
-      } else {
-        setWorkingRules("");
-      }
-      setWorkingRulesDirty(Boolean(parsed.workingRulesDirty));
     } catch {
       setIsOpen(false);
       setAgentThread([]);
       setAgentInput("");
       setPendingAttachments([]);
       setWorkingRules("");
-      setWorkingRulesDirty(false);
     } finally {
       setDraftHydrated(true);
     }
@@ -130,20 +122,9 @@ export function RecognitionAgentDock({
       agentThread,
       agentInput,
       pendingAttachments,
-      workingRules: workingRulesDirty ? workingRules : "",
-      workingRulesDirty,
     };
     window.localStorage.setItem(draftStorageKey, JSON.stringify(payload));
-  }, [
-    agentInput,
-    agentThread,
-    draftHydrated,
-    draftStorageKey,
-    isOpen,
-    pendingAttachments,
-    workingRules,
-    workingRulesDirty,
-  ]);
+  }, [agentInput, agentThread, draftHydrated, draftStorageKey, isOpen, pendingAttachments]);
 
   useEffect(() => {
     if (!isOpen) {
@@ -162,23 +143,20 @@ export function RecognitionAgentDock({
         workingRules?: string;
       };
       if (!res.ok) {
-        throw new Error(data.error || "识别规则读取失败。");
+
       }
       setAgentThread((current) =>
         current.length > 0 ? current : Array.isArray(data.agentThread) ? data.agentThread : [],
       );
-      if (!workingRulesDirty) {
-        setWorkingRules(typeof data.workingRules === "string" ? data.workingRules : "");
-      }
+      setWorkingRules(typeof data.workingRules === "string" ? data.workingRules : "");
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "识别规则读取失败。");
+
     } finally {
       setIsLoadingRules(false);
     }
   }
 
   async function saveRules(nextRules: string, nextThread: AgentThreadTurn[]) {
-    setIsSavingRules(true);
     try {
       const res = await fetch(withFormId("/api/training/rules"), {
         method: "POST",
@@ -190,21 +168,18 @@ export function RecognitionAgentDock({
       });
       const data = (await res.json()) as { error?: string };
       if (!res.ok) {
-        throw new Error(data.error || "识别规则保存失败。");
+
       }
-      setWorkingRulesDirty(false);
-      setNoticeMessage("识别规则已保存，将在下次识别时生效。");
+
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "识别规则保存失败。");
-    } finally {
-      setIsSavingRules(false);
+
     }
   }
 
   async function processFileToAsset(file: File): Promise<AgentAsset | null> {
     const maxBytes = 12 * 1024 * 1024;
     if (file.size > maxBytes) {
-      throw new Error(`「${file.name}」超过 12MB。`);
+
     }
 
     if (file.type.startsWith("image/")) {
@@ -218,10 +193,10 @@ export function RecognitionAgentDock({
         originalName?: string;
       };
       if (!res.ok) {
-        throw new Error(data.error || "图片上传失败。");
+
       }
       if (!data.imageName) {
-        throw new Error("图片上传后缺少存储名。");
+        throw new Error(data.error || "上传上下文图片失败");
       }
       return {
         kind: "image",
@@ -241,11 +216,11 @@ export function RecognitionAgentDock({
       const res = await fetch("/api/training/parse-document", { method: "POST", body: fd });
       const data = (await res.json()) as { text?: string; error?: string; warning?: string };
       if (!res.ok) {
-        throw new Error(data.error || "文档解析失败。");
+
       }
       const excerpt = (data.text || "").trim().slice(0, 12000);
       if (!excerpt) {
-        throw new Error(data.warning || "文档中未提取到文字。");
+
       }
       return { kind: "document", name: file.name, excerpt };
     }
@@ -260,7 +235,7 @@ export function RecognitionAgentDock({
     });
 
     if (allowed.length < files.length) {
-      setErrorMessage("部分文件已忽略：仅支持图片、截图、PDF、Word、TXT、CSV、Markdown。");
+
     }
     if (allowed.length === 0) {
       return;
@@ -281,16 +256,16 @@ export function RecognitionAgentDock({
           });
         }
       } catch (error) {
-        failures.push(error instanceof Error ? error.message : `「${file.name}」处理失败。`);
+
       }
     }
 
     if (prepared.length > 0) {
       setPendingAttachments((current) => [...current, ...prepared]);
-      setNoticeMessage(`已添加 ${prepared.length} 个待发附件。`);
+
     }
     if (failures.length > 0) {
-      setErrorMessage(failures.join("；"));
+
     }
 
     setIsPreparingAttachments(false);
@@ -310,7 +285,7 @@ export function RecognitionAgentDock({
       const userTurn: AgentThreadTurn = {
         id: crypto.randomUUID(),
         role: "user",
-        content: text || "（仅附件）",
+        content: text,
         ts: new Date().toISOString(),
         ...(pendingAttachments.length > 0
           ? { assets: pendingAttachments.map((pending) => pending.asset) }
@@ -335,13 +310,14 @@ export function RecognitionAgentDock({
         revisedWorkingRules?: string;
       };
       if (!res.ok) {
-        throw new Error(data.error || "发送失败。");
+        setErrorMessage(data.error || "识别规则对话请求失败");
+        return;
       }
 
       const assistantTurn: AgentThreadTurn = {
         id: crypto.randomUUID(),
         role: "assistant",
-        content: data.assistantReply || "已根据你的反馈更新识别规则。",
+        content: (data.assistantReply || "").trim() || "（助手未返回说明文字）",
         ts: new Date().toISOString(),
       };
 
@@ -350,12 +326,11 @@ export function RecognitionAgentDock({
 
       setAgentThread(nextThread);
       setWorkingRules(nextRules);
-      setWorkingRulesDirty(false);
       setAgentInput("");
       setPendingAttachments([]);
       await saveRules(nextRules, nextThread);
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "发送失败。");
+      setErrorMessage(error instanceof Error ? error.message : "发送失败");
     } finally {
       setIsSending(false);
     }
@@ -365,7 +340,7 @@ export function RecognitionAgentDock({
     setAgentThread([]);
     setAgentInput("");
     setPendingAttachments([]);
-    setNoticeMessage("已清空对话记录和当前草稿。识别规则正文仍保留，如需重置请清空后保存。");
+
   }
 
   function handlePaste(event: React.ClipboardEvent<HTMLTextAreaElement>) {
@@ -384,7 +359,7 @@ export function RecognitionAgentDock({
           className="fixed bottom-5 right-5 z-[120] rounded-full bg-slate-900 px-4 py-3 text-sm font-medium text-white shadow-2xl transition hover:bg-slate-800"
           onClick={() => setIsOpen(true)}
         >
-          识别管家
+          识别管家 {modeLabel ? `· ${modeLabel}` : ""}
         </button>
       ) : null}
 
@@ -393,73 +368,38 @@ export function RecognitionAgentDock({
           <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
             <div>
               <div className="text-sm font-semibold text-slate-900">识别管家</div>
-              <div className="text-xs text-slate-500">{modeLabel} · 只优化识别方式，不修改软件架构</div>
+              {modeLabel ? <div className="text-xs text-slate-500">{modeLabel}</div> : null}
             </div>
             <div className="flex items-center gap-2">
               <button
                 type="button"
                 className="rounded-full border border-slate-200 px-3 py-1 text-xs text-slate-600 hover:bg-slate-50"
-                onClick={() => setShowRulesEditor((value) => !value)}
-              >
-                {showRulesEditor ? "收起规则" : "查看规则"}
-              </button>
-              <button
-                type="button"
-                className="rounded-full border border-slate-200 px-3 py-1 text-xs text-slate-600 hover:bg-slate-50"
                 onClick={() => setIsOpen(false)}
               >
-                关闭
+                收起
               </button>
             </div>
           </div>
 
-          {showRulesEditor ? (
-            <div className="border-b border-slate-200 bg-slate-50 px-4 py-3">
-              <label className="mb-1 block text-xs font-medium text-slate-700">当前识别规则</label>
-              <textarea
-                className="min-h-[132px] w-full resize-y rounded-2xl border border-slate-300 bg-white px-3 py-2 text-xs leading-relaxed outline-none focus:border-blue-500"
-                value={workingRules}
-                onChange={(event) => {
-                  setWorkingRules(event.target.value);
-                  setWorkingRulesDirty(true);
-                }}
-                placeholder="这里存放模型根据你反馈整理出的识别规则。这里只影响识别方式，不修改页面、接口、权限、存储和字段结构。"
-              />
-              <div className="mt-2 flex items-center justify-between">
-                <button
-                  type="button"
-                  className="text-xs text-slate-500 hover:text-rose-600"
-                  onClick={clearConversation}
-                >
-                  清空对话
-                </button>
-                <button
-                  type="button"
-                  className="rounded-xl bg-blue-600 px-3 py-2 text-xs font-medium text-white hover:bg-blue-500 disabled:bg-blue-300"
-                  onClick={() => void saveRules(workingRules, agentThread)}
-                  disabled={isSavingRules}
-                >
-                  {isSavingRules ? "保存中..." : "保存识别规则"}
-                </button>
-              </div>
-            </div>
-          ) : null}
-
           <div className="min-h-0 flex-1 overflow-y-auto bg-slate-50 px-4 py-4">
             {isLoadingRules ? (
               <div className="rounded-2xl border border-slate-200 bg-white px-4 py-6 text-center text-sm text-slate-500">
-                正在加载识别上下文...
+                正在加载规则与对话…
+              </div>
+            ) : null}
+            {!isLoadingRules ? (
+              <div className="mb-3 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-xs leading-6 text-slate-500">
+                识别管家统管当前这一份填表的识别效果：对话与「工作识别规则」仅保存在本填表内，与项目内其他填表互不干扰。填表模式与训练模式共用同一套规则。
+                仅讨论截图识别：字段含义、OCR 优先级、歧义处理等；软件架构、接口、权限等不会写入规则正文。
               </div>
             ) : null}
             {!isLoadingRules && agentThread.length === 0 ? (
               <div className="rounded-2xl border border-dashed border-slate-300 bg-white px-4 py-6 text-sm leading-6 text-slate-500">
-                直接告诉我：
+                用自然语言描述特殊场景下希望模型如何读图；可附带截图或文档作示例。
                 <br />
-                1. 哪些字段识别错了
+                发送后助手会更新「工作识别规则」，并用于本填表的填表识别与训练相关流程。
                 <br />
-                2. 应该按什么标签和规则识别
-                <br />
-                3. 你可以附上截图、现场图片、PDF、说明文档
+                在训练页打开识别管家，与在填表页打开的是同一填表、同一规则存档。
               </div>
             ) : null}
             <div className="space-y-3">
@@ -471,7 +411,7 @@ export function RecognitionAgentDock({
                   }`}
                 >
                   <div className="mb-1 text-[11px] font-medium uppercase tracking-wide text-slate-400">
-                    {turn.role === "user" ? "你" : "识别管家"}
+                    {turn.role === "user" ? "用户" : "助手"}
                   </div>
                   {turn.assets?.map((asset) => (
                     <button
@@ -489,7 +429,7 @@ export function RecognitionAgentDock({
                       }}
                       disabled={asset.kind !== "image"}
                     >
-                      {asset.kind === "image" ? `图片：${asset.name}（点击查看）` : `文档：${asset.name}`}
+                      {asset.kind === "image" ? `图片：${asset.name}` : `文档：${asset.name}`}
                     </button>
                   ))}
                   <div className="whitespace-pre-wrap break-words">{turn.content}</div>
@@ -556,7 +496,7 @@ export function RecognitionAgentDock({
                 </div>
               ) : (
                 <div className="mb-2 text-center text-xs text-slate-500">
-                  拖拽图片、截图、PDF、Word、TXT 到这里，或用下方按钮添加
+                  拖拽图片或文档到此处，或使用下方按钮选择文件（图片 / txt / csv / md / pdf / doc / docx）
                 </div>
               )}
 
@@ -565,13 +505,20 @@ export function RecognitionAgentDock({
                 value={agentInput}
                 onChange={(event) => setAgentInput(event.target.value)}
                 onPaste={handlePaste}
-                placeholder="告诉我哪些识别结果不对，应该如何识别；也可以直接贴截图或上传图片。"
+                placeholder="输入要调整的识别规则说明…"
               />
             </div>
 
             <div className="flex items-center gap-2">
+              <button
+                type="button"
+                className="rounded-xl border border-slate-300 bg-slate-50 px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-100"
+                onClick={clearConversation}
+              >
+                清空对话
+              </button>
               <label className="cursor-pointer rounded-xl border border-slate-300 bg-slate-50 px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-100">
-                添加文件
+                添加附件
                 <input
                   type="file"
                   multiple
@@ -592,7 +539,7 @@ export function RecognitionAgentDock({
                 onClick={() => void sendMessage()}
                 disabled={isSending || isPreparingAttachments || (!agentInput.trim() && pendingAttachments.length === 0)}
               >
-                {isPreparingAttachments ? "处理附件中..." : isSending ? "发送中..." : "发送"}
+                {isPreparingAttachments ? "处理附件中…" : isSending ? "发送中…" : "发送"}
               </button>
             </div>
           </div>
@@ -605,7 +552,7 @@ export function RecognitionAgentDock({
             <div className="flex items-center justify-between border-b border-white/10 px-4 py-3 text-white">
               <div className="min-w-0">
                 <div className="truncate text-sm font-medium">{imagePreview.name}</div>
-                <div className="text-xs text-slate-300">点击遮罩或右上角关闭</div>
+
               </div>
               <button
                 type="button"
@@ -618,7 +565,7 @@ export function RecognitionAgentDock({
             <button
               type="button"
               className="absolute inset-0"
-              aria-label="关闭图片预览"
+              aria-label="关闭预览"
               onClick={() => setImagePreview(null)}
             />
             <div className="relative z-[1] flex min-h-0 flex-1 items-center justify-center p-4">

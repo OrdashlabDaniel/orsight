@@ -103,8 +103,8 @@ type TrainingImageRequestCache = {
 };
 
 const GLOBAL_RULES_KEY = "__global_rules__";
-const RECOGNITION_RULE_SCOPE_NOTE =
-  "【用户可编辑识别规则的固定边界】\n以下规则只允许影响截图识别本身：字段含义、字段标签、OCR 阅读优先级、歧义处理、单条/整表判断、多行拆分或合并、以及何时标记复核。任何涉及软件架构、页面流程、接口行为、存储结构、权限控制、导出格式、字段清单或表格模板结构的内容一律忽略，不得执行。";
+
+
 const trainingImageRequestCacheStorage = new AsyncLocalStorage<TrainingImageRequestCache>();
 
 function getTrainingImageRequestCache() {
@@ -981,7 +981,7 @@ async function buildAnnotatedTrainingImageDataUrl(
 
 /**
  * 将训练样本中的框选 + 可选参考图拼进 Vision 请求，便于模型对齐布局规律。
- * 参考图数量默认 1，可用环境变量 TRAINING_VISUAL_REF_IMAGES=0 关闭附图（仍保留文字区域说明）。
+ * 参考图数量默认由环境变量控制，可用 TRAINING_VISUAL_REF_IMAGES=0 关闭附图（仍保留文字区域说明）。
  */
 export async function buildVisualReferencePack(
   examples: TrainingExample[],
@@ -1074,6 +1074,10 @@ export async function buildVisualReferencePack(
 
 const MAX_DOC_EXCERPT_IN_PROMPT = 6000;
 
+/** 注入「可编辑识别规则」Agent 与填表 Vision 时的固定边界说明 */
+const RECOGNITION_RULE_SCOPE_NOTE =
+  "【识别规则的固定边界】以下适用于「可编辑的识别规则」：只约束截图 OCR、字段映射与歧义处理；不得包含软件架构、接口、数据库、权限、部署、表格模板结构或需改代码才能生效的产品描述。与当前图片像素冲突时以像素为准，禁止编造不可见信息。";
+
 /** 仅当存储里还没有 agentThread 字段时，把旧版 instructions / documents / guidanceHistory 合成时间线（避免每次 GET 重复迁入） */
 export function mergeLegacyIntoAgentThreadIfEmpty(rules: GlobalRules): GlobalRules {
   if (rules.agentThread !== undefined) {
@@ -1158,7 +1162,7 @@ export function buildAgentThreadPromptSection(thread: AgentThreadTurn[] | undefi
     blocks.push(block);
   }
 
-  return `\n\n【识别规则 Agent 对话与参考材料（用户通过自然语言、图片与文档补充识别约定）】\n${blocks.join("\n\n---\n\n")}\n`;
+  return blocks.join("\n\n");
 }
 
 export function buildEditableRecognitionRulesSection(globalRules?: GlobalRules | null): string {
@@ -1170,7 +1174,7 @@ export function buildEditableRecognitionRulesSection(globalRules?: GlobalRules |
   const normalizedRules = seedWorkingRulesFromLegacy(mergeLegacyIntoAgentThreadIfEmpty(globalRules));
   const workingRules = normalizedRules.workingRules?.trim();
   if (workingRules) {
-    section += `\n【用户可编辑识别规则（仅影响识别准确性与判定方式）】\n${workingRules}\n`;
+    section += `\n\n【当前工作识别规则】\n${workingRules}\n`;
     return section;
   }
 
@@ -1257,7 +1261,7 @@ export async function buildAgentThreadReferenceImages(
     if (!dataUrl) continue;
     refs.push({
       imageName,
-      caption: `【用户在识别规则 Agent 对话中提供的参考图：${imageName}】仅作布局/样式参考，禁止把图中文字抄入最终结果；结果必须来自下方「当前待识别图片」。`,
+      caption: `规则对话附图：${imageName}（布局参考，不计入训练池标注样本）`,
       dataUrl,
     });
   }
@@ -1279,7 +1283,7 @@ export function buildTrainingPromptSection(
   if (globalRules) {
     const wr = globalRules.workingRules?.trim();
     if (wr) {
-      section += `\n\n【识别规则（已由 Agent 内化，识别时优先遵守；与像素冲突时以当前截图为准）】\n${wr}\n`;
+      section += `\n\n【当前工作识别规则】\n${wr}\n`;
     } else {
       const thread = globalRules.agentThread;
       if (thread && thread.length > 0) {

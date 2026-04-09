@@ -1,5 +1,6 @@
 # OrSight / pod-audit-tool — 项目交接文档（AI 与工程师可读）
 
+> **更详细的工程师向长文**：见 [`docs/HANDOFF_ENGINEERING.md`](docs/HANDOFF_ENGINEERING.md)（本地运行、部署、API、Supabase 流量、已知技术债等）。  
 > **目的**：让未接触过本仓库的 AI 或工程师在读完本文后，能定位代码、理解数据流、遵守业务约束，并安全地扩展功能。  
 > **仓库根路径示例**：`c:\works\Career\Position\GOFO\works\pod-audit-tool`（以你本机为准）  
 > **产品名**：OrSight（填表模式 / 训练模式）
