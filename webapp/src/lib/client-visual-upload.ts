@@ -7,6 +7,38 @@ export const SUPPORTED_VISUAL_UPLOAD_ACCEPT =
 
 export const SUPPORTED_VISUAL_UPLOAD_HELPER = "支持 PNG / JPG / JPEG / WEBP / PDF。";
 
+/** 工作台识别：在视觉类之外另支持电子表格与文档（服务端解析正文后走文本识别）。 */
+export const SUPPORTED_WORKSPACE_DOCUMENT_ACCEPT =
+  ".xlsx,.xls,.csv,.doc,.docx,.txt,.md,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,text/csv,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain";
+
+export const SUPPORTED_WORKSPACE_UPLOAD_ACCEPT = `${SUPPORTED_VISUAL_UPLOAD_ACCEPT},${SUPPORTED_WORKSPACE_DOCUMENT_ACCEPT}`;
+
+export const SUPPORTED_WORKSPACE_UPLOAD_HELPER =
+  "支持图片 / PDF，以及 Excel（.xlsx / .xls）、CSV、Word（.doc / .docx）、纯文本与 Markdown。";
+
+/** 新建填表 · 模板导入对话框（Excel / 截图 / PDF / Word / 文本等） */
+export const TEMPLATE_IMPORT_ACCEPT = `${SUPPORTED_VISUAL_UPLOAD_ACCEPT},.xlsx,.xls,.csv,.doc,.docx,.txt,.md,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,text/csv,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain`;
+
+export const TEMPLATE_IMPORT_HELPER =
+  "Excel / CSV、截图或 PDF、Word、纯文本或 Markdown；系统将自动选择导入方式。";
+
+const DOCUMENT_EXT = /\.(xlsx|xls|csv|doc|docx|txt|md)$/i;
+
+export function isWorkspaceDocumentFile(file: File): boolean {
+  return DOCUMENT_EXT.test(file.name);
+}
+
+function documentPlaceholderDataUrl(fileName: string): string {
+  const short = fileName.replace(/[<>&"]/g, "").slice(0, 48) || "document";
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="240" height="240" viewBox="0 0 240 240">
+  <rect width="240" height="240" fill="#f8fafc"/>
+  <rect x="36" y="48" width="168" height="144" rx="8" fill="#fff" stroke="#cbd5e1" stroke-width="2"/>
+  <path d="M56 78h128M56 98h96M56 118h128M56 138h72" stroke="#94a3b8" stroke-width="3" stroke-linecap="round"/>
+  <text x="120" y="210" text-anchor="middle" font-family="system-ui,sans-serif" font-size="11" fill="#64748b">${short}</text>
+</svg>`;
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+}
+
 export type PreparedVisualUpload = {
   file: File;
   previewUrl: string;
@@ -142,6 +174,22 @@ export async function prepareVisualUpload(file: File): Promise<PreparedVisualUpl
     file: renderedFile,
     previewUrl: URL.createObjectURL(pngBlob),
   };
+}
+
+/** 首页工作台：图片与 PDF 仍转可视预览；表格/文档保留原文件供服务端解析。 */
+export async function prepareWorkspaceUpload(file: File): Promise<PreparedVisualUpload> {
+  if (isWorkspaceDocumentFile(file)) {
+    const buffer = await file.arrayBuffer();
+    const cloned = new File([buffer], file.name, {
+      type: file.type || "application/octet-stream",
+      lastModified: file.lastModified,
+    });
+    return {
+      file: cloned,
+      previewUrl: documentPlaceholderDataUrl(file.name),
+    };
+  }
+  return prepareVisualUpload(file);
 }
 
 export async function ensureImageDataUrlFromSource(source: string) {

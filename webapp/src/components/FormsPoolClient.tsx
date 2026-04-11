@@ -189,7 +189,7 @@ export default function FormsPoolClient() {
   }
 
   return (
-    <main className="min-h-screen bg-slate-100 px-4 py-6 text-slate-900">
+    <main className="flex min-h-0 flex-1 flex-col overflow-y-auto bg-slate-100 px-4 py-6 text-slate-900">
       <div className="mx-auto max-w-6xl space-y-4">
         <header className="rounded-2xl border border-slate-200 bg-white px-6 py-5 shadow-sm">
           <h1 className="text-2xl font-semibold">填表池</h1>

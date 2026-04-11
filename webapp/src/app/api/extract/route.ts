@@ -43,6 +43,11 @@ import {
   type TableFieldDefinition,
 } from "@/lib/table-fields";
 import { loadTableFields } from "@/lib/table-fields-store";
+import {
+  extractDocumentPlainText,
+  guessDocumentImageType,
+  isStructuredDocumentFileName,
+} from "@/lib/document-text-extract";
 
 const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || "https://api.openai.com/v1";
 const OPENAI_PRIMARY_MODEL = process.env.OPENAI_PRIMARY_MODEL || process.env.OPENAI_MODEL || "gpt-5-mini";
@@ -1809,6 +1814,97 @@ async function callVisionModel(
   };
 }
 
+const MAX_DOCUMENT_PROMPT_CHARS = 120_000;
+
+async function callDocumentExtractionModel(
+  documentText: string,
+  fileName: string,
+  model: string,
+  ctx: ExtractVisionContext,
+): Promise<{ records: RawModelRecord[]; imageType: string; usage?: OpenAIUsage }> {
+  if (!OPENAI_API_KEY) {
+    throw new Error("Missing OPENAI_API_KEY. Please configure the AI model first.");
+  }
+
+  const clipped =
+    documentText.length > MAX_DOCUMENT_PROMPT_CHARS
+      ? documentText.slice(0, MAX_DOCUMENT_PROMPT_CHARS)
+      : documentText;
+
+  const docHint =
+    guessDocumentImageType(fileName) === "WEB_TABLE"
+      ? "当前输入来自表格类电子文档（如 Excel/CSV 导出），imageType 应使用 WEB_TABLE。"
+      : "当前输入来自 Word/纯文本等叙述类文档，imageType 应使用 OTHER。";
+
+  const userText = `${buildPrimaryExtractionPrompt(
+    ctx.tableFields,
+    ctx.activeBuiltInFieldIds,
+    ctx.recognitionRuleCode,
+  )}
+${ctx.editableRecognitionRulesText}
+
+【电子文档模式】上传文件已转为纯文本（非截图）。请仅依据下列文本抽取结构化记录，输出与图片模式相同的 JSON（含 imageType 与 records）。
+${docHint}
+不要把规则或示例中的虚构数据填入结果；看不清或无法对应字段时留空并标记 reviewRequired。
+
+--- 文档正文（节选）---
+${clipped}
+--- 文档结束 ---`;
+
+  const body = {
+    model,
+    reasoning_effort: OPENAI_REASONING_EFFORT,
+    response_format: { type: "json_object" },
+    messages: [
+      {
+        role: "user",
+        content: userText,
+      },
+    ],
+  };
+
+  const response = await fetch(`${OPENAI_BASE_URL}/chat/completions`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${OPENAI_API_KEY}`,
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Document extraction API error: ${response.status} ${text}`);
+  }
+
+  const payload = (await response.json()) as {
+    choices?: Array<{
+      message?: {
+        content?: string;
+      };
+    }>;
+    usage?: OpenAIUsage;
+  };
+
+  const content = payload.choices?.[0]?.message?.content;
+  if (!content) {
+    throw new Error("Document extraction API returned empty content.");
+  }
+
+  let parsed: { records?: RawModelRecord[]; imageType?: string };
+  try {
+    parsed = JSON.parse(content) as { records?: RawModelRecord[]; imageType?: string };
+  } catch (error) {
+    throw new Error(`Model did not return valid JSON: ${String(error)}`);
+  }
+
+  return {
+    records: parsed.records || [],
+    imageType: parsed.imageType || guessDocumentImageType(fileName),
+    usage: payload.usage,
+  };
+}
+
 function hasSameExampleSet(left: TrainingExample[], right: TrainingExample[]) {
   if (left.length !== right.length) {
     return false;
@@ -3024,6 +3120,177 @@ export async function POST(request: Request) {
         activeBuiltInFieldIds.has("exceptions");
 
       for (const file of files) {
+        if (isStructuredDocumentFileName(file.name)) {
+          let plain = "";
+          let docParseWarning: string | undefined;
+          try {
+            const buf = Buffer.from(await file.arrayBuffer());
+            const extracted = await extractDocumentPlainText(buf, file.name);
+            plain = extracted.text;
+            docParseWarning = extracted.warning;
+          } catch (error) {
+            issues.push({
+              imageName: file.name,
+              level: "error",
+              message: error instanceof Error ? error.message : "文档解析失败。",
+            });
+            continue;
+          }
+
+          if (!plain.trim()) {
+            issues.push({
+              imageName: file.name,
+              level: "error",
+              message: docParseWarning || "未能从文档中提取可读文本。",
+            });
+            continue;
+          }
+
+          const attemptCount = getConsistencyAttemptCount();
+          const docAttempts = await Promise.all(
+            Array.from({ length: attemptCount }, () =>
+              callDocumentExtractionModel(plain, file.name, model, visionCtx),
+            ),
+          );
+
+          let docPromptTokens = 0;
+          let docCompletionTokens = 0;
+          let docTotalTokens = 0;
+          for (const attempt of docAttempts) {
+            if (attempt.usage) {
+              docPromptTokens += attempt.usage.prompt_tokens || 0;
+              docCompletionTokens += attempt.usage.completion_tokens || 0;
+              docTotalTokens += attempt.usage.total_tokens || 0;
+            }
+          }
+
+          const imageType = docAttempts[0]?.imageType || guessDocumentImageType(file.name);
+          const attemptRecords = docAttempts.map((attempt) =>
+            attempt.records.map((raw, index) =>
+              applyRecognitionRuleCodeToRecord(
+                stripInactiveBuiltInValues(
+                  mapRecord(file.name, raw, index),
+                  activeBuiltInFieldIds,
+                ),
+                visionCtx.recognitionRuleCode,
+                activeBuiltInFieldIds,
+              ),
+            ),
+          );
+
+          let workingRecords = attemptRecords[0] || [];
+          const counterVerificationResult: CounterVerificationResult | null = null;
+
+          workingRecords = workingRecords.map((record) =>
+            routeStationBuiltInActive ? repairRouteVersusStationTeamRecord(record) : record,
+          );
+          const sourceCheckedRecords = markSourceMismatchForReview(workingRecords, validLabels, activeBuiltInFieldIds);
+
+          const sanityChecked = applyRecordSanityChecks(file.name, sourceCheckedRecords, activeBuiltInFieldIds);
+          let checkedRecords = sanityChecked.records;
+          let counterIssues: ExtractionIssue[] = sanityChecked.issues;
+
+          let totalPromptTokens = docPromptTokens;
+          let totalCompletionTokens = docCompletionTokens;
+          let totalTokens = docTotalTokens;
+
+          checkedRecords = checkedRecords.map((record) => ({
+            ...record,
+            imageType,
+          }));
+          checkedRecords = deriveWaybillStatus(checkedRecords, activeBuiltInFieldIds);
+
+          const recoveryResult = { records: checkedRecords };
+
+          checkedRecords = recoveryResult.records
+            .map((record) => ({
+              ...record,
+              imageType,
+            }))
+            .map((record) =>
+              applyRecognitionRuleCodeToRecord(record, visionCtx.recognitionRuleCode, activeBuiltInFieldIds),
+            )
+            .map((record) => (routeStationBuiltInActive ? repairRouteVersusStationTeamRecord(record) : record))
+            .map((record) => (routeStationBuiltInActive ? sanitizeStationTeamRecord(record) : record));
+          checkedRecords = propagateSharedImageFields(checkedRecords, activeBuiltInFieldIds);
+          checkedRecords = checkedRecords.map((record) => {
+            const nextRecord = taskCodeBuiltInActive
+              ? enforceTaskCodeIntegrity(record, visionCtx.recognitionValidationConfig)
+              : stripInactiveBuiltInValues(record, activeBuiltInFieldIds);
+            return applyRecognitionRuleCodeToRecord(
+              nextRecord,
+              visionCtx.recognitionRuleCode,
+              activeBuiltInFieldIds,
+            );
+          });
+          checkedRecords = deriveWaybillStatus(checkedRecords, activeBuiltInFieldIds);
+
+          const consistencyAnalysis = applyProcessedConsistencyAnalysis(
+            file.name,
+            checkedRecords,
+            attemptRecords,
+            imageType,
+            validLabels,
+            visionCtx.recognitionValidationConfig,
+            visionCtx.recognitionRuleCode,
+            activeBuiltInFieldIds,
+            counterVerificationResult,
+          );
+          checkedRecords = consistencyAnalysis.records;
+
+          if (user?.id) {
+            const admin = getSupabaseAdmin();
+            if (admin) {
+              admin!
+                .from("usage_logs")
+                .insert({
+                  user_id: user!.id,
+                  action_type: "extract_table",
+                  image_count: 1,
+                  prompt_tokens: totalPromptTokens,
+                  completion_tokens: totalCompletionTokens,
+                  total_tokens: totalTokens,
+                  model_used: model,
+                })
+                .then(({ error }) => {
+                  if (error) console.error("Failed to log usage:", error);
+                });
+            }
+          }
+
+          if (docParseWarning) {
+            issues.push({
+              imageName: file.name,
+              level: "warning",
+              message: docParseWarning,
+            });
+          }
+
+          if (!checkedRecords.length) {
+            issues.push({
+              imageName: file.name,
+              message: "AI 没有返回任何记录，请人工复核。",
+              level: "error",
+              code: "empty_result",
+            });
+            issues.push(...counterIssues);
+            continue;
+          }
+
+          checkedRecords.forEach((record) => {
+            records.push(record);
+            issues.push(
+              ...validateRecord(record, {
+                recognitionValidationConfig: visionCtx.recognitionValidationConfig,
+                activeBuiltInFieldIds,
+              }),
+            );
+          });
+          issues.push(...consistencyAnalysis.issues);
+          issues.push(...counterIssues);
+          continue;
+        }
+
         const consistencyResult = await runConsistencyCheck(file, model, visionCtx);
         let workingRecords = consistencyResult.attemptRecords[0] || [];
         let counterVerificationResult: CounterVerificationResult | null = null;

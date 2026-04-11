@@ -4,12 +4,14 @@ import Link from "next/link";
 import { useRouter, usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 
+import { useLocale } from "@/i18n/LocaleProvider";
 import { getDisplayUsernameFromUser } from "@/lib/auth-username";
 import { isDevMockLoginEnabled } from "@/lib/dev-mock-auth";
 import { createClient } from "@/lib/supabase/browser";
 import { isSupabaseAuthEnabled } from "@/lib/supabase";
 
 export function UserNav() {
+  const { locale, setLocale, t } = useLocale();
   const router = useRouter();
   const pathname = usePathname();
   const [displayName, setDisplayName] = useState<string | null>(null);
@@ -67,25 +69,41 @@ export function UserNav() {
   }
 
   return (
-    <header className="sticky top-0 z-40 border-b border-slate-200 bg-white/95 backdrop-blur">
-      <div className="mx-auto flex max-w-[1800px] items-center justify-end gap-3 px-4 py-2 text-sm">
+    <header className="sticky top-0 z-40 border-b border-[var(--border)] bg-[var(--surface)]/90 backdrop-blur-sm">
+      <div className="mx-auto flex max-w-[1600px] items-center justify-end gap-4 px-3 py-2 text-sm">
+        <div className="flex items-center gap-1 rounded-lg border border-[var(--border)] p-0.5 text-xs">
+          <span className="sr-only">{t("nav.language")}</span>
+          <button
+            type="button"
+            onClick={() => setLocale("zh")}
+            className={`rounded-md px-2 py-1 ${locale === "zh" ? "bg-[var(--foreground)] text-[var(--background)]" : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]"}`}
+          >
+            {t("nav.zh")}
+          </button>
+          <button
+            type="button"
+            onClick={() => setLocale("en")}
+            className={`rounded-md px-2 py-1 ${locale === "en" ? "bg-[var(--foreground)] text-[var(--background)]" : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]"}`}
+          >
+            {t("nav.en")}
+          </button>
+        </div>
         {devMock && !supabaseOn ? (
-          <span className="rounded bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-900">假登录</span>
+          <span className="text-xs text-amber-700">{t("nav.mockLogin")}</span>
         ) : null}
-        <Link href="/account" className={`font-medium ${pathname === "/account" ? "text-blue-600" : "text-slate-600 hover:text-slate-900"}`}>
-          用户信息
+        <Link
+          href="/account"
+          className={`text-[var(--muted-foreground)] hover:text-[var(--foreground)] ${pathname === "/account" ? "text-[var(--foreground)]" : ""}`}
+        >
+          {t("nav.account")}
         </Link>
         {displayName ? (
-          <span className="max-w-[200px] truncate text-slate-500" title={displayName}>
+          <span className="max-w-[160px] truncate text-xs text-[var(--muted-foreground)]" title={displayName}>
             {displayName}
           </span>
         ) : null}
-        <button
-          type="button"
-          onClick={() => void handleSignOut()}
-          className="rounded-lg border border-slate-300 px-3 py-1.5 font-medium text-slate-700 hover:bg-slate-50"
-        >
-          退出登录
+        <button type="button" onClick={() => void handleSignOut()} className="text-[var(--muted-foreground)] hover:text-[var(--foreground)]">
+          {t("nav.signOut")}
         </button>
       </div>
     </header>

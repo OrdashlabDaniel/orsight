@@ -15,6 +15,8 @@ import {
   type WorkbenchAnnotationBox,
 } from "@/components/TrainingAnnotationWorkbench";
 import { RecognitionAgentDock } from "@/components/RecognitionAgentDock";
+import { LoginLoadingFallback } from "@/app/login/LoginLoadingFallback";
+import { useLocale } from "@/i18n/LocaleProvider";
 import {
   DEFAULT_TABLE_FIELDS,
   getActiveTableFields,
@@ -25,6 +27,7 @@ import {
 import { DEFAULT_FORM_ID, buildFormFillHref, normalizeFormId } from "@/lib/forms";
 import {
   ensureImageDataUrlFromSource,
+  isWorkspaceDocumentFile,
   prepareVisualUpload,
   SUPPORTED_VISUAL_UPLOAD_ACCEPT,
 } from "@/lib/client-visual-upload";
@@ -72,6 +75,7 @@ type TrainingStatusResponse = {
 };
 
 function TrainingModeContent() {
+  const { t } = useLocale();
   const searchParams = useSearchParams();
   const currentFormId = useMemo(
     () => normalizeFormId(searchParams.get("formId") || DEFAULT_FORM_ID),
@@ -265,9 +269,20 @@ function TrainingModeContent() {
       return;
     }
 
+    const list = Array.from(fileList);
+    const skippedDocs = list.filter((f) => isWorkspaceDocumentFile(f));
+    const visualOnly = list.filter((f) => !isWorkspaceDocumentFile(f));
+    if (skippedDocs.length) {
+      setNoticeMessage(t("training.skipDocs", { n: skippedDocs.length }));
+    }
+    if (!visualOnly.length) {
+      setErrorMessage("");
+      return;
+    }
+
     try {
       const nextUploads = await Promise.all(
-        Array.from(fileList).map(async (file, index) => {
+        visualOnly.map(async (file, index) => {
           const prepared = await prepareVisualUpload(file);
           return {
             id: `${prepared.file.name}-${prepared.file.lastModified}-${index}-${Date.now()}`,
@@ -325,7 +340,7 @@ function TrainingModeContent() {
     setUploads([]);
     setSelectedUploadId(null);
     setErrorMessage("");
-    setNoticeMessage("已清空待标注图片。");
+    setNoticeMessage(t("training.cleared"));
   }
 
   async function resolveAnnotationImage(imageName: string, previewUrl?: string) {
@@ -340,7 +355,7 @@ function TrainingModeContent() {
     const response = await fetch(withFormId(`/api/training/image?imageName=${encodeURIComponent(imageName)}`));
     const payload = (await response.json()) as { dataUrl?: string; error?: string };
     if (!response.ok || !payload.dataUrl) {
-      throw new Error(payload.error || "无法读取训练图片。");
+      throw new Error(payload.error || t("training.errTrainImage"));
     }
     return await ensureImageDataUrlFromSource(payload.dataUrl);
   }
@@ -385,7 +400,7 @@ function TrainingModeContent() {
       return;
     }
 
-    const confirmed = window.confirm(`确定删除训练图片「${item.imageName}」吗？删除后不可恢复。`);
+    const confirmed = window.confirm(t("training.confirmDelete", { name: item.imageName }));
     if (!confirmed) {
       return;
     }
@@ -467,20 +482,20 @@ function TrainingModeContent() {
         id: typeof b.id === "string" && b.id ? b.id : crypto.randomUUID(),
       })),
       fieldAggregations: existingExample?.fieldAggregations || {},
-      notes: existingExample?.notes || "人工标注用于训练池。",
+      notes: existingExample?.notes || t("annotation.defaultNotes"),
     });
 
     setAnnotationImageName(imageName);
     setAnnotationImageSrc("");
 
-    setNoticeMessage(`正在打开标注工作台：${imageName}`);
+    setNoticeMessage(t("training.opening", { name: imageName }));
 
     try {
       const imageSrc = await resolveAnnotationImage(imageName, previewUrl);
       setAnnotationImageSrc(imageSrc);
-      setNoticeMessage(`已打开标注工作台：${imageName}`);
+      setNoticeMessage(t("training.opened", { name: imageName }));
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "打开标注失败。");
+      setErrorMessage(error instanceof Error ? error.message : t("training.errOpen"));
       setAnnotatingItem(null);
       setAnnotationDraft(null);
       removeUploadAfterSaveRef.current = null;
@@ -509,75 +524,72 @@ function TrainingModeContent() {
   }
 
   return (
-    <main className="min-h-screen bg-slate-100 px-4 py-4 text-slate-900">
-      <div className="mx-auto flex max-w-[1800px] flex-col gap-4">
-        <header className="rounded-3xl border border-slate-200 bg-white px-6 py-5 shadow-sm">
+    <main className="flex min-h-0 flex-1 flex-col overflow-hidden bg-slate-100 px-4 py-4 text-slate-900">
+      <div className="mx-auto flex h-full min-h-0 w-full max-w-[1800px] flex-col gap-4">
+        <header className="shrink-0 rounded-3xl border border-slate-200 bg-white px-6 py-5 shadow-sm">
           <div className="mb-3 flex flex-wrap items-center justify-between gap-2 text-sm">
             <Link href="/forms" className="font-medium text-blue-600 hover:underline">
-              ← 返回填表池
+              {t("training.backForms")}
             </Link>
             <Link
               href={buildFormFillHref(currentFormId)}
               className="font-medium text-slate-700 hover:text-slate-900 hover:underline"
             >
-              切换到填表模式
+              {t("training.switchFill")}
             </Link>
           </div>
 
-          <h1 className="text-2xl font-semibold">OrSight - 训练模式</h1>
-          <p className="mt-2 text-sm text-slate-600">
-            上传与业务一致的截图，在标注工作台中画框并保存标准输出。训练池会在下次识别时作为提示与参考图使用；请尽量使用「位图坐标」框（coordSpace: image）以便裁剪增强生效。
-          </p>
+          <h1 className="text-2xl font-semibold">{t("training.title")}</h1>
+          <p className="mt-2 text-sm text-slate-600">{t("training.intro")}</p>
           {setupFieldDefinition ? (
             <div className="mt-4 rounded-2xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-800">
-              <div className="font-medium">正在为「{setupFieldDefinition.label}」准备第一条训练样本</div>
-              <div className="mt-1">
-                请上传能代表该项目的真实截图，打开标注工作台后框选「{setupFieldDefinition.label}」在图中的位置并保存。
-              </div>
+              <div className="font-medium">{t("training.setupBanner", { label: setupFieldDefinition.label })}</div>
+              <div className="mt-1">{t("training.setupHint", { label: setupFieldDefinition.label })}</div>
             </div>
           ) : null}
           <div className="mt-3 flex flex-wrap gap-2 text-xs">
             {trainingStatus ? (
               <>
                 <span className="rounded-full bg-slate-100 px-3 py-1 text-slate-700">
-                  训练图片：{trainingStatus.totalImages}
+                  {t("training.statImages", { n: trainingStatus.totalImages })}
                 </span>
                 <span className="rounded-full bg-emerald-100 px-3 py-1 text-emerald-700">
-                  已标注：{trainingStatus.labeledImages}
+                  {t("training.statLabeled", { n: trainingStatus.labeledImages })}
                 </span>
                 <span className="rounded-full bg-amber-100 px-3 py-1 text-amber-700">
-                  未标注：{trainingStatus.unlabeledImages}
+                  {t("training.statUnlabeled", { n: trainingStatus.unlabeledImages })}
                 </span>
               </>
             ) : null}
           </div>
         </header>
 
-        <section className="grid min-h-[calc(100vh-170px)] grid-cols-1 gap-4 xl:grid-cols-[420px_minmax(0,1fr)]">
-          <div className="flex flex-col gap-4">
-            <div className="flex min-h-0 flex-col rounded-3xl border border-slate-200 bg-white shadow-sm">
-              <div className="border-b border-slate-200 px-5 py-4">
-                <h2 className="text-lg font-semibold">训练池说明</h2>
-                <p className="mt-1 text-sm text-slate-500">训练样本与图片会写入当前表单对应的训练池（Supabase 或本地目录）。</p>
+        <section className="flex min-h-0 flex-1 flex-col gap-4 overflow-hidden xl:flex-row xl:items-stretch">
+          <div className="flex min-h-0 w-full min-w-0 flex-1 flex-col gap-4 overflow-hidden xl:max-w-[420px] xl:flex-none xl:basis-[min(100%,420px)]">
+            <div className="flex min-h-0 flex-[0.85] flex-col overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
+              <div className="shrink-0 border-b border-slate-200 px-5 py-4">
+                <h2 className="text-lg font-semibold">{t("training.poolHelpTitle")}</h2>
+                <p className="mt-1 text-sm text-slate-500">{t("training.poolHelp1")}</p>
               </div>
-              <div className="space-y-3 p-5 text-sm leading-6 text-slate-600">
-                <p>左侧上传待标注图片，保存无框样本可先入库；点击缩略图打开工作台画框并保存标准答案。</p>
-                <p>右侧网格为已入库图片；绿色「已标注」表示该图在训练池中有结构化样本。</p>
-                <p>
-                  右下角「识别管家」与填表页共用：可在此用自然语言调整本填表的识别规则（按当前表单隔离），特殊场景下不必离开训练页。
-                </p>
-                <p>删除图片会同时移除 Storage 中的文件及对应样本记录，请谨慎操作。</p>
+              <div className="min-h-0 flex-1 overflow-y-auto space-y-3 p-5 text-sm leading-6 text-slate-600">
+                <p>{t("training.poolHelp2")}</p>
+                <p>{t("training.poolHelp3")}</p>
+                <p>{t("training.poolHelp4")}</p>
+                <p>{t("training.poolHelp5")}</p>
               </div>
             </div>
 
-
-            <div ref={uploadPanelRef} className="flex min-h-0 flex-1 flex-col rounded-3xl border border-slate-200 bg-white shadow-sm">
-              <div className="border-b border-slate-200 px-5 py-4">
-                <h2 className="text-lg font-semibold">待标注上传区</h2>
-                <p className="mt-1 text-sm text-slate-500">支持 PNG / JPG / JPEG / WEBP / PDF；可拖拽、点击选择或 Ctrl+V 粘贴截图。</p>
+            <div
+              ref={uploadPanelRef}
+              className="flex min-h-0 flex-[1.15] flex-col overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm"
+            >
+              <div className="shrink-0 border-b border-slate-200 px-5 py-4">
+                <h2 className="text-lg font-semibold">{t("training.uploadTitle")}</h2>
+                <p className="mt-1 text-sm text-slate-500">{t("training.uploadHint")}</p>
               </div>
 
-              <div className="space-y-4 p-5">
+              <div className="min-h-0 flex-1 overflow-y-auto">
+                <div className="space-y-4 p-5">
                 <label
                   className={`flex cursor-pointer flex-col items-center justify-center rounded-2xl border border-dashed px-4 py-8 text-center transition ${
                     isDraggingFiles
@@ -589,9 +601,9 @@ function TrainingModeContent() {
                   onDragLeave={handleDragLeave}
                   onDrop={handleDrop}
                 >
-                  <span className="text-sm font-medium">点击、拖拽或粘贴上传图片 / PDF</span>
+                  <span className="text-sm font-medium">{t("training.uploadCTA")}</span>
                   <span className="mt-1 text-xs text-slate-500">
-                    {isDraggingFiles ? "松开鼠标即可上传文件" : "可一次选择多张，或直接 Ctrl+V 粘贴图片。"}
+                    {isDraggingFiles ? t("training.dropRelease") : t("training.dropHint")}
                   </span>
                   <input
                     className="hidden"
@@ -607,7 +619,7 @@ function TrainingModeContent() {
                     className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-700 disabled:cursor-not-allowed disabled:bg-slate-400"
                     onClick={async () => {
                       if (!uploads.length) {
-                        setErrorMessage("请先上传至少一张图片。");
+                        setErrorMessage(t("training.errNeedImage"));
                         return;
                       }
                       setIsSavingTraining(true);
@@ -656,7 +668,7 @@ function TrainingModeContent() {
                     }}
                     disabled={isSavingTraining || !uploads.length}
                   >
-                    {isSavingTraining ? "保存中…" : "保存到训练池（无框）"}
+                    {isSavingTraining ? t("training.saveNoBox") : t("training.saveNoBoxBtn")}
                   </button>
                   <button
                     className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-medium hover:bg-slate-50"
@@ -680,17 +692,17 @@ function TrainingModeContent() {
                         if (files.length > 0) {
                           void handleFiles(files);
                         } else {
-                          setErrorMessage("剪贴板中没有图片。");
+                          setErrorMessage(t("training.noClipboard"));
                         }
                       } catch {
-                        setErrorMessage("无法读取剪贴板，请授予权限或使用 Ctrl+V 粘贴。");
+                        setErrorMessage(t("training.errClipboard"));
                       }
                     }}
                   >
-                    从剪贴板粘贴
+                    {t("training.pasteClipboard")}
                   </button>
                   <button className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-medium hover:bg-slate-50" onClick={clearAll}>
-                    清空
+                    {t("training.clear")}
                   </button>
                 </div>
 
@@ -702,8 +714,7 @@ function TrainingModeContent() {
                   <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">{noticeMessage}</div>
                 ) : null}
 
-                <div className="grid gap-4 xl:grid-cols-1">
-                  <div className="max-h-[600px] overflow-auto rounded-2xl border border-slate-200">
+                <div className="rounded-2xl border border-slate-200">
                     {uploads.length ? (
                       <ul className="divide-y divide-slate-200">
                         {uploads.map((upload) => (
@@ -729,19 +740,19 @@ function TrainingModeContent() {
                         ))}
                       </ul>
                     ) : (
-                      <div className="px-4 py-8 text-center text-sm text-slate-500">上传后这里会显示待标注列表</div>
+                      <div className="px-4 py-8 text-center text-sm text-slate-500">{t("training.queueEmpty")}</div>
                     )}
-                  </div>
+                </div>
                 </div>
               </div>
             </div>
           </div>
 
-          <div className="flex min-h-0 flex-col rounded-3xl border border-slate-200 bg-white shadow-sm">
-            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-5 py-4">
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
+            <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-5 py-4">
               <div>
-                <h2 className="text-lg font-semibold">训练池图片</h2>
-                <p className="mt-1 text-sm text-slate-500">点击缩略图打开标注；右上角可删除入库图片。</p>
+                <h2 className="text-lg font-semibold">{t("training.gridTitle")}</h2>
+                <p className="mt-1 text-sm text-slate-500">{t("training.gridHint")}</p>
               </div>
             </div>
 
@@ -770,7 +781,7 @@ function TrainingModeContent() {
                           deletingImageName === item.imageName ? "pointer-events-none opacity-60" : ""
                         }`}
                       >
-                        删除
+                        {t("training.delete")}
                       </span>
                       <div className="relative flex-1 bg-slate-100">
                         {!trainingThumbnailErrorMap[item.imageName] ? (
@@ -805,7 +816,7 @@ function TrainingModeContent() {
                             }}
                             className="flex h-full w-full items-center justify-center p-4 text-center text-xs text-slate-400 break-all hover:bg-slate-200/70 hover:text-slate-500"
                           >
-                            缩略图加载失败，点击重试
+                            {t("training.thumbErr")}
                           </button>
                         )}
                       </div>
@@ -816,11 +827,11 @@ function TrainingModeContent() {
                         <div className="mt-1 flex items-center gap-1">
                           {item.labeled ? (
                             <span className="inline-flex items-center rounded-full bg-emerald-100 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700">
-                              已标注
+                              {t("training.labeled")}
                             </span>
                           ) : (
                             <span className="inline-flex items-center rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700">
-                              未标注
+                              {t("training.unlabeled")}
                             </span>
                           )}
                         </div>
@@ -830,7 +841,7 @@ function TrainingModeContent() {
                 </div>
               ) : (
                 <div className="flex h-full min-h-[200px] items-center justify-center text-sm text-slate-500">
-                  暂无训练图片。可在左侧上传后点击「保存到训练池」，或从其他环境同步训练数据。
+                  {t("training.emptyPool")}
                 </div>
               )}
             </div>
@@ -866,7 +877,7 @@ function TrainingModeContent() {
           />
         ) : null}
 
-        <RecognitionAgentDock formId={currentFormId} modeLabel="训练模式" />
+        <RecognitionAgentDock formId={currentFormId} modeLabel={t("training.modeLabel")} />
       </div>
     </main>
   );
@@ -874,7 +885,7 @@ function TrainingModeContent() {
 
 export default function TrainingMode() {
   return (
-    <Suspense fallback={<div className="min-h-screen bg-slate-100" />}>
+    <Suspense fallback={<LoginLoadingFallback />}>
       <TrainingModeContent />
     </Suspense>
   );

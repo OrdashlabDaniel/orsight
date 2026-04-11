@@ -11,10 +11,12 @@ import {
   usernameToPodLoginEmail,
 } from "@/lib/auth-username";
 import { isDevMockLoginEnabled } from "@/lib/dev-mock-auth";
+import { useLocale } from "@/i18n/LocaleProvider";
 import { createClient } from "@/lib/supabase/browser";
 import { isLoginStrictlyRequired, isSupabaseAuthEnabled } from "@/lib/supabase";
 
 export function LoginForm() {
+  const { t } = useLocale();
   const router = useRouter();
   const searchParams = useSearchParams();
   const nextPath = searchParams.get("next") || "/";
@@ -36,37 +38,19 @@ export function LoginForm() {
       <main className="flex min-h-screen items-center justify-center bg-slate-100 px-4">
         <div className="max-w-md rounded-2xl border border-slate-200 bg-white p-8 shadow-sm">
           <h1 className="text-xl font-semibold text-slate-900">
-            {configReason || isLoginStrictlyRequired() ? "需要配置登录" : "未启用 Supabase 登录"}
+            {configReason || isLoginStrictlyRequired() ? t("login.needConfigTitle") : t("login.supabaseOffTitle")}
           </h1>
-          <p className="mt-3 text-sm text-slate-600">
-            请在 <code className="rounded bg-slate-100 px-1">webapp/.env.local</code> 中填写真实的{" "}
-            <code className="rounded bg-slate-100 px-1">NEXT_PUBLIC_SUPABASE_URL</code>（必须以{" "}
-            <code className="rounded bg-slate-100 px-1">https://</code> 开头）与{" "}
-            <code className="rounded bg-slate-100 px-1">NEXT_PUBLIC_SUPABASE_ANON_KEY</code>
-            ，保存后<strong>重启</strong> <code className="rounded bg-slate-100 px-1">npm run dev</code>。
-          </p>
-          <p className="mt-3 text-sm text-slate-600">
-            占位符如 <code className="rounded bg-slate-100 px-1">your_supabase_project_url</code>{" "}
-            不会被识别为已配置。
-          </p>
+          <p className="mt-3 text-sm text-slate-600">{t("login.configBody")}</p>
+          <p className="mt-3 text-sm text-slate-600">{t("login.placeholderHint")}</p>
           <p className="mt-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
-            <strong>本地测登录页：</strong>在 <code className="rounded bg-amber-100 px-1">.env.local</code>{" "}
-            加 <code className="rounded bg-amber-100 px-1">NEXT_PUBLIC_DEV_MOCK_LOGIN=true</code>{" "}
-            并重启，即可使用假登录（无需 Supabase）。详见 <code className="rounded bg-amber-100 px-1">AUTH.md</code>。
+            {t("login.devMockHint")}
           </p>
-          <p className="mt-4 text-sm text-slate-600">
-            若你暂时<strong>不需要</strong>登录（纯本地调试），在{" "}
-            <code className="rounded bg-slate-100 px-1">.env.local</code> 增加一行：{" "}
-            <code className="rounded bg-slate-100 px-1">NEXT_PUBLIC_REQUIRE_LOGIN=false</code>{" "}
-            后重启服务。
-          </p>
+          <p className="mt-4 text-sm text-slate-600">{t("login.noLoginHint")}</p>
           {!isLoginStrictlyRequired() ? (
             <p className="mt-4 text-sm text-slate-600">
-              当前已关闭强制登录时，可{" "}
               <Link href="/" className="text-blue-600 hover:underline">
-                返回首页
+                {t("login.backHome")}
               </Link>
-              。
             </p>
           ) : null}
         </div>
@@ -82,13 +66,13 @@ export function LoginForm() {
     try {
       const trimmedAccount = account.trim();
       if (!trimmedAccount) {
-        setMessage(mode === "login" ? "请输入邮箱或用户名。" : "请输入邮箱。");
+        setMessage(mode === "login" ? t("login.errAccountLogin") : t("login.errAccountRegister"));
         return;
       }
 
       if (devMock && !supabaseOn) {
         if (mode === "register") {
-          setMessage("假登录模式下无需注册：切换到「登录」，任意用户名 + 6 位以上密码即可进入。");
+          setMessage(t("login.mockRegister"));
           return;
         }
         const res = await fetch("/api/auth/dev-login", {
@@ -98,7 +82,7 @@ export function LoginForm() {
         });
         const data = (await res.json().catch(() => ({}))) as { error?: string };
         if (!res.ok) {
-          setMessage(data.error || "登录失败。");
+          setMessage(data.error || t("login.errLogin"));
           return;
         }
         router.push(nextPath);
@@ -111,7 +95,7 @@ export function LoginForm() {
       if (mode === "register") {
         const email = trimmedAccount.toLowerCase();
         if (!email.includes("@")) {
-          setMessage("请输入有效邮箱地址。");
+          setMessage(t("login.errEmail"));
           return;
         }
         const trimmedSite = gofoSite.trim();
@@ -134,7 +118,7 @@ export function LoginForm() {
           setMessage(error.message);
           return;
         }
-        setMessage("注册成功，请前往邮箱完成验证后再登录。");
+        setMessage(t("login.okRegister"));
         setMode("login");
         setAccount(email);
         setIsGofoEmployee(false);
@@ -166,24 +150,26 @@ export function LoginForm() {
       <div className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-8 shadow-sm">
         {devMock && !supabaseOn ? (
           <p className="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-center text-xs text-amber-900">
-            <strong>开发假登录</strong>：未连接 Supabase；任意用户名 + 密码（≥6 位）即可进入。勿用于生产。
+            {t("login.devMockBanner")}
           </p>
         ) : null}
         <h1 className="text-center text-2xl font-semibold text-slate-900">OrSight</h1>
         <p className="mt-2 text-center text-sm text-slate-500">
-          {mode === "login" ? "登录后使用" : "注册新账号（需邮箱验证）"}
+          {mode === "login" ? t("login.subtitleLogin") : t("login.subtitleRegister")}
         </p>
 
         <form className="mt-8 space-y-4" onSubmit={(e) => void handleSubmit(e)}>
           <label className="block">
-            <span className="text-sm font-medium text-slate-700">{mode === "login" ? "邮箱或用户名" : "邮箱"}</span>
+            <span className="text-sm font-medium text-slate-700">
+              {mode === "login" ? t("login.accountLogin") : t("login.accountRegister")}
+            </span>
             <input
               type={mode === "login" ? "text" : "email"}
               required
               autoComplete={mode === "login" ? "username" : "email"}
               value={account}
               onChange={(e) => setAccount(e.target.value)}
-              placeholder={mode === "login" ? "邮箱（新账号）或用户名（旧账号）" : "请输入可接收验证邮件的邮箱"}
+              placeholder={mode === "login" ? t("login.phLogin") : t("login.phRegister")}
               className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 outline-none focus:border-blue-500"
             />
           </label>
@@ -195,11 +181,12 @@ export function LoginForm() {
                   checked={isGofoEmployee}
                   onChange={(e) => setIsGofoEmployee(e.target.checked)}
                 />
-                <span className="text-sm text-slate-700">我是 GOFO 员工</span>
+                <span className="text-sm text-slate-700">{t("login.gofo")}</span>
               </label>
               <label className="block">
                 <span className="text-sm font-medium text-slate-700">
-                  站点{isGofoEmployee ? "（必填）" : "（选填）"}
+                  {t("login.site")}
+                  {isGofoEmployee ? t("login.siteRequired") : t("login.siteOptional")}
                 </span>
                 <input
                   type="text"
@@ -213,7 +200,7 @@ export function LoginForm() {
             </>
           ) : null}
           <label className="block">
-            <span className="text-sm font-medium text-slate-700">密码</span>
+            <span className="text-sm font-medium text-slate-700">{t("login.password")}</span>
             <input
               type="password"
               required
@@ -236,13 +223,13 @@ export function LoginForm() {
             disabled={loading}
             className="w-full rounded-xl bg-slate-900 py-3 text-sm font-medium text-white hover:bg-slate-800 disabled:bg-slate-400"
           >
-            {loading ? "请稍候…" : mode === "login" ? "登录" : "注册"}
+            {loading ? t("login.wait") : mode === "login" ? t("login.loginBtn") : t("login.registerBtn")}
           </button>
         </form>
 
         <div className="mt-6 flex justify-center gap-2 text-sm">
           {devMock && !supabaseOn ? (
-            <span className="text-slate-500">假登录模式无真实注册</span>
+            <span className="text-slate-500">{t("login.noRegister")}</span>
           ) : mode === "login" ? (
             <button
               type="button"
@@ -267,7 +254,7 @@ export function LoginForm() {
                 setGofoSite("");
               }}
             >
-              已有账号？登录
+              {t("login.toLogin")}
             </button>
           )}
         </div>

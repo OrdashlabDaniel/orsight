@@ -31,11 +31,12 @@ import {
   type TableFieldDefinition,
 } from "@/lib/table-fields";
 import { DEFAULT_FORM_ID, buildFormTrainingHref, normalizeFormId } from "@/lib/forms";
+import { LoginLoadingFallback } from "@/app/login/LoginLoadingFallback";
+import { useLocale } from "@/i18n/LocaleProvider";
 import {
   ensureImageDataUrlFromSource,
-  prepareVisualUpload,
-  SUPPORTED_VISUAL_UPLOAD_ACCEPT,
-  SUPPORTED_VISUAL_UPLOAD_HELPER,
+  prepareWorkspaceUpload,
+  SUPPORTED_WORKSPACE_UPLOAD_ACCEPT,
 } from "@/lib/client-visual-upload";
 
 type UploadItem = {
@@ -128,6 +129,9 @@ type WindowWithSavePicker = Window &
 
 const EXTRACTION_BATCH_SIZE = 5;
 
+/** Stable map key when a record has no route (UI label comes from `home.ungrouped`). */
+const UNGROUPED_ROUTE_KEY = "__orsight_ungrouped__";
+
 function podRecordToAnnotationSeed(record: PodRecord): AnnotationWorkbenchSeed {
   return {
     date: record.date ?? "",
@@ -148,25 +152,25 @@ function buildExportRows(records: PodRecord[], fields: TableFieldDefinition[]) {
   return records.map((record) => fields.map((field) => getRecordFieldValue(record, field)));
 }
 
-function formatDateForFilename(rawDate: string | undefined) {
+function formatDateForFilename(rawDate: string | undefined, dataSuffix: string) {
   if (!rawDate) {
-    return "OrSight数据";
+    return dataSuffix;
   }
 
   const normalized = rawDate.trim();
   const slashMatch = normalized.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
   if (slashMatch) {
     const [, month, day, year] = slashMatch;
-    return `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}_OrSight数据`;
+    return `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}_${dataSuffix}`;
   }
 
   const dashMatch = normalized.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
   if (dashMatch) {
     const [, year, month, day] = dashMatch;
-    return `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}_OrSight数据`;
+    return `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}_${dataSuffix}`;
   }
 
-  return `${normalized.replace(/[\\/:*?"<>|]/g, "-")}_OrSight数据`;
+  return `${normalized.replace(/[\\/:*?"<>|]/g, "-")}_${dataSuffix}`;
 }
 
 const ISSUE_CODE_FIELD_REQUIREMENTS: Record<string, string[]> = {
@@ -209,6 +213,7 @@ function issueMatchesActiveBuiltInFields(issue: ExtractionIssue, activeBuiltInFi
 }
 
 function HomeContent() {
+  const { locale, t } = useLocale();
   const router = useRouter();
   const searchParams = useSearchParams();
   const primaryModelName = "gpt-5-mini";
@@ -478,7 +483,7 @@ function HomeContent() {
     }
     const groups = new Map<string, PodRecord[]>();
     for (const record of filteredRecordsResult.records) {
-      const routeKey = record.route || "未分组路线";
+      const routeKey = record.route || UNGROUPED_ROUTE_KEY;
       const existing = groups.get(routeKey) || [];
       existing.push(record);
       groups.set(routeKey, existing);
@@ -653,13 +658,13 @@ function HomeContent() {
       const response = await fetch(withFormId("/api/table-fields"));
       const payload = (await response.json()) as { error?: string; tableFields?: TableFieldDefinition[] };
       if (!response.ok) {
-        throw new Error(payload.error || "表格项目配置读取失败。");
+        throw new Error(payload.error || t("home.errTableCfg"));
       }
       const nextFields = payload.tableFields?.length ? payload.tableFields : DEFAULT_TABLE_FIELDS;
       setTableFields(nextFields);
       setFieldDrafts(nextFields);
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "表格项目配置读取失败。");
+      setErrorMessage(error instanceof Error ? error.message : t("home.errTableCfg"));
     }
   }
 
@@ -668,11 +673,11 @@ function HomeContent() {
       const response = await fetch(withFormId("/api/training/status"));
       const payload = (await response.json()) as TrainingStatusResponse & { error?: string };
       if (!response.ok) {
-        throw new Error(payload.error || "训练池状态读取失败。");
+        throw new Error(payload.error || t("home.errTrainStatus"));
       }
       setTrainingStatus(payload);
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "训练池状态读取失败。");
+      setErrorMessage(error instanceof Error ? error.message : t("home.errTrainStatus"));
     }
   }
 
@@ -692,7 +697,7 @@ function HomeContent() {
 
     const payload = (await response.json()) as ExtractionResponse & { error?: string };
     if (!response.ok) {
-      throw new Error(payload.error || "AI 识别失败。");
+      throw new Error(payload.error || t("home.errExtract"));
     }
 
     return payload;
@@ -730,7 +735,7 @@ function HomeContent() {
             allIssues.push({
               imageName: file.name,
               level: "error",
-              message: error instanceof Error ? error.message : "识别失败。",
+              message: error instanceof Error ? error.message : t("home.errExtractFail"),
             });
           });
         } finally {
@@ -765,7 +770,7 @@ function HomeContent() {
     try {
       const nextUploads = await Promise.all(
         Array.from(fileList).map(async (file, index) => {
-          const prepared = await prepareVisualUpload(file);
+          const prepared = await prepareWorkspaceUpload(file);
           return {
             id: `${prepared.file.name}-${prepared.file.lastModified}-${index}-${Date.now()}`,
             file: prepared.file,
@@ -784,10 +789,10 @@ function HomeContent() {
         });
         return merged;
       });
-      setNoticeMessage(`已加入 ${nextUploads.length} 个文件。`);
+      setNoticeMessage(t("home.noticeAdded", { n: nextUploads.length }));
       setErrorMessage("");
     } catch {
-      setErrorMessage("读取文件内容失败，请确认文件格式受支持后重试。");
+      setErrorMessage(t("home.errReadFile"));
     }
   }
   handleFilesRef.current = handleFiles;
@@ -821,7 +826,7 @@ function HomeContent() {
     setIssues([]);
     setConfirmedCorrectRecords([]);
     setErrorMessage("");
-    setNoticeMessage("已清空上传图片和表格数据。");
+    setNoticeMessage(t("home.cleared"));
   }
 
   function openFieldManager() {
@@ -854,7 +859,7 @@ function HomeContent() {
     });
     const payload = (await response.json()) as { error?: string; tableFields?: TableFieldDefinition[] };
     if (!response.ok) {
-      throw new Error(payload.error || "保存表格项目失败。");
+      throw new Error(payload.error || t("home.errSaveFields"));
     }
     const saved = payload.tableFields?.length ? payload.tableFields : nextFields;
     setTableFields(saved);
@@ -870,18 +875,20 @@ function HomeContent() {
   function validateFieldDrafts(fields: TableFieldDefinition[]) {
     const activeFields = fields.filter((field) => field.active);
     if (!activeFields.length) {
-      throw new Error("至少需要保留一个表格项目。");
+      throw new Error(t("home.errNeedOne"));
     }
 
     const normalizedLabels = new Map<string, string>();
     for (const field of activeFields) {
       const label = field.label.trim();
       if (!label) {
-        throw new Error("表格项目名称不能为空。");
+        throw new Error(t("home.errFieldEmpty"));
       }
-      const key = label.toLocaleLowerCase("zh-CN");
+      const key = label.toLocaleLowerCase(locale === "en" ? "en-US" : "zh-CN");
       if (normalizedLabels.has(key)) {
-        throw new Error(`表格项目「${label}」与「${normalizedLabels.get(key)}」重名，请调整后再保存。`);
+        throw new Error(
+          t("home.errDupField", { a: label, b: String(normalizedLabels.get(key)) }),
+        );
       }
       normalizedLabels.set(key, label);
     }
@@ -895,8 +902,8 @@ function HomeContent() {
   function handleDeleteFieldDraft(field: TableFieldDefinition) {
     const hasCurrentValues = records.some((record) => hasRecordFieldValue(record, field));
     const message = hasCurrentValues
-      ? `当前表格里已经有「${field.label}」的数据。删除后该项目会从表格中隐藏，请确认是否继续？`
-      : `确认删除表格项目「${field.label}」吗？`;
+      ? t("home.confirmDeleteFieldWithData", { label: field.label })
+      : t("home.confirmDeleteField", { label: field.label });
     if (!window.confirm(message)) {
       return;
     }
@@ -932,9 +939,9 @@ function HomeContent() {
       const nextFields = validateFieldDrafts(fieldDrafts);
       await saveFieldConfig(nextFields);
       setIsFieldManagerOpen(false);
-      setNoticeMessage("表格项目配置已更新。");
+      setNoticeMessage(t("home.noticeFieldsUpdated"));
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "保存表格项目失败。");
+      setErrorMessage(error instanceof Error ? error.message : t("home.errSaveFields"));
     } finally {
       setIsSavingFieldConfig(false);
     }
@@ -943,11 +950,18 @@ function HomeContent() {
   async function createFieldAndStartTraining() {
     const label = newFieldName.trim();
     if (!label) {
-      setErrorMessage("请先填写新表格项目名称。");
+      setErrorMessage(t("home.errNewName"));
       return;
     }
-    if (fieldDrafts.some((field) => field.active && field.label.trim().toLocaleLowerCase("zh-CN") === label.toLocaleLowerCase("zh-CN"))) {
-      setErrorMessage("已有同名的表格项目，请换一个名称。");
+    if (
+      fieldDrafts.some(
+        (field) =>
+          field.active &&
+          field.label.trim().toLocaleLowerCase(locale === "en" ? "en-US" : "zh-CN") ===
+            label.toLocaleLowerCase(locale === "en" ? "en-US" : "zh-CN"),
+      )
+    ) {
+      setErrorMessage(t("home.errDupName"));
       return;
     }
 
@@ -970,7 +984,7 @@ function HomeContent() {
                       params.set("source", "fill");
                       router.push(`/training?${params.toString()}`);
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "新增表格项目失败。");
+      setErrorMessage(error instanceof Error ? error.message : t("home.errAddField"));
     } finally {
       setIsSavingFieldConfig(false);
     }
@@ -978,7 +992,7 @@ function HomeContent() {
 
   async function extractData() {
     if (!uploads.length) {
-      setErrorMessage("请先上传图片。");
+      setErrorMessage(t("home.errNoUpload"));
       return;
     }
 
@@ -999,14 +1013,16 @@ function HomeContent() {
       setTrainingExamplesLoaded(payload.trainingExamplesLoaded || 0);
       const organized = organizeRecords(payload.records || []);
       const dedupeMessage =
-        organized.duplicateCount > 0
-          ? `，已合并 ${organized.duplicateCount} 条跨图重复（同一任务在不同界面状态或截图中的重复记录已自动归并）`
-          : "";
+        organized.duplicateCount > 0 ? t("home.dedupe", { n: organized.duplicateCount }) : "";
       setNoticeMessage(
-        `AI 已完成识别，共生成 ${organized.records.length} 条记录${dedupeMessage}。批量识别已并发加速；每张图内训练池裁剪为并行、训练数据每请求只加载一次。默认模型 ${payload.modelUsed || primaryModelName}。`,
+        t("home.noticeExtractDone", {
+          n: organized.records.length,
+          dedupe: dedupeMessage,
+          model: payload.modelUsed || primaryModelName,
+        }),
       );
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "识别失败。");
+      setErrorMessage(error instanceof Error ? error.message : t("home.errExtractFail"));
     } finally {
       setIsExtracting(false);
       setProgress(null);
@@ -1018,7 +1034,7 @@ function HomeContent() {
     const matchedUploads = uploads.filter((upload) => sourceImageNames.includes(upload.file.name));
 
     if (!matchedUploads.length) {
-      setErrorMessage("找不到这条记录对应的原始图片，无法再次识别。");
+      setErrorMessage(t("home.errNoImageForRow"));
       return;
     }
 
@@ -1051,14 +1067,16 @@ function HomeContent() {
 
       const organized = organizeRecords(nextRecords);
       const dedupeMessage =
-        organized.duplicateCount > 0
-          ? `，已合并 ${organized.duplicateCount} 条跨图重复（同一任务在不同界面状态或截图中的重复记录已自动归并）`
-          : "";
+        organized.duplicateCount > 0 ? t("home.dedupe", { n: organized.duplicateCount }) : "";
       setNoticeMessage(
-        `已使用 ${payload.modelUsed || reviewModelName} 重新识别 ${sourceImageNames.length} 张图片（含四次一致性校验；四次一致的已清除待复核标记）${dedupeMessage}。`,
+        t("home.noticeRetry", {
+          model: payload.modelUsed || reviewModelName,
+          n: sourceImageNames.length,
+          dedupe: dedupeMessage,
+        }),
       );
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "再次识别失败。");
+      setErrorMessage(error instanceof Error ? error.message : t("home.errRetry"));
     } finally {
       setRetryingKeys((current) => current.filter((key) => key !== record.id));
     }
@@ -1066,7 +1084,7 @@ function HomeContent() {
 
   async function retryAllReviewRecords() {
     if (!reviewRecords.length) {
-      setErrorMessage("当前没有需要再次识别的待复核条目。");
+      setErrorMessage(t("home.errNoReview"));
       return;
     }
 
@@ -1076,7 +1094,7 @@ function HomeContent() {
     const matchedUploads = uploads.filter((upload) => sourceImageNames.includes(upload.file.name));
 
     if (!matchedUploads.length) {
-      setErrorMessage("找不到待复核条目对应的原始图片，无法批量再次识别。");
+      setErrorMessage(t("home.errNoReviewImages"));
       return;
     }
 
@@ -1112,14 +1130,16 @@ function HomeContent() {
 
       const organized = organizeRecords(nextRecords);
       const dedupeMessage =
-        organized.duplicateCount > 0
-          ? `，已合并 ${organized.duplicateCount} 条跨图重复（同一任务在不同界面状态或截图中的重复记录已自动归并）`
-          : "";
+        organized.duplicateCount > 0 ? t("home.dedupe", { n: organized.duplicateCount }) : "";
       setNoticeMessage(
-        `已使用 ${payload.modelUsed || reviewModelName} 对 ${matchedUploads.length} 张待复核图各跑四次一致性识别；四次结果一致的条目已自动清除待复核标记，仍不一致的请人工处理${dedupeMessage}。`,
+        t("home.noticeBatchRetry", {
+          model: payload.modelUsed || reviewModelName,
+          n: matchedUploads.length,
+          dedupe: dedupeMessage,
+        }),
       );
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "批量再次识别失败。");
+      setErrorMessage(error instanceof Error ? error.message : t("home.errBatchRetry"));
     } finally {
       setIsRetryingReviewAll(false);
       setRetryingKeys((current) => current.filter((key) => !retryRecordIds.includes(key)));
@@ -1131,7 +1151,7 @@ function HomeContent() {
     const rows = [tableHeaders, ...buildExportRows(filteredRecordsResult.records, activeTableFields)];
     const text = rows.map((row) => row.join("\t")).join("\n");
     await navigator.clipboard.writeText(text);
-    setNoticeMessage("表格内容已复制，可直接粘贴到其他表格。");
+    setNoticeMessage(t("home.copied"));
   }
 
   async function downloadExcel() {
@@ -1140,8 +1160,9 @@ function HomeContent() {
       ...buildExportRows(filteredRecordsResult.records, activeTableFields),
     ]);
     const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, "OrSight数据");
-    const filename = `${formatDateForFilename(filteredRecordsResult.records[0]?.date)}.xlsx`;
+    const dataSuffix = t("home.dataSuffix");
+    XLSX.utils.book_append_sheet(workbook, worksheet, dataSuffix);
+    const filename = `${formatDateForFilename(filteredRecordsResult.records[0]?.date, dataSuffix)}.xlsx`;
     const workbookBytes = XLSX.write(workbook, { bookType: "xlsx", type: "array" });
     const fileBlob = new Blob([workbookBytes], {
       type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -1154,7 +1175,7 @@ function HomeContent() {
           suggestedName: filename,
           types: [
             {
-              description: "Excel 工作簿",
+              description: t("home.excelBook"),
               accept: {
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": [".xlsx"],
               },
@@ -1164,13 +1185,13 @@ function HomeContent() {
         const writable = await handle.createWritable();
         await writable.write(fileBlob);
         await writable.close();
-        setNoticeMessage(`Excel 已保存：${filename}`);
+        setNoticeMessage(t("home.excelSaved", { name: filename }));
         return;
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (message.toLowerCase().includes("abort")) {
-        setNoticeMessage("已取消 Excel 保存。");
+        setNoticeMessage(t("home.excelCancelled"));
         return;
       }
     }
@@ -1183,7 +1204,7 @@ function HomeContent() {
     link.click();
     link.remove();
     window.setTimeout(() => URL.revokeObjectURL(downloadUrl), 1000);
-    setNoticeMessage(`Excel 已下载：${filename}（当前浏览器不支持手动选择保存位置）`);
+    setNoticeMessage(t("home.excelDownloaded", { name: filename }));
   }
 
   function updateRecord(id: string, field: TableFieldDefinition, value: string) {
@@ -1205,7 +1226,7 @@ function HomeContent() {
       const response = await fetch(withFormId(`/api/training/image?imageName=${encodeURIComponent(imageName)}`));
     const payload = (await response.json()) as { dataUrl?: string; error?: string };
     if (!response.ok || !payload.dataUrl) {
-      throw new Error(payload.error || "无法读取训练图片。");
+      throw new Error(payload.error || t("home.errTrainImage"));
     }
     return await ensureImageDataUrlFromSource(payload.dataUrl);
   }
@@ -1214,7 +1235,7 @@ function HomeContent() {
     void _anchorElement;
     const imageName = getSourceImageNames(record)[0];
     if (!imageName) {
-      setErrorMessage("找不到该条记录对应的图片名。");
+      setErrorMessage(t("home.errNoImageName"));
       return;
     }
 
@@ -1224,7 +1245,7 @@ function HomeContent() {
       seed: podRecordToAnnotationSeed(record),
       boxes: [],
       fieldAggregations: {},
-      notes: "人工标注用于训练池。",
+      notes: t("home.defaultAnnotNotes"),
     });
 
     try {
@@ -1238,9 +1259,9 @@ function HomeContent() {
       if (matchedUpload) {
         setSelectedUploadId(matchedUpload.id);
       }
-      setNoticeMessage(`已打开标注工作台：${imageName}`);
+      setNoticeMessage(t("home.noticeAnnotOpen", { name: imageName }));
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "打开标注失败。");
+      setErrorMessage(error instanceof Error ? error.message : t("home.errAnnotOpen"));
       setAnnotationDraft(null);
     }
   }
@@ -1275,14 +1296,14 @@ function HomeContent() {
       setViewerLoadError("");
       setViewerScale(1);
       setViewerPan({ x: 0, y: 0 });
-      setNoticeMessage(`已打开图片：${upload.file.name}`);
+      setNoticeMessage(t("home.noticeImageOpen", { name: upload.file.name }));
     }
   }
 
   function openRecordImage(record: PodRecord, anchorElement?: HTMLElement) {
     const imageNames = getSourceImageNames(record);
     if (!imageNames.length) {
-      setErrorMessage("找不到该条记录对应的图片名。");
+      setErrorMessage(t("home.errNoImageName"));
       return;
     }
 
@@ -1304,8 +1325,8 @@ function HomeContent() {
     setViewerGalleryLoading(true);
     setNoticeMessage(
       imageNames.length > 1
-        ? `正在打开 ${imageNames.length} 张源图…`
-        : `正在打开图片：${imageNames[0]}`,
+        ? t("home.openingN", { n: imageNames.length })
+        : t("home.openingOne", { name: imageNames[0]! }),
     );
 
     const firstUpload = uploads.find((upload) => upload.file.name === imageNames[0]);
@@ -1342,14 +1363,14 @@ function HomeContent() {
         }
         setNoticeMessage(
           gallery.length > 1
-            ? `已打开 ${gallery.length} 张源图`
+            ? t("home.openedN", { n: gallery.length })
             : gallery.length === 1
-              ? `已打开图片：${gallery[0]!.name}`
-              : "图片加载失败",
+              ? t("home.noticeImageOpen", { name: gallery[0]!.name })
+              : t("home.loadFail"),
         );
       })
       .catch((error) => {
-        const msg = error instanceof Error ? error.message : "打开图片失败。";
+        const msg = error instanceof Error ? error.message : t("home.errOpenImage");
         setViewerLoadError(msg);
         setErrorMessage(msg);
       })
@@ -1395,7 +1416,7 @@ function HomeContent() {
   }
 
   function deleteRecord(record: PodRecord) {
-    if (!window.confirm("确认删除这条记录吗？")) {
+    if (!window.confirm(t("home.confirmDeleteRecord"))) {
       return;
     }
 
@@ -1419,14 +1440,24 @@ function HomeContent() {
       closeRecordPopup();
     }
 
-    setNoticeMessage(`已删除条目：${record.route || "未命名路线"} / ${record.driver || "未命名司机"}`);
+    setNoticeMessage(
+      t("home.deletedRow", {
+        route: record.route || t("home.unnamedRoute"),
+        driver: record.driver || t("home.unnamedDriver"),
+      }),
+    );
   }
 
   function toggleRecordConfirmedCorrect(record: PodRecord) {
     const alreadyConfirmed = isRecordConfirmedCorrect(record);
     if (alreadyConfirmed) {
       setConfirmedCorrectRecords((current) => current.filter((item) => item.recordId !== record.id));
-      setNoticeMessage(`已取消人工确认：${record.route || "未命名路线"} / ${record.driver || "未命名司机"}`);
+      setNoticeMessage(
+        t("home.unconfirmed", {
+          route: record.route || t("home.unnamedRoute"),
+          driver: record.driver || t("home.unnamedDriver"),
+        }),
+      );
       return;
     }
 
@@ -1438,7 +1469,12 @@ function HomeContent() {
         route: record.route,
       },
     ]);
-    setNoticeMessage(`已标记为正确：${record.route || "未命名路线"} / ${record.driver || "未命名司机"}`);
+    setNoticeMessage(
+      t("home.markedOk", {
+        route: record.route || t("home.unnamedRoute"),
+        driver: record.driver || t("home.unnamedDriver"),
+      }),
+    );
   }
 
   function applyAnnotationSeedToRecord(recordId: string, seed: AnnotationWorkbenchSeed) {
@@ -1467,40 +1503,42 @@ function HomeContent() {
     );
   }
 
+  const nLoc = locale === "en" ? "en-US" : "zh-CN";
+
   return (
-    <main className="min-h-screen bg-slate-100 px-4 py-4 text-slate-900">
-      <div className="mx-auto flex max-w-[1800px] flex-col gap-4">
-        <header className="rounded-3xl border border-slate-200 bg-white px-6 py-5 shadow-sm">
-          <div className="mb-3 flex flex-wrap items-center justify-between gap-2 text-sm">
-            <Link href="/forms" className="font-medium text-blue-600 hover:underline">
-              ← 返回填表池
+    <main className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[var(--background)] px-3 py-6 text-[var(--foreground)]">
+      <div className="mx-auto flex h-full min-h-0 w-full max-w-[1600px] flex-col gap-6">
+        <header className="shrink-0 border-b border-[var(--border)] pb-6">
+          <div className="flex flex-wrap items-center justify-between gap-3 text-sm">
+            <Link href="/forms" className="text-[var(--muted-foreground)] hover:text-[var(--foreground)]">
+              {t("nav.backToPool")}
             </Link>
-            <div className="flex flex-wrap items-center gap-3">
+            <div className="flex items-center gap-4">
               <button
                 type="button"
-                className="rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-xs font-medium text-blue-700 hover:bg-blue-100"
+                className="text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
                 onClick={openFieldManager}
               >
-                表格项目管理
+                {t("home.tableFields")}
               </button>
               <Link
                 href={buildFormTrainingHref(currentFormId)}
-                className="font-medium text-slate-700 hover:text-slate-900 hover:underline"
+                className="text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
               >
-                切换到训练模式
+                {t("home.training")}
               </Link>
             </div>
           </div>
-          <h1 className="text-2xl font-semibold">OrSight - 填表模式</h1>
-          <p className="mt-2 text-sm text-slate-600">
-            左侧批量上传 POD 签退截图，右侧查看 AI 填表结果。对四次不一致的条目可以打开标注工作台，手动画框后存入训练池。
+          <h1 className="mt-4 text-xl font-medium tracking-tight">{t("home.title")}</h1>
+          <p className="mt-1 max-w-2xl text-sm text-[var(--muted-foreground)]">{t("home.subtitle")}</p>
+          <p className="mt-2 text-xs text-[var(--muted-foreground)]">
+            {t("home.statsLine", {
+              primary: primaryModelName,
+              review: reviewModelName,
+              samples: trainingExamplesLoaded,
+              images: trainingStatus?.totalImages ?? 0,
+            })}
           </p>
-          <div className="mt-3 flex flex-wrap gap-2 text-xs">
-            <span className="rounded-full bg-slate-100 px-3 py-1 text-slate-700">批量识别模型：{primaryModelName}</span>
-            <span className="rounded-full bg-amber-100 px-3 py-1 text-amber-700">再次识别模型：{reviewModelName}</span>
-            <span className="rounded-full bg-emerald-100 px-3 py-1 text-emerald-700">已加载训练样本：{trainingExamplesLoaded}</span>
-            <span className="rounded-full bg-blue-100 px-3 py-1 text-blue-700">训练池图片：{trainingStatus?.totalImages || 0}</span>
-          </div>
         </header>
 
         {isFieldManagerOpen ? (
@@ -1509,27 +1547,27 @@ function HomeContent() {
             <div className="my-2 flex max-h-[calc(100vh-2rem)] w-full max-w-4xl flex-col overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-2xl" style={{ transform: `translate(${fieldManagerOffset.x}px, ${fieldManagerOffset.y}px)` }}>
               <div className="flex cursor-move select-none items-center justify-between border-b border-slate-200 px-6 py-4" onMouseDown={beginFieldManagerDrag}>
                 <div>
-                  <h2 className="text-lg font-semibold">表格项目管理</h2>
-                  <p className="mt-1 text-sm text-slate-500">你可以新增、重命名、删除或恢复表格项目。这里的改动会同步到训练页和标注项目；删除命中当前表格数据时会先提示。</p>
+                  <h2 className="text-lg font-semibold">{t("home.fmTitle")}</h2>
+                  <p className="mt-1 text-sm text-slate-500">{t("home.fmIntro")}</p>
                 </div>
                 <button
                   type="button"
                   className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-medium hover:bg-slate-50"
                   onClick={() => setIsFieldManagerOpen(false)}
                 >
-                  关闭
+                  {t("home.close")}
                 </button>
               </div>
 
               <div className="grid flex-1 gap-6 overflow-y-auto px-6 py-5 lg:grid-cols-[1.1fr_0.9fr]">
                 <div className="space-y-4">
                   <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-                    <div className="mb-3 text-sm font-medium text-slate-700">新增项目并进入标注</div>
+                    <div className="mb-3 text-sm font-medium text-slate-700">{t("home.addAndTrain")}</div>
                     <div className="space-y-3">
                       <input
                         type="text"
                         className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm outline-none focus:border-blue-500"
-                        placeholder="输入新的表格项目名称"
+                        placeholder={t("home.newFieldPh")}
                         value={newFieldName}
                         onChange={(event) => setNewFieldName(event.target.value)}
                       />
@@ -1539,8 +1577,8 @@ function HomeContent() {
                           value={newFieldType}
                           onChange={(event) => setNewFieldType(event.target.value as "text" | "number")}
                         >
-                          <option value="text">文本项目</option>
-                          <option value="number">数字项目</option>
+                          <option value="text">{t("formSetup.fieldTypeTextFull")}</option>
+                          <option value="number">{t("formSetup.fieldTypeNumberFull")}</option>
                         </select>
                         <button
                           type="button"
@@ -1548,15 +1586,15 @@ function HomeContent() {
                           onClick={() => void createFieldAndStartTraining()}
                           disabled={isSavingFieldConfig}
                         >
-                          {isSavingFieldConfig ? "处理中..." : "新增并去标注"}
+                          {isSavingFieldConfig ? t("home.processing") : t("home.addGoTrain")}
                         </button>
                       </div>
-                      <p className="text-xs text-slate-500">新增后会直接跳转到训练模式，并默认选中新项目开始标注。</p>
+                      <p className="text-xs text-slate-500">{t("home.addTrainHint")}</p>
                     </div>
                   </div>
 
                   <div className="rounded-2xl border border-slate-200 p-4">
-                    <div className="mb-3 text-sm font-medium text-slate-700">当前项目</div>
+                    <div className="mb-3 text-sm font-medium text-slate-700">{t("home.currentFields")}</div>
                     <div className="space-y-3">
                       {fieldDrafts.filter((field) => field.active).map((field, index, activeFields) => (
                         <div key={field.id} className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
@@ -1573,12 +1611,16 @@ function HomeContent() {
                               }
                             />
                             <span className="rounded-full bg-slate-200 px-2 py-1 text-[11px] text-slate-600">
-                              {field.type === "number" ? "数字" : "文本"}
+                              {field.type === "number" ? t("formSetup.typeShortNumber") : t("formSetup.typeShortText")}
                             </span>
                             {field.builtIn ? (
-                              <span className="rounded-full bg-blue-100 px-2 py-1 text-[11px] text-blue-700">内置</span>
+                              <span className="rounded-full bg-blue-100 px-2 py-1 text-[11px] text-blue-700">
+                                {t("home.builtin")}
+                              </span>
                             ) : (
-                              <span className="rounded-full bg-violet-100 px-2 py-1 text-[11px] text-violet-700">自定义</span>
+                              <span className="rounded-full bg-violet-100 px-2 py-1 text-[11px] text-violet-700">
+                                {t("home.custom")}
+                              </span>
                             )}
                             <button
                               type="button"
@@ -1586,7 +1628,7 @@ function HomeContent() {
                               onClick={() => moveFieldDraft(field.id, -1)}
                               disabled={index === 0}
                             >
-                              上移
+                              {t("home.moveUp")}
                             </button>
                             <button
                               type="button"
@@ -1594,14 +1636,14 @@ function HomeContent() {
                               onClick={() => moveFieldDraft(field.id, 1)}
                               disabled={index === activeFields.length - 1}
                             >
-                              下移
+                              {t("home.moveDown")}
                             </button>
                             <button
                               type="button"
                               className="rounded-xl border border-rose-300 bg-rose-50 px-3 py-2 text-sm font-medium text-rose-700 hover:bg-rose-100"
                               onClick={() => handleDeleteFieldDraft(field)}
                             >
-                              删除
+                              {t("home.delete")}
                             </button>
                           </div>
                         </div>
@@ -1612,7 +1654,7 @@ function HomeContent() {
 
                 <div className="space-y-4">
                   <div className="rounded-2xl border border-slate-200 p-4">
-                    <div className="mb-3 text-sm font-medium text-slate-700">已删除项目</div>
+                    <div className="mb-3 text-sm font-medium text-slate-700">{t("home.deletedSection")}</div>
                     <div className="space-y-3">
                       {fieldDrafts.filter((field) => !field.active).length ? (
                         fieldDrafts
@@ -1621,29 +1663,33 @@ function HomeContent() {
                             <div key={field.id} className="flex items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-3 py-3">
                               <div>
                                 <div className="text-sm font-medium text-slate-700">{field.label}</div>
-                                <div className="mt-1 text-xs text-slate-500">{field.type === "number" ? "数字项目" : "文本项目"}</div>
+                                <div className="mt-1 text-xs text-slate-500">
+                                  {field.type === "number"
+                                    ? t("formSetup.fieldTypeNumberFull")
+                                    : t("formSetup.fieldTypeTextFull")}
+                                </div>
                               </div>
                               <button
                                 type="button"
                                 className="rounded-xl border border-emerald-300 bg-emerald-50 px-3 py-2 text-sm font-medium text-emerald-700 hover:bg-emerald-100"
                                 onClick={() => handleRestoreFieldDraft(field)}
                               >
-                                恢复
+                                {t("formSetup.restore")}
                               </button>
                             </div>
                           ))
                       ) : (
                         <div className="rounded-2xl border border-dashed border-slate-200 px-4 py-6 text-center text-sm text-slate-400">
-                          暂无已删除项目
+                          {t("home.noDeleted")}
                         </div>
                       )}
                     </div>
                   </div>
 
                   <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-600">
-                    <p>删除项目时，如果当前表格里已经有该列的数据，系统会先提醒你。</p>
-                    <p className="mt-2">删除后的项目会先隐藏，不会立刻清空已有识别值；你也可以在这里恢复。</p>
-                    <p className="mt-2">当前项目的上下顺序，就是填表表头和标注字段的显示顺序。</p>
+                    <p>{t("home.fmFooter1")}</p>
+                    <p className="mt-2">{t("home.fmFooter2")}</p>
+                    <p className="mt-2">{t("home.fmFooter3")}</p>
                   </div>
 
                   <button
@@ -1652,7 +1698,7 @@ function HomeContent() {
                     onClick={() => void submitFieldDrafts()}
                     disabled={isSavingFieldConfig}
                   >
-                    {isSavingFieldConfig ? "保存中..." : "保存项目配置"}
+                    {isSavingFieldConfig ? t("home.saving") : t("home.saveFieldCfg")}
                   </button>
                 </div>
               </div>
@@ -1661,33 +1707,37 @@ function HomeContent() {
           </div>
         ) : null}
 
-        <section className="grid min-h-[calc(100vh-170px)] grid-cols-1 gap-4 xl:grid-cols-[420px_minmax(0,1fr)]">
-          <div ref={uploadPanelRef} className="flex min-h-0 flex-col rounded-3xl border border-slate-200 bg-white shadow-sm">
-            <div className="border-b border-slate-200 px-5 py-4">
-              <h2 className="text-lg font-semibold">图片 / PDF 上传区</h2>
-              <p className="mt-1 text-sm text-slate-500">支持批量上传 PNG / JPG / JPEG / WEBP / PDF，支持直接 Ctrl+V 粘贴截图。</p>
+        <section className="flex min-h-0 flex-1 flex-col gap-6 overflow-hidden lg:flex-row lg:items-stretch">
+          <div
+            ref={uploadPanelRef}
+            className="flex min-h-0 w-full min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--surface)] lg:max-w-[380px] lg:flex-none lg:basis-[min(100%,380px)]"
+          >
+            <div className="shrink-0 border-b border-[var(--border)] px-4 py-3">
+              <h2 className="text-sm font-medium">{t("home.uploadTitle")}</h2>
+              <p className="mt-0.5 text-xs text-[var(--muted-foreground)]">{t("upload.workspaceHelper")}</p>
             </div>
 
-            <div className="space-y-4 p-5">
+            <div className="min-h-0 flex-1 overflow-y-auto">
+              <div className="flex flex-col gap-4 p-4">
               <label
-                className={`flex cursor-pointer flex-col items-center justify-center rounded-2xl border border-dashed px-4 py-8 text-center transition ${
+                className={`flex min-h-[140px] cursor-pointer flex-col items-center justify-center rounded-lg border border-dashed px-3 py-6 text-center transition ${
                   isDraggingFiles
-                    ? "border-emerald-500 bg-emerald-50"
-                    : "border-slate-300 bg-slate-50 hover:border-slate-400 hover:bg-slate-100"
+                    ? "border-[var(--accent)] bg-[var(--accent-muted)]"
+                    : "border-[var(--border)] bg-[var(--background)] hover:border-[var(--muted-foreground)]"
                 }`}
                 onDragOver={handleDragOver}
                 onDragEnter={handleDragOver}
                 onDragLeave={handleDragLeave}
                 onDrop={handleDrop}
               >
-                <span className="text-sm font-medium">点击、拖拽或粘贴上传图片 / PDF</span>
-                <span className="mt-1 text-xs text-slate-500">
-                  {isDraggingFiles ? "松开鼠标即可上传文件" : `可一次选择多张，或直接 Ctrl+V 粘贴图片。${SUPPORTED_VISUAL_UPLOAD_HELPER}`}
+                <span className="text-sm">{t("home.dropClick")}</span>
+                <span className="mt-1 text-xs text-[var(--muted-foreground)]">
+                  {isDraggingFiles ? t("home.dropRelease") : t("home.pasteHint")}
                 </span>
                 <input
                   className="hidden"
                   type="file"
-                  accept={SUPPORTED_VISUAL_UPLOAD_ACCEPT}
+                  accept={SUPPORTED_WORKSPACE_UPLOAD_ACCEPT}
                   multiple
                   onChange={(event) => void handleFiles(event.target.files)}
                 />
@@ -1695,14 +1745,14 @@ function HomeContent() {
 
               <div className="flex flex-wrap gap-2">
                 <button
-                  className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-700 disabled:cursor-not-allowed disabled:bg-slate-400"
+                  className="rounded-md bg-[var(--foreground)] px-3 py-2 text-sm text-[var(--background)] hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
                   onClick={extractData}
                   disabled={isExtracting || !uploads.length}
                 >
-                  {isExtracting ? "AI 识别中..." : "开始 AI 填表"}
+                  {isExtracting ? t("home.extracting") : t("home.extract")}
                 </button>
                 <button
-                  className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-medium hover:bg-slate-50"
+                  className="rounded-md border border-[var(--border)] px-3 py-2 text-sm hover:bg-[var(--background)]"
                   onClick={async () => {
                     try {
                       const items = await navigator.clipboard.read();
@@ -1723,103 +1773,80 @@ function HomeContent() {
                       if (files.length > 0) {
                         void handleFiles(files);
                       } else {
-                        setErrorMessage("剪贴板中没有图片。");
+                        setErrorMessage(t("home.noClipboardImage"));
                       }
                     } catch {
-                      setErrorMessage("无法读取剪贴板，请确保已授予浏览器权限，或直接使用 Ctrl+V 快捷键粘贴。");
+                      setErrorMessage(t("home.errClipboard"));
                     }
                   }}
                 >
-                  从剪贴板粘贴
+                  {t("home.pasteScreenshot")}
                 </button>
-                <button className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-medium hover:bg-slate-50" onClick={clearAll}>
-                  清空
+                <button className="rounded-md border border-[var(--border)] px-3 py-2 text-sm hover:bg-[var(--background)]" onClick={clearAll}>
+                  {t("home.clear")}
                 </button>
               </div>
 
               {progress ? (
-                <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4">
-                  <div className="mb-2 flex items-center justify-between text-sm">
-                    <span className="font-medium text-slate-700">识别进度</span>
-                    <span className="text-slate-500">
+                <div className="rounded-lg border border-[var(--border)] px-3 py-3">
+                  <div className="mb-1.5 flex items-center justify-between text-xs text-[var(--muted-foreground)]">
+                    <span>{t("home.progress")}</span>
+                    <span>
                       {progress.completed} / {progress.total}
                     </span>
                   </div>
-                  <div className="h-3 overflow-hidden rounded-full bg-slate-200">
+                  <div className="h-1.5 overflow-hidden rounded-full bg-[var(--border)]">
                     <div
-                      className="h-full rounded-full bg-emerald-500 transition-all duration-300"
+                      className="h-full rounded-full bg-[var(--foreground)] transition-all duration-300"
                       style={{ width: `${progress.total ? Math.round((progress.completed / progress.total) * 100) : 0}%` }}
                     />
-                  </div>
-                  <div className="mt-2 text-xs text-slate-500">
-                    当前批量并发识别中，已完成 {progress.total ? Math.round((progress.completed / progress.total) * 100) : 0}%
                   </div>
                 </div>
               ) : null}
 
-              <div className="grid grid-cols-3 gap-3 text-sm">
-                <div className="rounded-2xl bg-slate-50 px-3 py-3">
-                  <div className="text-slate-500">录入条数</div>
-                  <div className="mt-1 text-xl font-semibold">{organizedRecordsResult.records.length}</div>
-                </div>
-                <div className="rounded-2xl bg-amber-50 px-3 py-3">
-                  <div className="text-amber-700">警告</div>
-                  <div className="mt-1 text-xl font-semibold text-amber-700">{totalWarnings}</div>
-                </div>
-                <div className="rounded-2xl bg-rose-50 px-3 py-3">
-                  <div className="text-rose-700" title="仅统计跨多张截图的完全重复行；同一张图内相同字段的多行不会合并">
-                    跨图合并数
-                  </div>
-                  <div className="mt-1 text-xl font-semibold text-rose-700">{organizedRecordsResult.duplicateCount}</div>
-                </div>
+              <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-[var(--muted-foreground)]">
+                <span>{t("home.countRecords", { n: organizedRecordsResult.records.length })}</span>
+                <span>{t("home.warnings", { n: totalWarnings })}</span>
+                <span title={t("home.mergedCross")}>
+                  {t("home.merged", { n: organizedRecordsResult.duplicateCount })}
+                </span>
               </div>
 
               {trainingStatus ? (
-                <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4 text-sm">
-                  <div className="mb-2 font-medium text-slate-700">训练池状态</div>
-                  <div className="grid grid-cols-3 gap-3">
-                    <div>
-                      <div className="text-slate-500">训练图片</div>
-                      <div className="text-lg font-semibold">{trainingStatus.totalImages}</div>
-                    </div>
-                    <div>
-                      <div className="text-slate-500">已标注</div>
-                      <div className="text-lg font-semibold text-emerald-700">{trainingStatus.labeledImages}</div>
-                    </div>
-                    <div>
-                      <div className="text-slate-500">未标注</div>
-                      <div className="text-lg font-semibold text-amber-700">{trainingStatus.unlabeledImages}</div>
-                    </div>
-                  </div>
+                <div className="text-xs text-[var(--muted-foreground)]">
+                  {t("home.trainPool", {
+                    total: trainingStatus.totalImages,
+                    labeled: trainingStatus.labeledImages,
+                    unlabeled: trainingStatus.unlabeledImages,
+                  })}
                 </div>
               ) : null}
 
               {errorMessage ? (
-                <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{errorMessage}</div>
+                <div className="rounded-lg border border-red-200/80 bg-red-50/80 px-3 py-2 text-sm text-red-800">{errorMessage}</div>
               ) : null}
 
               {noticeMessage ? (
-                <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">{noticeMessage}</div>
+                <div className="rounded-lg border border-emerald-200/80 bg-emerald-50/80 px-3 py-2 text-sm text-emerald-900">{noticeMessage}</div>
               ) : null}
 
-              <div className="grid gap-4 xl:grid-cols-1">
-                <div className="max-h-[600px] overflow-auto rounded-2xl border border-slate-200">
+              <div className="rounded-lg border border-[var(--border)]">
                   {uploads.length ? (
-                    <ul className="divide-y divide-slate-200">
+                    <ul className="divide-y divide-[var(--border)]">
                       {uploads.map((upload) => (
                         <li key={upload.id}>
                           <button
                             className={`flex w-full items-center gap-3 px-3 py-2 text-left text-sm transition-colors ${
-                              selectedUpload?.id === upload.id ? "bg-blue-50 ring-1 ring-inset ring-blue-400" : "bg-white hover:bg-slate-50"
+                              selectedUpload?.id === upload.id ? "bg-[var(--accent-muted)]" : "hover:bg-[var(--background)]"
                             }`}
                             onClick={(e) => handleImageClick(upload, e)}
                           >
-                            <div className="relative h-12 w-12 shrink-0 overflow-hidden rounded-lg border border-slate-200 bg-slate-100">
+                            <div className="relative h-11 w-11 shrink-0 overflow-hidden rounded border border-[var(--border)] bg-[var(--background)]">
                               <Image src={upload.previewUrl} alt={upload.file.name} className="object-cover" fill unoptimized />
                             </div>
                             <div className="min-w-0 flex-1">
-                              <div className="truncate font-medium text-slate-700">{upload.file.name}</div>
-                              <div className="mt-0.5 text-xs text-slate-500">
+                              <div className="truncate font-medium">{upload.file.name}</div>
+                              <div className="mt-0.5 text-xs text-[var(--muted-foreground)]">
                                 {(upload.file.size / 1024).toFixed(1)} KB
                               </div>
                             </div>
@@ -1828,52 +1855,49 @@ function HomeContent() {
                       ))}
                     </ul>
                   ) : (
-                    <div className="px-4 py-8 text-center text-sm text-slate-500">上传后这里会显示图片列表</div>
+                    <div className="px-4 py-10 text-center text-sm text-[var(--muted-foreground)]">
+                      {t("home.uploadQueueEmpty")}
+                    </div>
                   )}
-                </div>
+              </div>
               </div>
             </div>
           </div>
 
-          <div className="flex min-h-0 flex-col rounded-3xl border border-slate-200 bg-white shadow-sm">
-            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-5 py-4">
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--surface)]">
+            <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-[var(--border)] px-4 py-3">
               <div>
-                <h2 className="text-lg font-semibold">在线表格</h2>
-                <p className="mt-1 text-sm text-slate-500">识别后可直接修改、复制到其他表格，或下载成 Excel。</p>
-                <p className="mt-1 text-xs text-slate-500">表格项目可在这里增删改名，保存后会同步到训练页和标注项目。</p>
-                <p className="mt-1.5 flex flex-wrap items-baseline gap-x-1 gap-y-0.5 text-sm text-slate-700">
-                  <span className="font-medium text-slate-900">识别条目</span>
-                  <span>
-                    ：共 <strong>{organizedRecordsResult.records.length.toLocaleString()}</strong> 条
-                  </span>
-                  {organizedRecordsResult.duplicateCount > 0 ? (
-                    <span className="text-slate-500">
-                      （原始识别 {records.length.toLocaleString()} 行，跨图合并{" "}
-                      {organizedRecordsResult.duplicateCount.toLocaleString()} 条）
-                    </span>
-                  ) : null}
-                  {routeFilter.trim() &&
-                  filteredRecordsResult.records.length !== organizedRecordsResult.records.length ? (
-                    <span className="text-blue-800">
-                      · 当前显示 {filteredRecordsResult.records.length.toLocaleString()} 条（路线筛选）
-                    </span>
-                  ) : null}
+                <h2 className="text-sm font-medium">{t("home.resultsTitle")}</h2>
+                <p className="mt-0.5 text-xs text-[var(--muted-foreground)]">
+                  {t("home.resultsSummary", {
+                    n: organizedRecordsResult.records.length.toLocaleString(nLoc),
+                  })}
+                  {organizedRecordsResult.duplicateCount > 0
+                    ? `${t("home.rawRows", { n: records.length.toLocaleString(nLoc) })}${t("home.mergedRows", {
+                        n: organizedRecordsResult.duplicateCount.toLocaleString(nLoc),
+                      })}`
+                    : ""}
+                  {routeFilter.trim() && filteredRecordsResult.records.length !== organizedRecordsResult.records.length
+                    ? t("home.filtered", {
+                        n: filteredRecordsResult.records.length.toLocaleString(nLoc),
+                      })
+                    : ""}
                 </p>
               </div>
-              <div className="flex flex-wrap items-center gap-4">
+              <div className="flex flex-wrap items-center gap-2">
                 {routeFieldActive ? (
                   <div className="relative flex items-center">
                     <input
                       ref={filterInputRef}
                       type="text"
-                      placeholder="输入或选择路线..."
+                      placeholder={t("home.routePh")}
                       value={routeFilter}
                       onChange={(e) => {
                         setRouteFilter(e.target.value);
                         setIsRouteDropdownOpen(true);
                       }}
                       onFocus={() => setIsRouteDropdownOpen(true)}
-                      className="w-56 rounded-xl border border-slate-300 bg-slate-50 px-3 py-2 pr-8 text-sm outline-none focus:border-blue-500 focus:bg-white focus:ring-1 focus:ring-blue-500"
+                      className="w-48 rounded-md border border-[var(--border)] bg-[var(--background)] px-2 py-1.5 pr-7 text-sm outline-none focus:border-[var(--foreground)]"
                     />
                     {routeFilter ? (
                       <button
@@ -1882,7 +1906,7 @@ function HomeContent() {
                           setIsRouteDropdownOpen(false);
                         }}
                         className="absolute right-2 text-slate-400 hover:text-slate-600"
-                        title="清除搜索"
+                        title={t("home.clearSearch")}
                       >
                         ✕
                       </button>
@@ -1911,9 +1935,7 @@ function HomeContent() {
                             </button>
                           ))
                         ) : (
-                          <div className="px-3 py-2 text-sm text-slate-500">
-                            没有匹配的路线
-                          </div>
+                          <div className="px-3 py-2 text-sm text-slate-500">{t("home.noRouteMatch")}</div>
                         )}
                       </div>
                     )}
@@ -1921,46 +1943,46 @@ function HomeContent() {
                 ) : null}
                 <div className="flex flex-wrap gap-2">
                   <button
-                    className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-medium hover:bg-slate-50"
+                    className="rounded-md border border-[var(--border)] px-3 py-1.5 text-sm hover:bg-[var(--background)]"
                     onClick={openFieldManager}
                   >
-                    编辑表格项目
+                    {t("home.tableFields")}
                   </button>
                   <button
-                    className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-2 text-sm font-medium text-amber-700 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-50"
+                    className="rounded-md border border-[var(--border)] px-3 py-1.5 text-sm hover:bg-[var(--background)] disabled:cursor-not-allowed disabled:opacity-40"
                     onClick={() => void retryAllReviewRecords()}
                     disabled={!reviewRecords.length || isExtracting || isRetryingReviewAll}
                   >
                     {isRetryingReviewAll
-                      ? `待复核批量复审中…`
-                      : `一键复审待复核（${reviewRecords.length}）`}
+                      ? t("home.reviewing")
+                      : t("home.review", { n: reviewRecords.length })}
                   </button>
                   <button
-                    className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-medium hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+                    className="rounded-md border border-[var(--border)] px-3 py-1.5 text-sm hover:bg-[var(--background)] disabled:cursor-not-allowed disabled:opacity-40"
                     onClick={copyTable}
                     disabled={!filteredRecordsResult.records.length}
                   >
-                    复制表格内容
+                    {t("home.copy")}
                   </button>
                   <button
-                    className="rounded-xl bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:bg-emerald-300"
+                    className="rounded-md bg-[var(--foreground)] px-3 py-1.5 text-sm text-[var(--background)] hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
                     onClick={downloadExcel}
                     disabled={!filteredRecordsResult.records.length}
                   >
-                    下载 Excel
+                    Excel
                   </button>
                 </div>
               </div>
             </div>
 
             {visibleIssues.length ? (
-              <div className="border-b border-slate-200 bg-slate-50 px-5 py-4">
-                <div className="mb-2 text-sm font-semibold">复核提醒</div>
-                <div className="max-h-36 space-y-2 overflow-auto text-sm">
+              <div className="shrink-0 border-b border-[var(--border)] bg-[var(--background)] px-4 py-3">
+                <div className="mb-1.5 text-xs font-medium text-[var(--muted-foreground)]">{t("home.reminders")}</div>
+                <div className="max-h-32 space-y-1.5 overflow-auto text-sm">
                   {visibleIssues.map((issue, index) => (
                     <div
                       key={`${issue.imageName}-${issue.route || "none"}-${index}`}
-                      className={`rounded-xl px-3 py-2 ${issue.level === "error" ? "bg-rose-50 text-rose-700" : "bg-amber-50 text-amber-700"}`}
+                      className={`rounded-md px-2 py-1.5 ${issue.level === "error" ? "bg-red-50 text-red-800" : "bg-amber-50 text-amber-900"}`}
                     >
                       <span className="font-medium">{issue.imageName}</span>
                       {issue.route ? ` / ${issue.route}` : ""}
@@ -1973,11 +1995,13 @@ function HomeContent() {
 
             <div className="min-h-0 flex-1 overflow-auto">
               <table className="min-w-full border-separate border-spacing-0 text-sm">
-                <thead className="sticky top-0 z-10 bg-slate-900 text-white">
+                <thead className="sticky top-0 z-10 border-b border-[var(--border)] bg-[var(--background)] text-[var(--foreground)]">
                   <tr>
-                    <th className="border-b border-slate-700 px-3 py-3 text-left font-medium">来源图片</th>
+                    <th className="px-3 py-2 text-left text-xs font-medium text-[var(--muted-foreground)]">
+                      {t("home.sourceCol")}
+                    </th>
                     {activeTableFields.map((column) => (
-                      <th key={column.id} className="border-b border-slate-700 px-3 py-3 text-left font-medium">
+                      <th key={column.id} className="px-3 py-2 text-left text-xs font-medium text-[var(--muted-foreground)]">
                         {column.label}
                       </th>
                     ))}
@@ -1990,7 +2014,10 @@ function HomeContent() {
                         {routeFieldActive ? (
                           <tr className="bg-slate-200">
                             <td colSpan={activeTableFields.length + 1} className="border-b border-slate-300 px-3 py-2 text-left font-semibold text-slate-800">
-                              路线分组：{route} · {routeRecords.length} 条
+                              {t("home.groupRoute", {
+                                route: route === UNGROUPED_ROUTE_KEY ? t("home.ungrouped") : route,
+                                n: routeRecords.length,
+                              })}
                             </td>
                           </tr>
                         ) : null}
@@ -2015,18 +2042,22 @@ function HomeContent() {
                               {isCrossImageMergedRow(record) ? (
                                 <div className="mt-1 inline-flex max-w-full flex-wrap items-center gap-1">
                                   <span className="inline-flex rounded-full bg-violet-100 px-2 py-0.5 text-xs font-medium text-violet-800">
-                                    跨图合并
+                                    {t("home.mergedCross")}
                                   </span>
                                   <span className="text-xs text-violet-700">
-                                    {mergedSourceImageCount(record)} 张源图合并为一条
+                                    {t("home.mergedSources", { n: mergedSourceImageCount(record) })}
                                   </span>
                                 </div>
                               ) : null}
                               {recordNeedsReviewBadge(record) ? (
-                                <div className="mt-1 inline-flex rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-700">待复核</div>
+                                <div className="mt-1 inline-flex rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-700">
+                                  {t("home.pendingReview")}
+                                </div>
                               ) : null}
                               {isRecordConfirmedCorrect(record) ? (
-                                <div className="mt-1 inline-flex rounded-full bg-emerald-100 px-2 py-0.5 text-xs text-emerald-700">已确认正确</div>
+                                <div className="mt-1 inline-flex rounded-full bg-emerald-100 px-2 py-0.5 text-xs text-emerald-700">
+                                  {t("home.confirmed")}
+                                </div>
                               ) : null}
                               {getConsistencyRatio(record) ? (
                                 <div
@@ -2036,11 +2067,13 @@ function HomeContent() {
                                       : "bg-emerald-100 text-emerald-700"
                                   }`}
                                 >
-                                  一致性 {getConsistencyRatio(record)}
+                                  {t("home.consistency", { ratio: getConsistencyRatio(record) ?? "" })}
                                 </div>
                               ) : null}
                               {hasTotalSourceMismatch(record) ? (
-                                <div className="mt-1 inline-flex rounded-full bg-rose-100 px-2 py-0.5 text-xs text-rose-700">运单量来源异常</div>
+                                <div className="mt-1 inline-flex rounded-full bg-rose-100 px-2 py-0.5 text-xs text-rose-700">
+                                  {t("home.totalSourceBad")}
+                                </div>
                               ) : null}
                               {getRecordIssues(record).length ? (
                                 <div className="mt-2">
@@ -2049,7 +2082,7 @@ function HomeContent() {
                                     onClick={() => retryRecord(record)}
                                     disabled={retryingKeys.includes(record.id)}
                                   >
-                                    {retryingKeys.includes(record.id) ? "再次识别中..." : "再次识别"}
+                                    {retryingKeys.includes(record.id) ? t("home.retrying") : t("home.retryExtract")}
                                   </button>
                                 </div>
                               ) : null}
@@ -2058,7 +2091,7 @@ function HomeContent() {
                                   className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100"
                                   onClick={(event) => openRecordImage(record, event.currentTarget)}
                                 >
-                                  查看图片
+                                  {t("home.viewImage")}
                                 </button>
                                 <button
                                   className={`rounded-lg px-3 py-1.5 text-xs font-medium ${
@@ -2068,21 +2101,21 @@ function HomeContent() {
                                   }`}
                                   onClick={() => toggleRecordConfirmedCorrect(record)}
                                 >
-                                  {isRecordConfirmedCorrect(record) ? "取消确认" : "标记正确"}
+                                  {isRecordConfirmedCorrect(record) ? t("home.unconfirm") : t("home.markCorrect")}
                                 </button>
                                 {needsManualAnnotation(record) ? (
                                   <button
                                     className="rounded-lg border border-blue-300 bg-blue-50 px-3 py-1.5 text-xs font-medium text-blue-700 hover:bg-blue-100"
                                     onClick={(event) => void openAnnotationPanel(record, event.currentTarget)}
                                   >
-                                    打开标注
+                                    {t("home.openAnnotation")}
                                   </button>
                                 ) : null}
                                 <button
                                   className="rounded-lg border border-rose-300 bg-rose-50 px-3 py-1.5 text-xs font-medium text-rose-700 hover:bg-rose-100"
                                   onClick={() => deleteRecord(record)}
                                 >
-                                  删除条目
+                                  {t("home.deleteRow")}
                                 </button>
                               </div>
                             </td>
@@ -2103,7 +2136,7 @@ function HomeContent() {
                   ) : (
                     <tr>
                       <td colSpan={activeTableFields.length + 1} className="px-4 py-16 text-center text-slate-500">
-                        {routeFilter ? "没有找到匹配该路线的记录。" : "上传图片并点击“开始 AI 填表”后，结果会出现在这里。"}
+                        {routeFilter ? t("home.emptyFilter") : t("home.emptyNoData")}
                       </td>
                     </tr>
                   )}
@@ -2124,18 +2157,18 @@ function HomeContent() {
           >
             <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
               <div>
-                <h2 className="text-lg font-semibold">图片查看</h2>
+                <h2 className="text-lg font-semibold">{t("home.viewerTitle")}</h2>
                 <p className="mt-1 text-sm text-slate-500">
                   {viewerGallery.length > 1
-                    ? `本条目由 ${viewerGallery.length} 张源图合并，可滚动查看每张图；可放大并拖动辅助人工核对。`
-                    : "查看当前条目对应图片，可放大并拖动图片位置，辅助人工修改表格。"}
+                    ? t("home.viewerMulti", { n: viewerGallery.length })
+                    : t("home.viewerSingle")}
                 </p>
               </div>
               <button
                 className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-medium hover:bg-slate-50"
                 onClick={closeViewerPopup}
               >
-                关闭窗口
+                {t("home.closeWindow")}
               </button>
             </div>
 
@@ -2145,41 +2178,39 @@ function HomeContent() {
                   {viewingRecord.route} / {viewingRecord.driver}
                 </span>
               ) : (
-                <span className="rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-700">
-                  未生成记录
-                </span>
+                <span className="rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-700">{t("home.noRecordYet")}</span>
               )}
               <button
                 className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100"
                 onClick={() => zoomViewer(0.25)}
               >
-                放大
+                {t("annotation.zoomIn")}
               </button>
               <button
                 className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100"
                 onClick={() => zoomViewer(-0.25)}
               >
-                缩小
+                {t("annotation.zoomOut")}
               </button>
               <button
                 className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100"
                 onClick={resetViewer}
               >
-                重置
+                {t("home.viewerReset")}
               </button>
               {viewingRecord && (
                 <button
                   className="rounded-lg border border-blue-300 bg-blue-50 px-3 py-1.5 text-xs font-medium text-blue-700 hover:bg-blue-100"
                   onClick={(event) => void openAnnotationPanel(viewingRecord, event.currentTarget)}
                 >
-                  转到标注
+                  {t("home.gotoAnnotation")}
                 </button>
               )}
             </div>
 
             {viewerLoadError && viewerGallery.length > 0 ? (
               <div className="mb-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
-                部分源图未加载：{viewerLoadError}
+                {t("home.partialLoad", { detail: viewerLoadError })}
               </div>
             ) : null}
 
@@ -2191,7 +2222,7 @@ function HomeContent() {
               onMouseLeave={endViewerDrag}
             >
               {viewerGalleryLoading && viewerGallery.length === 0 && !viewerLoadError ? (
-                <div className="flex h-full items-center justify-center text-sm text-slate-500">图片加载中…</div>
+                <div className="flex h-full items-center justify-center text-sm text-slate-500">{t("home.loading")}</div>
               ) : viewerGallery.length > 0 ? (
                 <div
                   className="inline-block min-w-full space-y-4 p-3"
@@ -2226,7 +2257,7 @@ function HomeContent() {
                   {viewerLoadError}
                 </div>
               ) : (
-                <div className="flex h-full items-center justify-center text-sm text-slate-500">图片加载中…</div>
+                <div className="flex h-full items-center justify-center text-sm text-slate-500">{t("home.loading")}</div>
               )}
             </div>
           </div>
@@ -2249,13 +2280,13 @@ function HomeContent() {
             onSaved={async ({ totalExamples, finalSeed }) => {
               const recordId = annotatingRecord.id;
               await loadTrainingStatus();
-              setNoticeMessage(`标注已存入训练池，当前训练样本总数 ${totalExamples || 0}。`);
+              setNoticeMessage(t("home.noticeTrainSaved", { n: totalExamples || 0 }));
               applyAnnotationSeedToRecord(recordId, finalSeed);
             }}
           />
         ) : null}
 
-        <RecognitionAgentDock formId={currentFormId} modeLabel="填表模式" />
+        <RecognitionAgentDock formId={currentFormId} modeLabel={t("home.modeFill")} />
       </div>
     </main>
   );
@@ -2263,7 +2294,7 @@ function HomeContent() {
 
 export default function Home() {
   return (
-    <Suspense fallback={<div className="min-h-screen bg-slate-100" />}>
+    <Suspense fallback={<LoginLoadingFallback />}>
       <HomeContent />
     </Suspense>
   );

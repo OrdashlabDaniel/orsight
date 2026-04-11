@@ -1,9 +1,8 @@
 "use client";
 
-import Image from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type RefObject } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent } from "react";
 import * as XLSX from "xlsx";
 
 import {
@@ -33,9 +32,12 @@ import {
 } from "@/lib/table-fields";
 import {
   ensureImageDataUrlFromSource,
+  isWorkspaceDocumentFile,
   prepareVisualUpload,
-  SUPPORTED_VISUAL_UPLOAD_ACCEPT,
+  SUPPORTED_WORKSPACE_UPLOAD_ACCEPT,
+  TEMPLATE_IMPORT_ACCEPT,
 } from "@/lib/client-visual-upload";
+import { useLocale } from "@/i18n/LocaleProvider";
 
 type FormResponse = {
   form?: FormDefinition | null;
@@ -103,29 +105,12 @@ type TemplateFromImageResponse = {
   error?: string;
 };
 
-type DropZoneKey = "source-image" | "template-excel" | "template-image";
-
 function withFormId(formId: string, path: string) {
   return `${path}${path.includes("?") ? "&" : "?"}formId=${encodeURIComponent(formId)}`;
 }
 
 function buildTrainingImageRawUrl(formId: string, imageName: string) {
   return withFormId(formId, `/api/training/image?imageName=${encodeURIComponent(imageName)}&raw=1`);
-}
-
-function formatTemplateSource(source?: FormDefinition["templateSource"]) {
-  switch (source) {
-    case "manual":
-      return "手动搭建";
-    case "excel":
-      return "Excel 模板导入";
-    case "image":
-      return "模板图片识别";
-    case "copied":
-      return "克隆自已有填表";
-    default:
-      return "空白模板";
-  }
 }
 
 function normalizeHeaderCells(row: unknown[]) {
@@ -153,17 +138,75 @@ function guessTemplateColumnsFromRows(rows: unknown[][]) {
   return bestRow.map((label) => ({ label }));
 }
 
-function cloneFieldDrafts(fields: TableFieldDefinition[]) {
-  return fields.map((field) => ({ ...field }));
+/** 从 Word/文本解析结果中拆成「伪表格行」以复用表头猜测逻辑 */
+function isTemplateImportFileName(name: string): boolean {
+  return /\.(xlsx|xls|csv|doc|docx|txt|md)$/i.test(name);
 }
 
-function readFileAsDataUrl(file: File) {
-  return new Promise<string>((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result || ""));
-    reader.onerror = () => reject(new Error("图片读取失败。"));
-    reader.readAsDataURL(file);
+function isTypingTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) {
+    return false;
+  }
+  if (target.isContentEditable) {
+    return true;
+  }
+  return Boolean(target.closest("input, textarea, select, [contenteditable=true]"));
+}
+
+/** 模板区：表格文档 + 用于识别列名的截图 / PDF */
+function isTemplateZoneFile(file: File): boolean {
+  if (isTemplateImportFileName(file.name)) {
+    return true;
+  }
+  const t = (file.type || "").toLowerCase();
+  if (t.startsWith("image/")) {
+    return true;
+  }
+  if (t.includes("pdf") || /\.pdf$/i.test(file.name)) {
+    return true;
+  }
+  return false;
+}
+
+/** 数据来源区：截图/PDF 可训练；Excel/Word/文本类文档可直接识别，无需标注。 */
+function isSetupDataSourceFile(file: File): boolean {
+  if (isWorkspaceDocumentFile(file)) {
+    return true;
+  }
+  const t = (file.type || "").toLowerCase();
+  if (t.startsWith("image/")) {
+    return true;
+  }
+  if (t.includes("pdf") || /\.pdf$/i.test(file.name)) {
+    return true;
+  }
+  return false;
+}
+
+function rowsFromPlainTextTable(text: string): unknown[][] {
+  const lines = text
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .slice(0, 60);
+  return lines.map((line) => {
+    if (line.includes("\t")) {
+      return line.split("\t").map((c) => c.trim());
+    }
+    const pipes = line.split(/\s*\|\s*/).map((c) => c.trim()).filter(Boolean);
+    if (pipes.length >= 2) {
+      return pipes;
+    }
+    const gaps = line.split(/\s{2,}/).map((c) => c.trim()).filter(Boolean);
+    if (gaps.length >= 2) {
+      return gaps;
+    }
+    return [line];
   });
+}
+
+function cloneFieldDrafts(fields: TableFieldDefinition[]) {
+  return fields.map((field) => ({ ...field }));
 }
 
 function blankSeed(): AnnotationWorkbenchSeed {
@@ -182,83 +225,27 @@ function blankSeed(): AnnotationWorkbenchSeed {
   };
 }
 
-type UploadDropAreaProps = {
-  accept: string;
-  multiple?: boolean;
-  disabled?: boolean;
-  active?: boolean;
-  title: string;
-  hint: string;
-  helper?: string;
-  inputRef: RefObject<HTMLInputElement | null>;
-  onFiles: (fileList: FileList | null) => void | Promise<void>;
-  onHoverChange?: (active: boolean) => void;
-};
-
-function UploadDropArea({
-  accept,
-  multiple = false,
-  disabled = false,
-  active = false,
-  title,
-  hint,
-  helper,
-  inputRef,
-  onFiles,
-  onHoverChange,
-}: UploadDropAreaProps) {
-  function handleDrag(event: DragEvent<HTMLLabelElement>, nextActive: boolean) {
-    event.preventDefault();
-    event.stopPropagation();
-    if (disabled) {
-      return;
-    }
-    onHoverChange?.(nextActive);
-  }
-
-  async function handleDrop(event: DragEvent<HTMLLabelElement>) {
-    event.preventDefault();
-    event.stopPropagation();
-    onHoverChange?.(false);
-    if (disabled) {
-      return;
-    }
-    await onFiles(event.dataTransfer.files);
-  }
-
-  return (
-    <label
-      className={`flex cursor-pointer flex-col items-center justify-center rounded-3xl border border-dashed px-6 py-10 text-center transition ${
-        disabled
-          ? "cursor-not-allowed border-slate-200 bg-slate-100 text-slate-400"
-          : active
-            ? "border-blue-500 bg-blue-50"
-            : "border-slate-300 bg-slate-50 hover:border-blue-400 hover:bg-blue-50/40"
-      }`}
-      onDragEnter={(event) => handleDrag(event, true)}
-      onDragOver={(event) => handleDrag(event, true)}
-      onDragLeave={(event) => handleDrag(event, false)}
-      onDrop={(event) => void handleDrop(event)}
-    >
-      <input
-        ref={inputRef}
-        type="file"
-        accept={accept}
-        multiple={multiple}
-        disabled={disabled}
-        className="hidden"
-        onChange={(event) => void onFiles(event.target.files)}
-      />
-      <div className="text-base font-medium">{title}</div>
-      <div className="mt-2 text-sm text-slate-500">{hint}</div>
-      {helper ? <div className="mt-3 text-xs text-slate-400">{helper}</div> : null}
-    </label>
-  );
-}
-
 export function FormSetupFlow({ initialForm }: { initialForm: FormDefinition }) {
+  const { t } = useLocale();
   const router = useRouter();
   const formId = initialForm.id;
+
+  function formatTemplateSourceLabel(source?: FormDefinition["templateSource"]) {
+    const key = source ?? "blank";
+    return t(`formSetup.templateSource.${key}`);
+  }
+
+  const readFileAsDataUrl = useCallback(
+    (file: File) =>
+      new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ""));
+        reader.onerror = () => reject(new Error(t("formSetup.errReadImage")));
+        reader.readAsDataURL(file);
+      }),
+    [t],
+  );
+
   const apiPathBuilder = useCallback((path: string) => withFormId(formId, path), [formId]);
 
   const [form, setForm] = useState<FormDefinition>(initialForm);
@@ -266,31 +253,34 @@ export function FormSetupFlow({ initialForm }: { initialForm: FormDefinition }) 
   const [fieldDrafts, setFieldDrafts] = useState<TableFieldDefinition[]>([]);
   const [newFieldName, setNewFieldName] = useState("");
   const [newFieldType, setNewFieldType] = useState<TableFieldType>("text");
-  const [trainingStatus, setTrainingStatus] = useState<TrainingStatusResponse | null>(null);
+  const [, setTrainingStatus] = useState<TrainingStatusResponse | null>(null);
   const [uploads, setUploads] = useState<UploadItem[]>([]);
-  const [selectedUploadId, setSelectedUploadId] = useState<string | null>(null);
-  const [trainingThumbnailMap, setTrainingThumbnailMap] = useState<Record<string, string>>({});
   const [annotatingItem, setAnnotatingItem] = useState<UploadItem | TrainingStatusItem | null>(null);
   const [annotationImageName, setAnnotationImageName] = useState("");
   const [annotationImageSrc, setAnnotationImageSrc] = useState("");
   const [annotationDraft, setAnnotationDraft] = useState<AnnotationDraftState | null>(null);
+  const [annotationFieldsForWorkbench, setAnnotationFieldsForWorkbench] = useState<TableFieldDefinition[]>([]);
   const [noticeMessage, setNoticeMessage] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [isSavingFields, setIsSavingFields] = useState(false);
   const [isImportingExcel, setIsImportingExcel] = useState(false);
   const [isImportingImage, setIsImportingImage] = useState(false);
+  const [isImportingDocument, setIsImportingDocument] = useState(false);
+  const [templateDropDragging, setTemplateDropDragging] = useState(false);
+  const [dataSourceDropDragging, setDataSourceDropDragging] = useState(false);
   const [isCompleting, setIsCompleting] = useState(false);
-  const [activeDropTarget, setActiveDropTarget] = useState<DropZoneKey | null>(null);
 
-  const excelInputRef = useRef<HTMLInputElement | null>(null);
-  const templateImageInputRef = useRef<HTMLInputElement | null>(null);
-  const sourceImageInputRef = useRef<HTMLInputElement | null>(null);
+  const templateZoneInputRef = useRef<HTMLInputElement | null>(null);
+  const dataSourceZoneInputRef = useRef<HTMLInputElement | null>(null);
+  const unifiedImportBusyRef = useRef(false);
   const removeUploadAfterSaveRef = useRef<string | null>(null);
   const uploadsRef = useRef<UploadItem[]>([]);
   uploadsRef.current = uploads;
 
   const activeTableFields = useMemo(() => getActiveTableFields(tableFields), [tableFields]);
+  const isTemplateImportBusy = isImportingExcel || isImportingImage || isImportingDocument;
+  unifiedImportBusyRef.current = isTemplateImportBusy;
   const deletedFieldDrafts = useMemo(() => {
     if ((form.templateSource ?? "blank") === "blank" && !fieldDrafts.some((field) => field.active)) {
       return [];
@@ -308,16 +298,16 @@ export function FormSetupFlow({ initialForm }: { initialForm: FormDefinition }) 
     const response = await fetch(`/api/forms/${encodeURIComponent(formId)}`, { cache: "no-store" });
     const payload = (await response.json()) as FormResponse;
     if (!response.ok || !payload.form) {
-      throw new Error(payload.error || "填表信息读取失败。");
+      throw new Error(payload.error || t("formSetup.errFormLoad"));
     }
     setForm(payload.form);
-  }, [formId]);
+  }, [formId, t]);
 
-  const loadTableFieldConfig = useCallback(async () => {
+  const loadTableFieldConfig = useCallback(async (): Promise<TableFieldDefinition[]> => {
     const response = await fetch(apiPathBuilder("/api/table-fields"), { cache: "no-store" });
     const payload = (await response.json()) as TableFieldsResponse;
     if (!response.ok) {
-      throw new Error(payload.error || "表格项目配置读取失败。");
+      throw new Error(payload.error || t("formSetup.errTableFields"));
     }
     const nextFields = normalizeTableFields(payload.tableFields || [], {
       preserveEmpty: true,
@@ -327,16 +317,17 @@ export function FormSetupFlow({ initialForm }: { initialForm: FormDefinition }) 
       (form.templateSource ?? "blank") === "blank" && !nextFields.some((field) => field.active) ? [] : nextFields;
     setTableFields(sanitizedFields);
     setFieldDrafts(cloneFieldDrafts(sanitizedFields));
-  }, [apiPathBuilder, form.templateSource]);
+    return sanitizedFields;
+  }, [apiPathBuilder, form.templateSource, t]);
 
   const loadTrainingStatus = useCallback(async () => {
     const response = await fetch(apiPathBuilder("/api/training/status"), { cache: "no-store" });
     const payload = (await response.json()) as TrainingStatusResponse & { error?: string };
     if (!response.ok) {
-      throw new Error(payload.error || "训练池状态读取失败。");
+      throw new Error(payload.error || t("formSetup.errTrainingStatus"));
     }
     setTrainingStatus(payload);
-  }, [apiPathBuilder]);
+  }, [apiPathBuilder, t]);
 
   useEffect(() => {
     void (async () => {
@@ -345,12 +336,12 @@ export function FormSetupFlow({ initialForm }: { initialForm: FormDefinition }) 
       try {
         await Promise.all([loadForm(), loadTableFieldConfig(), loadTrainingStatus()]);
       } catch (error) {
-        setErrorMessage(error instanceof Error ? error.message : "新建填表配置读取失败。");
+        setErrorMessage(error instanceof Error ? error.message : t("formSetup.errSetupLoad"));
       } finally {
         setIsLoading(false);
       }
     })();
-  }, [loadForm, loadTableFieldConfig, loadTrainingStatus]);
+  }, [loadForm, loadTableFieldConfig, loadTrainingStatus, t]);
 
   useEffect(() => {
     function handleTableFieldsChanged() {
@@ -371,62 +362,22 @@ export function FormSetupFlow({ initialForm }: { initialForm: FormDefinition }) 
     };
   }, [loadTableFieldConfig]);
 
+  const prevActiveColumnCountRef = useRef(0);
+
   useEffect(() => {
-    const imageNames = trainingStatus?.items.map((item) => item.imageName) || [];
-    if (!imageNames.length) {
+    const n = activeTableFields.length;
+    const prev = prevActiveColumnCountRef.current;
+    prevActiveColumnCountRef.current = n;
+
+    if (n === 0 || prev !== 0 || uploads.length === 0 || annotatingItem) {
       return;
     }
-
-    let cancelled = false;
-    const pendingNames = imageNames.filter((imageName) => !trainingThumbnailMap[imageName]);
-
-    setTrainingThumbnailMap((current) => {
-      const next = Object.fromEntries(
-        Object.entries(current).filter(([imageName]) => imageNames.includes(imageName)),
-      );
-      const currentKeys = Object.keys(current);
-      const nextKeys = Object.keys(next);
-      const unchanged =
-        currentKeys.length === nextKeys.length &&
-        currentKeys.every((key) => next[key] === current[key]);
-      return unchanged ? current : next;
-    });
-
-    if (!pendingNames.length) {
-      return;
+    const first = uploads[0];
+    if (first) {
+      void openAnnotationPanel(first);
     }
-
-    void (async () => {
-      for (const imageName of pendingNames) {
-        if (cancelled) {
-          return;
-        }
-
-        try {
-          const response = await fetch(apiPathBuilder(`/api/training/image?imageName=${encodeURIComponent(imageName)}`));
-          const payload = (await response.json()) as { dataUrl?: string; error?: string };
-          const nextDataUrl = payload.dataUrl;
-          if (!response.ok || !nextDataUrl || cancelled) {
-            continue;
-          }
-          const resolvedDataUrl = await ensureImageDataUrlFromSource(nextDataUrl);
-          setTrainingThumbnailMap((current) => {
-            const existing = current[imageName];
-            if (existing === resolvedDataUrl || existing) {
-              return current;
-            }
-            return { ...current, [imageName]: resolvedDataUrl };
-          });
-        } catch {
-          // Keep raw fallback URL when thumbnail fetch fails.
-        }
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [apiPathBuilder, formId, trainingStatus, trainingThumbnailMap]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅列数 0→有值时自动打开；勿将 openAnnotationPanel 列入 deps
+  }, [activeTableFields.length, uploads, annotatingItem]);
 
   async function updateFormMeta(patch: Partial<FormDefinition>) {
     const response = await fetch(`/api/forms/${encodeURIComponent(formId)}`, {
@@ -439,7 +390,7 @@ export function FormSetupFlow({ initialForm }: { initialForm: FormDefinition }) 
     });
     const payload = (await response.json()) as FormResponse;
     if (!response.ok || !payload.form) {
-      throw new Error(payload.error || "填表信息更新失败。");
+      throw new Error(payload.error || t("formSetup.errFormUpdate"));
     }
     setForm(payload.form);
     return payload.form;
@@ -448,18 +399,18 @@ export function FormSetupFlow({ initialForm }: { initialForm: FormDefinition }) 
   function validateFieldDrafts(fields: TableFieldDefinition[]) {
     const activeFields = fields.filter((field) => field.active);
     if (!activeFields.length) {
-      throw new Error("至少需要保留一个表格项目。");
+      throw new Error(t("formSetup.errNeedOneField"));
     }
 
     const seenLabels = new Map<string, string>();
     for (const field of activeFields) {
       const label = field.label.trim();
       if (!label) {
-        throw new Error("表格项目名称不能为空。");
+        throw new Error(t("formSetup.errFieldNameEmpty"));
       }
       const key = label.toLocaleLowerCase("zh-CN");
       if (seenLabels.has(key)) {
-        throw new Error(`表格项目“${label}”与“${seenLabels.get(key)}”重名，请调整后再保存。`);
+        throw new Error(t("formSetup.errFieldDuplicate", { a: label, b: seenLabels.get(key)! }));
       }
       seenLabels.set(key, label);
     }
@@ -485,7 +436,7 @@ export function FormSetupFlow({ initialForm }: { initialForm: FormDefinition }) 
     });
     const payload = (await response.json()) as TableFieldsResponse;
     if (!response.ok) {
-      throw new Error(payload.error || "保存表格模板失败。");
+      throw new Error(payload.error || t("formSetup.errSaveTemplate"));
     }
 
     const saved = normalizeTableFields(payload.tableFields || normalized, {
@@ -504,7 +455,7 @@ export function FormSetupFlow({ initialForm }: { initialForm: FormDefinition }) 
     } else if (form.templateSource === "blank" || !form.templateSource) {
       await updateFormMeta({
         templateSource: "manual",
-        description: "已手动配置表格项目，可继续上传数据来源图片进行标注训练。",
+        description: t("formSetup.manualSaveDesc"),
       });
     }
 
@@ -545,7 +496,7 @@ export function FormSetupFlow({ initialForm }: { initialForm: FormDefinition }) 
   function handleAddField() {
     const label = newFieldName.trim();
     if (!label) {
-      setErrorMessage("请先填写新表格项目名称。");
+      setErrorMessage(t("formSetup.errNewFieldEmpty"));
       return;
     }
     if (
@@ -553,7 +504,7 @@ export function FormSetupFlow({ initialForm }: { initialForm: FormDefinition }) 
         (field) => field.active && field.label.trim().toLocaleLowerCase("zh-CN") === label.toLocaleLowerCase("zh-CN"),
       )
     ) {
-      setErrorMessage("已有同名的表格项目，请换一个名称。");
+      setErrorMessage(t("formSetup.errDuplicateFieldName"));
       return;
     }
     const nextField = {
@@ -572,27 +523,22 @@ export function FormSetupFlow({ initialForm }: { initialForm: FormDefinition }) 
     try {
       const validated = validateFieldDrafts(fieldDrafts);
       await saveFieldConfig(validated);
-      setNoticeMessage("表格模板已保存，现在可以上传数据来源图片开始标注。");
+      setNoticeMessage(t("formSetup.noticeSavedColumns"));
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "保存表格模板失败。");
+      setErrorMessage(error instanceof Error ? error.message : t("formSetup.errSaveTemplate"));
     } finally {
       setIsSavingFields(false);
     }
   }
 
-  async function handleExcelTemplateSelection(fileList: FileList | null) {
-    const file = fileList?.[0];
-    setActiveDropTarget(null);
-    if (!file) {
-      return;
-    }
+  async function importExcelTemplateFromFile(file: File): Promise<boolean> {
     setIsImportingExcel(true);
     setErrorMessage("");
     try {
       const workbook = XLSX.read(await file.arrayBuffer(), { type: "array" });
       const firstSheetName = workbook.SheetNames[0];
       if (!firstSheetName) {
-        throw new Error("Excel 中没有可用工作表。");
+        throw new Error(t("formSetup.errExcelNoSheet"));
       }
       const sheet = workbook.Sheets[firstSheetName];
       const rows = XLSX.utils.sheet_to_json(sheet, {
@@ -602,30 +548,24 @@ export function FormSetupFlow({ initialForm }: { initialForm: FormDefinition }) 
       }) as unknown[][];
       const columns = guessTemplateColumnsFromRows(rows);
       if (!columns.length) {
-        throw new Error("没有识别到可用的表头，请换一个更标准的 Excel 模板。");
+        throw new Error(t("formSetup.errExcelNoHeader"));
       }
       const nextFields = buildTableFieldsFromTemplateColumns(columns);
       await saveFieldConfig(nextFields, {
         templateSource: "excel",
-        description: `已从 Excel 模板导入 ${columns.length} 个表格项目，可继续补充训练样本。`,
+        description: t("formSetup.excelImportDesc", { n: columns.length }),
       });
-      setNoticeMessage(`已从 Excel 模板导入 ${columns.length} 个表格项目。`);
+      setNoticeMessage(t("formSetup.noticeExcelImport", { n: columns.length }));
+      return true;
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "Excel 模板导入失败。");
+      setErrorMessage(error instanceof Error ? error.message : t("formSetup.errExcelImport"));
+      return false;
     } finally {
       setIsImportingExcel(false);
-      if (excelInputRef.current) {
-        excelInputRef.current.value = "";
-      }
     }
   }
 
-  async function handleTemplateImageSelection(fileList: FileList | null) {
-    const file = fileList?.[0];
-    setActiveDropTarget(null);
-    if (!file) {
-      return;
-    }
+  async function importTemplateImageFromFile(file: File): Promise<boolean> {
     setIsImportingImage(true);
     setErrorMessage("");
     try {
@@ -639,24 +579,384 @@ export function FormSetupFlow({ initialForm }: { initialForm: FormDefinition }) 
       });
       const payload = (await response.json()) as TemplateFromImageResponse;
       if (!response.ok || !payload.tableFields?.length) {
-        throw new Error(payload.error || "模板图片识别失败。");
+        throw new Error(payload.error || t("formSetup.errTemplateImage"));
       }
       await saveFieldConfig(payload.tableFields, {
         templateSource: "image",
-        description: payload.description || "已从模板截图识别表格项目，可继续补充训练样本。",
+        description: payload.description || t("formSetup.imageImportDesc"),
       });
-      setNoticeMessage("模板截图已识别为标准表格项目，你可以继续微调后开始标注训练。");
+      setNoticeMessage(t("formSetup.noticeImageImport"));
+      return true;
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "模板图片识别失败。");
+      setErrorMessage(error instanceof Error ? error.message : t("formSetup.errTemplateImage"));
+      return false;
     } finally {
       setIsImportingImage(false);
-      if (templateImageInputRef.current) {
-        templateImageInputRef.current.value = "";
+    }
+  }
+
+  async function importTemplateFromDocumentFile(file: File): Promise<boolean> {
+    setIsImportingDocument(true);
+    setErrorMessage("");
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      const res = await fetch("/api/training/parse-document", { method: "POST", body: fd });
+      const data = (await res.json()) as { text?: string; error?: string; warning?: string };
+      if (!res.ok) {
+        throw new Error(data.error || t("formSetup.errParseDoc"));
+      }
+      const raw = (data.text || "").trim();
+      if (!raw) {
+        throw new Error(data.warning || t("formSetup.errDocNoText"));
+      }
+      const rows = rowsFromPlainTextTable(raw);
+      const columns = guessTemplateColumnsFromRows(rows);
+      if (!columns.length) {
+        throw new Error(t("formSetup.errDocNoHeader"));
+      }
+      const nextFields = buildTableFieldsFromTemplateColumns(columns);
+      await saveFieldConfig(nextFields, {
+        templateSource: "manual",
+        description: t("formSetup.docInferDesc", { name: file.name, n: columns.length }),
+      });
+      setNoticeMessage(t("formSetup.noticeDocInfer", { n: columns.length }));
+      return true;
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : t("formSetup.errDocImport"));
+      return false;
+    } finally {
+      setIsImportingDocument(false);
+    }
+  }
+
+  async function processTemplateImportFile(file: File): Promise<boolean> {
+    const name = file.name.toLowerCase();
+    if (/\.(xlsx|xls|csv)$/i.test(name)) {
+      return importExcelTemplateFromFile(file);
+    }
+    if (/\.(doc|docx|txt|md)$/i.test(name)) {
+      return importTemplateFromDocumentFile(file);
+    }
+    return importTemplateImageFromFile(file);
+  }
+
+  async function appendVisualSourcesFromFiles(
+    fileList: File[],
+    fieldsHint?: TableFieldDefinition[],
+  ): Promise<string | null> {
+    if (!fileList.length) {
+      return null;
+    }
+    try {
+      const nextUploads = await Promise.all(
+        fileList.map(async (file, index) => {
+          const prepared = await prepareVisualUpload(file);
+          return {
+            id: `${Date.now()}-${index}-${Math.random().toString(36).slice(2, 8)}`,
+            file: prepared.file,
+            previewUrl: prepared.previewUrl,
+          };
+        }),
+      );
+      setUploads((current) => [...nextUploads, ...current]);
+      setErrorMessage("");
+      const effectiveFields = fieldsHint ?? tableFields;
+      const canAnnotate = getActiveTableFields(effectiveFields).length > 0;
+      if (canAnnotate) {
+        if (nextUploads[0]) {
+          await openAnnotationPanel(nextUploads[0], effectiveFields);
+        }
+        return t("formSetup.noticeQueuedOpen", { n: nextUploads.length });
+      } else {
+        return t("formSetup.noticeQueuedWait", { n: nextUploads.length });
+      }
+    } catch {
+      setErrorMessage(t("formSetup.errReadVisual"));
+      return null;
+    }
+  }
+
+  async function handleDocumentDataSources(
+    fileList: File[],
+  ): Promise<{ message: string | null; fieldsHint?: TableFieldDefinition[] }> {
+    if (!fileList.length) {
+      return { message: null };
+    }
+
+    const existingFields = getActiveTableFields(tableFields);
+    if (existingFields.length) {
+      setErrorMessage("");
+      return {
+        message: t("formSetup.noticeDocDirect", { n: fileList.length }),
+        fieldsHint: tableFields,
+      };
+    }
+
+    const first = fileList[0];
+    const imported = /\.(xlsx|xls|csv)$/i.test(first.name)
+      ? await importExcelTemplateFromFile(first)
+      : await importTemplateFromDocumentFile(first);
+
+    if (!imported) {
+      return { message: null };
+    }
+
+    try {
+      const nextFields = await loadTableFieldConfig();
+      return {
+        message: t("formSetup.noticeDocDirectWithColumns", { n: fileList.length }),
+        fieldsHint: nextFields,
+      };
+    } catch {
+      return {
+        message: t("formSetup.noticeDocDirectWithColumns", { n: fileList.length }),
+      };
+    }
+  }
+
+  async function ingestTemplateZoneFiles(fileList: FileList | null): Promise<void> {
+    if (!fileList?.length) {
+      return;
+    }
+    if (templateZoneInputRef.current) {
+      templateZoneInputRef.current.value = "";
+    }
+    const files = Array.from(fileList);
+    const accepted = files.filter(isTemplateZoneFile);
+    const skippedCount = files.length - accepted.length;
+    if (!accepted.length) {
+      if (files.length) {
+        setNoticeMessage(t("formSetup.errWrongTemplateFiles"));
+      }
+      return;
+    }
+    if (skippedCount > 0) {
+      setNoticeMessage(t("formSetup.skipWrongTemplate", { n: skippedCount }));
+    }
+    let hadSuccessfulTemplate = false;
+    for (const f of accepted) {
+      const ok = await processTemplateImportFile(f);
+      if (ok) {
+        hadSuccessfulTemplate = true;
+      }
+    }
+    if (hadSuccessfulTemplate) {
+      try {
+        await loadTableFieldConfig();
+      } catch {
+        /* loadTableFieldConfig 已在上层设过 error */
       }
     }
   }
 
-  async function openAnnotationPanel(item: UploadItem | TrainingStatusItem) {
+  async function ingestDataSourceZoneFiles(fileList: FileList | null): Promise<void> {
+    if (!fileList?.length) {
+      return;
+    }
+    if (dataSourceZoneInputRef.current) {
+      dataSourceZoneInputRef.current.value = "";
+    }
+    const files = Array.from(fileList);
+    const accepted = files.filter(isSetupDataSourceFile);
+    const skippedCount = files.length - accepted.length;
+    if (!accepted.length) {
+      if (files.length) {
+        setNoticeMessage(t("formSetup.dataOnlyVisual"));
+      }
+      return;
+    }
+    const documentFiles = accepted.filter((file) => isWorkspaceDocumentFile(file));
+    const visualFiles = accepted.filter((file) => !isWorkspaceDocumentFile(file));
+    const notices: string[] = [];
+    let fieldsHint: TableFieldDefinition[] | undefined;
+
+    if (documentFiles.length) {
+      const documentResult = await handleDocumentDataSources(documentFiles);
+      if (documentResult.message) {
+        notices.push(documentResult.message);
+      }
+      fieldsHint = documentResult.fieldsHint;
+    }
+
+    if (visualFiles.length) {
+      const visualNotice = await appendVisualSourcesFromFiles(visualFiles, fieldsHint);
+      if (visualNotice) {
+        notices.push(visualNotice);
+      }
+    }
+
+    if (skippedCount > 0) {
+      notices.unshift(t("formSetup.skipMixedData", { n: skippedCount }));
+    }
+    if (notices.length) {
+      setNoticeMessage(notices.join(" "));
+    }
+  }
+
+  function handleTemplateZonePaste(event: ClipboardEvent<HTMLDivElement>) {
+    void (async () => {
+      if (isTypingTarget(event.target)) {
+        return;
+      }
+      if (unifiedImportBusyRef.current) {
+        return;
+      }
+      const cd = event.clipboardData;
+      if (!cd) {
+        return;
+      }
+
+      const clipFiles: File[] = [];
+      for (const item of Array.from(cd.items)) {
+        if (item.kind === "file") {
+          const f = item.getAsFile();
+          if (f) {
+            clipFiles.push(f);
+          }
+        }
+      }
+      if (clipFiles.length) {
+        const accepted = clipFiles.filter(isTemplateZoneFile);
+        const skipped = clipFiles.length - accepted.length;
+        if (skipped > 0) {
+          setNoticeMessage(t("formSetup.clipboardSkipTemplate", { n: skipped }));
+        }
+        if (accepted.length) {
+          event.preventDefault();
+          const dt = new DataTransfer();
+          for (const f of accepted) {
+            dt.items.add(f);
+          }
+          await ingestTemplateZoneFiles(dt.files);
+        }
+        return;
+      }
+
+      const text = cd.getData("text/plain");
+      const trimmed = text.trim();
+      if (trimmed) {
+        const lines = trimmed.split(/\r?\n/).filter(Boolean);
+        if (lines.length >= 2 || trimmed.includes("\t")) {
+          event.preventDefault();
+          const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+          const file = new File([blob], `clipboard-${Date.now()}.txt`, {
+            type: "text/plain",
+            lastModified: Date.now(),
+          });
+          const dt = new DataTransfer();
+          dt.items.add(file);
+          await ingestTemplateZoneFiles(dt.files);
+          return;
+        }
+      }
+
+      if (navigator.clipboard?.read) {
+        try {
+          const clipItems = await navigator.clipboard.read();
+          for (const clipItem of clipItems) {
+            for (const type of clipItem.types) {
+              if (type.startsWith("image/")) {
+                event.preventDefault();
+                const blob = await clipItem.getType(type);
+                const ext = type.split("/")[1] || "png";
+                const file = new File([blob], `paste-${Date.now()}.${ext}`, {
+                  type,
+                  lastModified: Date.now(),
+                });
+                const dt = new DataTransfer();
+                dt.items.add(file);
+                await ingestTemplateZoneFiles(dt.files);
+                return;
+              }
+            }
+          }
+        } catch {
+          /* 权限或未授权 */
+        }
+      }
+    })();
+  }
+
+  function handleDataSourceZonePaste(event: ClipboardEvent<HTMLDivElement>) {
+    void (async () => {
+      if (isTypingTarget(event.target)) {
+        return;
+      }
+      const cd = event.clipboardData;
+      if (!cd) {
+        return;
+      }
+
+      const clipFiles: File[] = [];
+      for (const item of Array.from(cd.items)) {
+        if (item.kind === "file") {
+          const f = item.getAsFile();
+          if (f) {
+            clipFiles.push(f);
+          }
+        }
+      }
+      if (clipFiles.length) {
+        const accepted = clipFiles.filter(isSetupDataSourceFile);
+        const skipped = clipFiles.length - accepted.length;
+        if (skipped > 0) {
+          setNoticeMessage(t("formSetup.clipboardSkipData"));
+        }
+        if (accepted.length) {
+          event.preventDefault();
+          const dt = new DataTransfer();
+          for (const f of accepted) {
+            dt.items.add(f);
+          }
+          await ingestDataSourceZoneFiles(dt.files);
+        }
+        return;
+      }
+
+      if (navigator.clipboard?.read) {
+        try {
+          const clipItems = await navigator.clipboard.read();
+          for (const clipItem of clipItems) {
+            for (const type of clipItem.types) {
+              if (type.startsWith("image/")) {
+                event.preventDefault();
+                const blob = await clipItem.getType(type);
+                const ext = type.split("/")[1] || "png";
+                const file = new File([blob], `paste-${Date.now()}.${ext}`, {
+                  type,
+                  lastModified: Date.now(),
+                });
+                const dt = new DataTransfer();
+                dt.items.add(file);
+                await ingestDataSourceZoneFiles(dt.files);
+                return;
+              }
+            }
+          }
+        } catch {
+          /* 权限或未授权 */
+        }
+      }
+    })();
+  }
+
+  async function openAnnotationPanel(
+    item: UploadItem | TrainingStatusItem,
+    fieldsOverride?: TableFieldDefinition[],
+  ) {
+    const fields = fieldsOverride ?? tableFields;
+    const flds = getActiveTableFields(fields);
+    if ("file" in item && !flds.length) {
+      setNoticeMessage(t("formSetup.needTemplateFirst"));
+      return;
+    }
+    if (!flds.length) {
+      setNoticeMessage(t("formSetup.configureColumnsRight"));
+      return;
+    }
+    setAnnotationFieldsForWorkbench(flds);
+
     setAnnotatingItem(item);
 
     let imageName = "";
@@ -669,7 +969,7 @@ export function FormSetupFlow({ initialForm }: { initialForm: FormDefinition }) 
       removeUploadAfterSaveRef.current = item.id;
     } else {
       imageName = item.imageName;
-      previewUrl = trainingThumbnailMap[item.imageName] || buildTrainingImageRawUrl(formId, item.imageName);
+      previewUrl = buildTrainingImageRawUrl(formId, item.imageName);
       existingExample = item.example;
       removeUploadAfterSaveRef.current = null;
     }
@@ -697,7 +997,7 @@ export function FormSetupFlow({ initialForm }: { initialForm: FormDefinition }) 
         id: typeof box.id === "string" && box.id ? box.id : crypto.randomUUID(),
       })),
       fieldAggregations: existingExample?.fieldAggregations || {},
-      notes: existingExample?.notes || "人工标注用于训练池。",
+      notes: existingExample?.notes || t("formSetup.defaultNotes"),
     });
     setAnnotationImageName(imageName);
     setAnnotationImageSrc(await ensureImageDataUrlFromSource(previewUrl));
@@ -706,44 +1006,8 @@ export function FormSetupFlow({ initialForm }: { initialForm: FormDefinition }) 
   function closeAnnotationPanel() {
     setAnnotatingItem(null);
     setAnnotationDraft(null);
+    setAnnotationFieldsForWorkbench([]);
     removeUploadAfterSaveRef.current = null;
-  }
-
-  async function handleSourceFiles(fileList: FileList | File[] | null) {
-    setActiveDropTarget(null);
-    if (!fileList?.length) {
-      return;
-    }
-    if (!activeTableFields.length) {
-      setErrorMessage("请先配置至少一个表格项目，再上传数据来源图片。");
-      return;
-    }
-
-    try {
-      const nextUploads = await Promise.all(
-        Array.from(fileList).map(async (file, index) => {
-          const prepared = await prepareVisualUpload(file);
-          return {
-            id: `${Date.now()}-${index}-${Math.random().toString(36).slice(2, 8)}`,
-            file: prepared.file,
-            previewUrl: prepared.previewUrl,
-          };
-        }),
-      );
-      setUploads((current) => [...nextUploads, ...current]);
-      setSelectedUploadId(nextUploads[0]?.id || null);
-      setNoticeMessage(`已加入 ${nextUploads.length} 张数据来源图片，并自动进入标注。`);
-      setErrorMessage("");
-      if (nextUploads[0]) {
-        await openAnnotationPanel(nextUploads[0]);
-      }
-    } catch {
-      setErrorMessage("读取数据来源图片失败，请重试。");
-    } finally {
-      if (sourceImageInputRef.current) {
-        sourceImageInputRef.current.value = "";
-      }
-    }
   }
 
   async function handleCompleteSetup() {
@@ -751,10 +1015,7 @@ export function FormSetupFlow({ initialForm }: { initialForm: FormDefinition }) 
     setErrorMessage("");
     try {
       if (!activeTableFields.length) {
-        throw new Error("请先完成表格模板配置。");
-      }
-      if (!trainingStatus || trainingStatus.labeledImages < 1) {
-        throw new Error("请至少标注并存入 1 张训练样本后，再完成新建。");
+        throw new Error(t("formSetup.errNeedTemplate"));
       }
 
       const response = await fetch(`/api/forms/${encodeURIComponent(formId)}`, {
@@ -764,209 +1025,173 @@ export function FormSetupFlow({ initialForm }: { initialForm: FormDefinition }) 
       });
       const payload = (await response.json()) as FormResponse;
       if (!response.ok || !payload.form) {
-        throw new Error(payload.error || "完成新建失败。");
+        throw new Error(payload.error || t("formSetup.errFinish"));
       }
       setForm(payload.form);
       router.push(buildFormFillHref(formId));
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "完成新建失败。");
+      setErrorMessage(error instanceof Error ? error.message : t("formSetup.errFinish"));
     } finally {
       setIsCompleting(false);
     }
   }
 
   return (
-    <main className="min-h-screen bg-slate-100 px-4 py-4 text-slate-900">
-      <div className="mx-auto flex max-w-[1700px] flex-col gap-4">
-        <header className="rounded-3xl border border-slate-200 bg-white px-6 py-5 shadow-sm">
-          <div className="mb-3 flex flex-wrap items-center justify-between gap-3 text-sm">
-            <Link href="/forms" className="font-medium text-blue-600 hover:underline">
-              ← 返回填表池
+    <main className="flex min-h-0 flex-1 flex-col overflow-y-auto bg-[var(--background)] px-3 py-6 text-[var(--foreground)]">
+      <div className="mx-auto flex max-w-[1700px] flex-col gap-6">
+        <header className="border-b border-[var(--border)] pb-6">
+          <div className="flex flex-wrap items-center justify-between gap-3 text-sm">
+            <Link href="/forms" className="text-[var(--muted-foreground)] hover:text-[var(--foreground)]">
+              {t("nav.backToPool")}
             </Link>
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-600">当前填表: {form.name}</span>
-              <span className="rounded-full bg-blue-100 px-3 py-1 text-xs text-blue-700">
-                模板来源: {formatTemplateSource(form.templateSource)}
-              </span>
+            <div className="flex flex-wrap items-center gap-3 text-xs text-[var(--muted-foreground)]">
+              <span>{form.name}</span>
+              <span>·</span>
+              <span>{formatTemplateSourceLabel(form.templateSource)}</span>
               <Link
                 href={buildFormTrainingHref(formId)}
-                className="rounded-xl border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
+                className="text-[var(--foreground)] underline-offset-2 hover:underline"
               >
-                进入完整训练模式
+                {t("formSetup.fullTraining")}
               </Link>
             </div>
           </div>
-          <h1 className="text-3xl font-semibold tracking-tight">{form.name} · 新建填表</h1>
-          <p className="mt-2 text-sm text-slate-600">
-            每个填表都有自己的表格模板、训练池和专属工作规则。先准备模板，再上传数据来源图片标注训练，最后完成新建进入填表模式。
-          </p>
+          <h1 className="mt-4 text-xl font-medium tracking-tight">{t("formSetup.title")}</h1>
+          <p className="mt-1 max-w-2xl text-sm text-[var(--muted-foreground)]">{t("formSetup.intro")}</p>
           {noticeMessage ? (
-            <div className="mt-4 rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
+            <div className="mt-4 rounded-lg border border-emerald-200/80 bg-emerald-50/80 px-3 py-2 text-sm text-emerald-900">
               {noticeMessage}
             </div>
           ) : null}
           {errorMessage ? (
-            <div className="mt-4 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
+            <div className="mt-4 rounded-lg border border-red-200/80 bg-red-50/80 px-3 py-2 text-sm text-red-800">
               {errorMessage}
             </div>
           ) : null}
         </header>
-        <section className="grid gap-4 xl:grid-cols-[420px_minmax(0,1.2fr)]">
-          <div className="space-y-4">
-            <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
-              <h2 className="text-xl font-semibold">2. 数据来源图片与训练</h2>
-              <p className="mt-2 text-sm text-slate-500">
-                先把模板配好，再把真实数据来源图片拖拽到这里。上传后会自动打开标注工作台。
-              </p>
 
-              <div className="mt-4">
-                <UploadDropArea
-                  accept={SUPPORTED_VISUAL_UPLOAD_ACCEPT}
-                  multiple
-                  disabled={!activeTableFields.length}
-                  active={activeDropTarget === "source-image"}
-                  title={activeTableFields.length ? "拖拽或点击上传数据来源图片" : "请先配置表格模板"}
-                  hint={activeTableFields.length ? "支持批量上传，上传后自动进入标注。" : "模板为空时不能开始标注。"}
-                  helper={activeTableFields.length ? "支持 JPG / PNG / WEBP。" : undefined}
-                  inputRef={sourceImageInputRef}
-                  onFiles={handleSourceFiles}
-                  onHoverChange={(active) => setActiveDropTarget(active ? "source-image" : null)}
-                />
-              </div>
-
-              <div className="mt-4 space-y-3">
-                {uploads.length ? (
-                  uploads.map((upload) => (
-                    <button
-                      key={upload.id}
-                      type="button"
-                      onClick={() => {
-                        setSelectedUploadId(upload.id);
-                        void openAnnotationPanel(upload);
-                      }}
-                      className={`flex w-full items-center gap-3 rounded-2xl border px-3 py-3 text-left transition ${
-                        selectedUploadId === upload.id
-                          ? "border-blue-400 bg-blue-50"
-                          : "border-slate-200 bg-slate-50 hover:border-slate-300"
-                      }`}
-                    >
-                      <div className="relative h-14 w-14 overflow-hidden rounded-xl bg-slate-200">
-                        <Image src={upload.previewUrl} alt={upload.file.name} fill className="object-cover" unoptimized />
-                      </div>
-                      <div className="min-w-0 flex-1">
-                        <div className="truncate text-sm font-medium text-slate-700">{upload.file.name}</div>
-                        <div className="mt-1 text-xs text-slate-500">
-                          {(upload.file.size / 1024).toFixed(1)} KB · 点击继续标注
-                        </div>
-                      </div>
-                    </button>
-                  ))
-                ) : (
-                  <div className="rounded-2xl border border-dashed border-slate-200 px-4 py-6 text-center text-sm text-slate-400">
-                    上传后这里会显示待标注的数据来源图片。
-                  </div>
-                )}
-              </div>
-            </div>
-
-            <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
-              <h2 className="text-xl font-semibold">3. 当前训练池</h2>
-              <div className="mt-4 grid grid-cols-3 gap-3 rounded-2xl bg-slate-50 p-4 text-center">
-                <div>
-                  <div className="text-xs text-slate-500">训练图片</div>
-                  <div className="mt-1 text-2xl font-semibold text-slate-900">{trainingStatus?.totalImages ?? 0}</div>
-                </div>
-                <div>
-                  <div className="text-xs text-slate-500">已标注</div>
-                  <div className="mt-1 text-2xl font-semibold text-emerald-700">{trainingStatus?.labeledImages ?? 0}</div>
-                </div>
-                <div>
-                  <div className="text-xs text-slate-500">未标注</div>
-                  <div className="mt-1 text-2xl font-semibold text-amber-600">{trainingStatus?.unlabeledImages ?? 0}</div>
-                </div>
-              </div>
-
-              <div className="mt-4 grid gap-3 sm:grid-cols-2">
-                {(trainingStatus?.items || []).slice(0, 6).map((item) => (
-                  <button
-                    key={item.imageName}
-                    type="button"
-                    onClick={() => void openAnnotationPanel(item)}
-                    className="overflow-hidden rounded-2xl border border-slate-200 bg-slate-50 text-left transition hover:border-slate-300 hover:bg-white"
-                  >
-                    <div className="relative aspect-[4/3] bg-slate-200">
-                      {trainingThumbnailMap[item.imageName] ? (
-                        <Image
-                          src={trainingThumbnailMap[item.imageName]}
-                          alt={item.imageName}
-                          fill
-                          className="object-cover"
-                          unoptimized
-                        />
-                      ) : (
-                        <div className="flex h-full items-center justify-center px-4 text-center text-xs text-slate-400">
-                          缩略图加载中
-                        </div>
-                      )}
-                    </div>
-                    <div className="p-3">
-                      <div className="truncate text-sm font-medium text-slate-700">{item.imageName}</div>
-                      <div className="mt-1 text-xs text-slate-500">{item.labeled ? "已标注，可点击修改" : "未标注"}</div>
-                    </div>
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <button
-              type="button"
-              onClick={() => void handleCompleteSetup()}
-              disabled={isCompleting || isLoading}
-              className="w-full rounded-3xl bg-emerald-600 px-4 py-4 text-base font-semibold text-white hover:bg-emerald-500 disabled:bg-emerald-300"
+        <div className="grid gap-4 md:grid-cols-2">
+          <div
+            className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 outline-none"
+            tabIndex={0}
+            onPointerDownCapture={(event) => {
+              if ((event.target as HTMLElement).closest('input[type="file"]')) {
+                return;
+              }
+              (event.currentTarget as HTMLElement).focus({ preventScroll: true });
+            }}
+            onPaste={handleTemplateZonePaste}
+          >
+            <div className="text-sm font-medium">{t("formSetup.templateZoneTitle")}</div>
+            <p className="mt-0.5 text-xs text-[var(--muted-foreground)]">{t("formSetup.templateZoneDesc")}</p>
+            <label
+              className={`mt-3 flex min-h-[140px] cursor-pointer flex-col items-center justify-center rounded-lg border border-dashed px-4 py-6 text-center transition ${
+                templateDropDragging
+                  ? "border-[var(--foreground)] bg-[var(--accent-muted)]"
+                  : "border-[var(--border)] bg-[var(--background)]"
+              } ${isTemplateImportBusy ? "pointer-events-none opacity-60" : ""}`}
+              onDragEnter={(event) => {
+                event.preventDefault();
+                setTemplateDropDragging(true);
+              }}
+              onDragOver={(event) => {
+                event.preventDefault();
+                setTemplateDropDragging(true);
+              }}
+              onDragLeave={(event) => {
+                event.preventDefault();
+                setTemplateDropDragging(false);
+              }}
+              onDrop={(event) => {
+                event.preventDefault();
+                setTemplateDropDragging(false);
+                void ingestTemplateZoneFiles(event.dataTransfer.files);
+              }}
             >
-              {isCompleting ? "完成中..." : form.ready ? "保存并进入填表模式" : "完成新建并进入填表模式"}
-            </button>
+              <input
+                ref={templateZoneInputRef}
+                type="file"
+                accept={TEMPLATE_IMPORT_ACCEPT}
+                multiple
+                className="hidden"
+                disabled={isTemplateImportBusy}
+                onChange={(event) => void ingestTemplateZoneFiles(event.target.files)}
+              />
+              <span className="text-sm">{t("formSetup.templateDrop")}</span>
+              <span className="mt-2 max-w-[520px] text-xs text-[var(--muted-foreground)]">
+                {t("formSetup.templatePasteHint", { helper: t("upload.templateHelper") })}
+              </span>
+            </label>
+            {isTemplateImportBusy ? (
+              <p className="mt-2 text-center text-xs text-[var(--muted-foreground)]">{t("formSetup.processing")}</p>
+            ) : null}
           </div>
 
-          <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <h2 className="text-xl font-semibold">1. 配置表格模板</h2>
-                <p className="mt-1 text-sm text-slate-500">
-                  你可以拖拽 Excel 模板、拖拽模板截图让 AI 识别，或者手动一个一个新增表格项目。
-                </p>
+          <div
+            className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 outline-none"
+            tabIndex={0}
+            onPointerDownCapture={(event) => {
+              if ((event.target as HTMLElement).closest('input[type="file"]')) {
+                return;
+              }
+              (event.currentTarget as HTMLElement).focus({ preventScroll: true });
+            }}
+            onPaste={handleDataSourceZonePaste}
+          >
+            <div className="text-sm font-medium">{t("formSetup.dataZoneTitle")}</div>
+            <p className="mt-0.5 text-xs text-[var(--muted-foreground)]">{t("formSetup.dataZoneDesc")}</p>
+            <label
+              className={`mt-3 flex min-h-[140px] cursor-pointer flex-col items-center justify-center rounded-lg border border-dashed px-4 py-6 text-center transition ${
+                dataSourceDropDragging
+                  ? "border-[var(--foreground)] bg-[var(--accent-muted)]"
+                  : "border-[var(--border)] bg-[var(--background)]"
+              }`}
+              onDragEnter={(event) => {
+                event.preventDefault();
+                setDataSourceDropDragging(true);
+              }}
+              onDragOver={(event) => {
+                event.preventDefault();
+                setDataSourceDropDragging(true);
+              }}
+              onDragLeave={(event) => {
+                event.preventDefault();
+                setDataSourceDropDragging(false);
+              }}
+              onDrop={(event) => {
+                event.preventDefault();
+                setDataSourceDropDragging(false);
+                void ingestDataSourceZoneFiles(event.dataTransfer.files);
+              }}
+            >
+              <input
+                ref={dataSourceZoneInputRef}
+                type="file"
+                accept={SUPPORTED_WORKSPACE_UPLOAD_ACCEPT}
+                multiple
+                className="hidden"
+                onChange={(event) => void ingestDataSourceZoneFiles(event.target.files)}
+              />
+              <span className="text-sm">{t("formSetup.dataDrop")}</span>
+              <span className="mt-2 max-w-[520px] text-xs text-[var(--muted-foreground)]">
+                {t("formSetup.dataPasteHint", { helper: t("upload.workspaceHelper") })}
+              </span>
+            </label>
+          </div>
+        </div>
+
+        <section className="flex flex-col gap-4">
+          <div className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-5">
+            <div>
+              <h2 className="text-sm font-medium">{t("formSetup.columnsTitle")}</h2>
+              <p className="mt-1 text-xs text-[var(--muted-foreground)]">{t("formSetup.columnsIntro")}</p>
+            </div>
+
+            <div className="mt-4 rounded-xl border border-[var(--border)] bg-[var(--background)] p-4">
+              <div className="text-xs font-medium text-[var(--foreground)]">{t("formSetup.preview")}</div>
+              <div className="mt-0.5 text-xs text-[var(--muted-foreground)]">
+                {t("formSetup.columnsCount", { n: activeTableFields.length })}
               </div>
-              <div className="text-xs text-slate-400">所有上传区都支持直接拖拽丢入。</div>
-            </div>
-
-            <div className="mt-5 grid gap-3 md:grid-cols-2">
-              <UploadDropArea
-                accept=".xlsx,.xls,.csv"
-                disabled={isImportingExcel}
-                active={activeDropTarget === "template-excel"}
-                title={isImportingExcel ? "正在导入 Excel 模板..." : "拖拽或点击导入 Excel 模板"}
-                hint="系统会自动识别表头并生成模板字段。"
-                helper="支持 .xlsx / .xls / .csv"
-                inputRef={excelInputRef}
-                onFiles={handleExcelTemplateSelection}
-                onHoverChange={(active) => setActiveDropTarget(active ? "template-excel" : null)}
-              />
-              <UploadDropArea
-                accept={SUPPORTED_VISUAL_UPLOAD_ACCEPT}
-                disabled={isImportingImage}
-                active={activeDropTarget === "template-image"}
-                title={isImportingImage ? "正在识别模板截图..." : "拖拽或点击上传模板截图"}
-                hint="把整张模板图识别成标准表格字段。"
-                helper="适合网页表格截图、完整模板截图。"
-                inputRef={templateImageInputRef}
-                onFiles={handleTemplateImageSelection}
-                onHoverChange={(active) => setActiveDropTarget(active ? "template-image" : null)}
-              />
-            </div>
-
-            <div className="mt-5 rounded-3xl border border-slate-200 bg-slate-50 p-4">
-              <div className="text-sm font-medium text-slate-700">空白模板区域预览</div>
-              <div className="mt-1 text-xs text-slate-500">当前启用 {activeTableFields.length} 个表格项目。</div>
               {activeTableFields.length ? (
                 <div className="mt-4 overflow-x-auto rounded-2xl border border-slate-200 bg-white">
                   <div
@@ -985,26 +1210,26 @@ export function FormSetupFlow({ initialForm }: { initialForm: FormDefinition }) 
                   >
                     {activeTableFields.map((field) => (
                       <div key={field.id} className="border-r border-slate-100 px-3 py-4 last:border-r-0">
-                        {field.type === "number" ? "0" : "示例值"}
+                        {field.type === "number" ? t("formSetup.sampleNumber") : t("formSetup.sampleText")}
                       </div>
                     ))}
                   </div>
                 </div>
               ) : (
                 <div className="mt-4 rounded-2xl border border-dashed border-slate-300 bg-white px-4 py-8 text-center text-sm text-slate-400">
-                  这是一个完全空白的新模板。没有旧字段，也没有默认字段，你可以从零开始搭建。
+                  {t("formSetup.blankTemplateHint")}
                 </div>
               )}
             </div>
 
             <div className="mt-5 rounded-3xl border border-slate-200 p-4">
-              <div className="mb-3 text-sm font-medium text-slate-700">手动编辑表格项目</div>
+              <div className="mb-3 text-sm font-medium text-slate-700">{t("formSetup.manualEdit")}</div>
               <div className="flex flex-wrap gap-2">
                 <input
                   type="text"
                   value={newFieldName}
                   onChange={(event) => setNewFieldName(event.target.value.slice(0, 40))}
-                  placeholder="输入新的表格项目名称"
+                  placeholder={t("formSetup.newFieldPlaceholder")}
                   className="min-w-0 flex-1 rounded-xl border border-slate-300 px-3 py-2 text-sm outline-none focus:border-blue-500"
                 />
                 <select
@@ -1012,15 +1237,15 @@ export function FormSetupFlow({ initialForm }: { initialForm: FormDefinition }) 
                   onChange={(event) => setNewFieldType(event.target.value as TableFieldType)}
                   className="rounded-xl border border-slate-300 px-3 py-2 text-sm outline-none focus:border-blue-500"
                 >
-                  <option value="text">文本项目</option>
-                  <option value="number">数字项目</option>
+                  <option value="text">{t("formSetup.fieldTypeText")}</option>
+                  <option value="number">{t("formSetup.fieldTypeNumber")}</option>
                 </select>
                 <button
                   type="button"
                   onClick={handleAddField}
                   className="rounded-xl bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500"
                 >
-                  新增项目
+                  {t("formSetup.addField")}
                 </button>
               </div>
 
@@ -1041,7 +1266,7 @@ export function FormSetupFlow({ initialForm }: { initialForm: FormDefinition }) 
                           className="min-w-0 flex-1 rounded-xl border border-slate-300 px-3 py-2 text-sm outline-none focus:border-blue-500"
                         />
                         <span className="rounded-full bg-slate-200 px-2 py-1 text-[11px] text-slate-600">
-                          {field.type === "number" ? "数字" : "文本"}
+                          {field.type === "number" ? t("formSetup.typeShortNumber") : t("formSetup.typeShortText")}
                         </span>
                         <button
                           type="button"
@@ -1049,7 +1274,7 @@ export function FormSetupFlow({ initialForm }: { initialForm: FormDefinition }) 
                           disabled={index === 0}
                           className="rounded-xl border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-white disabled:opacity-40"
                         >
-                          上移
+                          {t("formSetup.moveUp")}
                         </button>
                         <button
                           type="button"
@@ -1057,27 +1282,27 @@ export function FormSetupFlow({ initialForm }: { initialForm: FormDefinition }) 
                           disabled={index === visibleFields.length - 1}
                           className="rounded-xl border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-white disabled:opacity-40"
                         >
-                          下移
+                          {t("formSetup.moveDown")}
                         </button>
                         <button
                           type="button"
                           onClick={() => handleDeleteField(field)}
                           className="rounded-xl border border-rose-300 bg-rose-50 px-3 py-2 text-sm font-medium text-rose-700 hover:bg-rose-100"
                         >
-                          删除
+                          {t("formSetup.remove")}
                         </button>
                       </div>
                     </div>
                   ))
                 ) : (
                   <div className="rounded-2xl border border-dashed border-slate-200 px-4 py-6 text-center text-sm text-slate-400">
-                    当前还没有任何表格项目。你可以直接拖入模板，也可以在这里手动从零新增。
+                    {t("formSetup.noColumns")}
                   </div>
                 )}
 
                 {deletedFieldDrafts.length ? (
                   <div className="rounded-2xl border border-slate-200 p-3">
-                    <div className="mb-2 text-sm font-medium text-slate-700">已删除项目</div>
+                    <div className="mb-2 text-sm font-medium text-slate-700">{t("formSetup.deletedSection")}</div>
                     <div className="space-y-2">
                       {deletedFieldDrafts.map((field) => (
                         <div
@@ -1087,7 +1312,7 @@ export function FormSetupFlow({ initialForm }: { initialForm: FormDefinition }) 
                           <div>
                             <div className="text-sm font-medium text-slate-700">{field.label}</div>
                             <div className="mt-1 text-xs text-slate-500">
-                              {field.type === "number" ? "数字项目" : "文本项目"}
+                              {field.type === "number" ? t("formSetup.fieldTypeNumberFull") : t("formSetup.fieldTypeTextFull")}
                             </div>
                           </div>
                           <button
@@ -1095,7 +1320,7 @@ export function FormSetupFlow({ initialForm }: { initialForm: FormDefinition }) 
                             onClick={() => handleRestoreField(field)}
                             className="rounded-xl border border-emerald-300 bg-emerald-50 px-3 py-2 text-sm font-medium text-emerald-700 hover:bg-emerald-100"
                           >
-                            恢复
+                            {t("formSetup.restore")}
                           </button>
                         </div>
                       ))}
@@ -1110,10 +1335,19 @@ export function FormSetupFlow({ initialForm }: { initialForm: FormDefinition }) 
                 disabled={isSavingFields}
                 className="mt-4 w-full rounded-2xl bg-slate-900 px-4 py-3 text-sm font-medium text-white hover:bg-slate-800 disabled:bg-slate-400"
               >
-                {isSavingFields ? "保存中..." : "保存模板配置"}
+                {isSavingFields ? t("formSetup.saving") : t("formSetup.saveTemplate")}
               </button>
             </div>
           </div>
+
+          <button
+            type="button"
+            onClick={() => void handleCompleteSetup()}
+            disabled={isCompleting || isLoading}
+            className="w-full rounded-xl bg-emerald-600 px-4 py-3.5 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-40"
+          >
+            {isCompleting ? t("formSetup.completing") : form.ready ? t("formSetup.enterFillMode") : t("formSetup.finishSetup")}
+          </button>
         </section>
 
         {annotatingItem && annotationDraft ? (
@@ -1122,7 +1356,7 @@ export function FormSetupFlow({ initialForm }: { initialForm: FormDefinition }) 
             imageName={annotationImageName}
             imageSrc={annotationImageSrc}
             apiPathBuilder={apiPathBuilder}
-            fieldDefinitions={activeTableFields}
+            fieldDefinitions={annotationFieldsForWorkbench}
             initialSeed={annotationDraft.seed}
             initialAnnotationMode={annotationDraft.annotationMode}
             initialTableFieldValues={annotationDraft.tableFieldValues}
@@ -1134,7 +1368,7 @@ export function FormSetupFlow({ initialForm }: { initialForm: FormDefinition }) 
             onError={setErrorMessage}
             onSaved={async ({ totalExamples }) => {
               await loadTrainingStatus();
-              setNoticeMessage(`标注已存入当前填表训练池，当前训练样本总数 ${totalExamples || 0}。`);
+              setNoticeMessage(t("formSetup.noticeSavedTrain", { n: totalExamples || 0 }));
               const uploadId = removeUploadAfterSaveRef.current;
               removeUploadAfterSaveRef.current = null;
               if (uploadId) {
@@ -1145,9 +1379,6 @@ export function FormSetupFlow({ initialForm }: { initialForm: FormDefinition }) 
                   }
                   return current.filter((item) => item.id !== uploadId);
                 });
-                if (selectedUploadId === uploadId) {
-                  setSelectedUploadId(null);
-                }
               }
             }}
           />

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { useLocale } from "@/i18n/LocaleProvider";
 import { DEFAULT_TABLE_FIELDS, isBuiltInFieldId, type TableFieldDefinition } from "@/lib/table-fields";
 import { ensureImageDataUrlFromSource } from "@/lib/client-visual-upload";
 
@@ -324,6 +325,7 @@ export function TrainingAnnotationWorkbench({
   onNotice,
   onError,
 }: TrainingAnnotationWorkbenchProps) {
+  const { t } = useLocale();
   const activeFieldDefinitions = useMemo(
     () => (fieldDefinitions?.length ? fieldDefinitions : DEFAULT_TABLE_FIELDS).filter((field) => field.active),
     [fieldDefinitions],
@@ -345,7 +347,7 @@ export function TrainingAnnotationWorkbench({
   );
   const [annotationField, setAnnotationField] = useState<AnnotationField>(defaultFieldId);
   const [resolvedImageSrc, setResolvedImageSrc] = useState("");
-  const [annotationNotes, setAnnotationNotes] = useState(initialNotes ?? "人工标注用于训练池。");
+  const [annotationNotes, setAnnotationNotes] = useState(initialNotes ?? t("annotation.defaultNotes"));
   const [drawingState, setDrawingState] = useState<DrawingState | null>(null);
   const [isSavingTraining, setIsSavingTraining] = useState(false);
   const [isPreviewFillLoading, setIsPreviewFillLoading] = useState(false);
@@ -572,7 +574,7 @@ export function TrainingAnnotationWorkbench({
       initialTableFieldValues,
       initialBoxes,
       initialFieldAggregations,
-      initialNotes: initialNotes ?? "人工标注用于训练池。",
+      initialNotes: initialNotes ?? t("annotation.defaultNotes"),
     });
     if (next === seedJsonRef.current) {
       return;
@@ -583,7 +585,7 @@ export function TrainingAnnotationWorkbench({
     setTableFieldTexts(buildTableFieldTextStateFromSeed(initialSeed, initialTableFieldValues, activeFieldDefinitions));
     setAnnotationBoxes(sanitizeAnnotationBoxes(initialBoxes, activeFieldIdSet));
     setFieldAggregations(sanitizeFieldAggregations(initialFieldAggregations, activeFieldIdSet));
-    setAnnotationNotes(initialNotes ?? "人工标注用于训练池。");
+    setAnnotationNotes(initialNotes ?? t("annotation.defaultNotes"));
     setAnnotationField(pickAnnotationField(initialField, activeFieldDefinitions));
     setUndoStack([]);
     setAnnotationZoom(100);
@@ -591,7 +593,19 @@ export function TrainingAnnotationWorkbench({
     setIsPanningViewport(false);
     viewportPanStateRef.current = null;
     setDrawingState(null);
-  }, [open, initialSeed, initialAnnotationMode, initialTableFieldValues, initialBoxes, initialFieldAggregations, initialNotes, initialField, activeFieldDefinitions, activeFieldIdSet]);
+  }, [
+    open,
+    initialSeed,
+    initialAnnotationMode,
+    initialTableFieldValues,
+    initialBoxes,
+    initialFieldAggregations,
+    initialNotes,
+    initialField,
+    activeFieldDefinitions,
+    activeFieldIdSet,
+    t,
+  ]);
 
   useEffect(() => {
     if (!open) {
@@ -908,7 +922,7 @@ export function TrainingAnnotationWorkbench({
     return await new Promise<string>((resolve, reject) => {
       const reader = new FileReader();
       reader.onloadend = () => resolve(String(reader.result));
-      reader.onerror = () => reject(new Error("图片读取失败。"));
+      reader.onerror = () => reject(new Error(t("annotation.errImageRead")));
       reader.readAsDataURL(blob);
     });
   }
@@ -965,7 +979,7 @@ export function TrainingAnnotationWorkbench({
 
   async function previewFillFromAnnotations() {
     if (!open || !resolvedImageSrc || !visibleAnnotationBoxes.length) {
-      onError?.("\u8bf7\u5148\u5b8c\u6210\u6846\u9009\u5e76\u786e\u4fdd\u56fe\u7247\u5df2\u52a0\u8f7d\u3002");
+      onError?.(t("annotation.previewNeedBoxes"));
       return;
     }
     setIsPreviewFillLoading(true);
@@ -991,16 +1005,19 @@ export function TrainingAnnotationWorkbench({
         detectedModeReason?: string;
       };
       if (!res.ok) {
-        throw new Error(data.error || "\u8bd5\u586b\u5931\u8d25");
+        throw new Error(data.error || t("annotation.previewFailed"));
       }
 
       const resolvedMode: AnnotationMode = data.detectedMode === "table" ? "table" : "record";
-      const resolvedModeLabel = resolvedMode === "table" ? "完整表格" : "单条记录";
+      const resolvedModeLabel = t(
+        resolvedMode === "table" ? "annotation.modeLabelTable" : "annotation.modeLabelRecord",
+      );
       const resolvedModeReason = data.detectedModeReason?.trim();
+      const reasonBlock = resolvedModeReason ? t("annotation.previewReasonBlock", { r: resolvedModeReason }) : "";
 
       if (resolvedMode === "table") {
         if (!data.tableFieldValues) {
-          throw new Error("\u672a\u8fd4\u56de\u5b8c\u6574\u8868\u683c\u8bd5\u586b\u7ed3\u679c");
+          throw new Error(t("annotation.previewNoTable"));
         }
         setAnnotationMode("table");
         setTableFieldTexts(
@@ -1011,14 +1028,18 @@ export function TrainingAnnotationWorkbench({
         );
         onNotice?.(
           data.previewNote
-            ? `AI \u8bd5\u586b\u5b8c\u6210\uff0c\u5df2\u81ea\u52a8\u5207\u6362\u5230${resolvedModeLabel}\u6a21\u5f0f\u3002${resolvedModeReason ? ` \u5224\u65ad\u4f9d\u636e\uff1a${resolvedModeReason}\u3002` : ""} \u8bf4\u660e\uff1a${data.previewNote} \u8bf7\u6838\u5bf9\u540e\u518d\u5b58\u5165\u8bad\u7ec3\u6c60\u3002`
-            : `AI \u8bd5\u586b\u5b8c\u6210\uff0c\u5df2\u81ea\u52a8\u5207\u6362\u5230${resolvedModeLabel}\u6a21\u5f0f\u3002${resolvedModeReason ? ` \u5224\u65ad\u4f9d\u636e\uff1a${resolvedModeReason}\u3002` : ""} \u670d\u52a1\u7aef\u5df2\u6309\u6bcf\u4e2a\u6846\u88c1\u526a\u6210\u5c0f\u56fe\u5e76\u6309\u884c\u8bfb\u53d6\uff0c\u8bf7\u6838\u5bf9\u53f3\u4fa7\u5b8c\u6574\u8868\u683c\u6570\u503c\u3002`,
+            ? t("annotation.previewTableWithNote", {
+                mode: resolvedModeLabel,
+                reason: reasonBlock,
+                note: data.previewNote,
+              })
+            : t("annotation.previewTableNoNote", { mode: resolvedModeLabel, reason: reasonBlock }),
         );
         return;
       }
 
       if (!data.record) {
-        throw new Error("\u672a\u8fd4\u56de\u8bd5\u586b\u7ed3\u679c");
+        throw new Error(t("annotation.previewNoRecord"));
       }
       setAnnotationMode("record");
       const r = data.record;
@@ -1062,11 +1083,15 @@ export function TrainingAnnotationWorkbench({
       });
       onNotice?.(
         data.previewNote
-          ? `AI \u8bd5\u586b\u5b8c\u6210\uff0c\u5df2\u81ea\u52a8\u5207\u6362\u5230${resolvedModeLabel}\u6a21\u5f0f\u3002${resolvedModeReason ? ` \u5224\u65ad\u4f9d\u636e\uff1a${resolvedModeReason}\u3002` : ""} \u8bf4\u660e\uff1a${data.previewNote} \u8bf7\u6838\u5bf9\u540e\u518d\u5b58\u5165\u8bad\u7ec3\u6c60\u3002`
-          : `AI \u8bd5\u586b\u5b8c\u6210\uff0c\u5df2\u81ea\u52a8\u5207\u6362\u5230${resolvedModeLabel}\u6a21\u5f0f\u3002${resolvedModeReason ? ` \u5224\u65ad\u4f9d\u636e\uff1a${resolvedModeReason}\u3002` : ""} \u670d\u52a1\u7aef\u5df2\u6309\u6bcf\u4e2a\u6846\u88c1\u526a\u6210\u5c0f\u56fe\u540e\u9001\u6a21\u578b\u8bc6\u522b\uff0c\u8bf7\u6838\u5bf9\u53f3\u4fa7\u6570\u503c\u3002`,
+          ? t("annotation.previewRecordWithNote", {
+              mode: resolvedModeLabel,
+              reason: reasonBlock,
+              note: data.previewNote,
+            })
+          : t("annotation.previewRecordNoNote", { mode: resolvedModeLabel, reason: reasonBlock }),
       );
     } catch (err) {
-      onError?.(err instanceof Error ? err.message : "\u8bd5\u586b\u5931\u8d25");
+      onError?.(err instanceof Error ? err.message : t("annotation.previewFailed"));
     } finally {
       setIsPreviewFillLoading(false);
     }
@@ -1074,12 +1099,12 @@ export function TrainingAnnotationWorkbench({
 
   async function saveAnnotationToTrainingPool() {
     if (!open || !imageName || !resolvedImageSrc) {
-      onError?.("\u5f53\u524d\u6ca1\u6709\u53ef\u4fdd\u5b58\u7684\u6807\u6ce8\u3002");
+      onError?.(t("annotation.saveNothing"));
       return;
     }
 
     if (!visibleAnnotationBoxes.length) {
-      onError?.("\u8bf7\u81f3\u5c11\u6807\u6ce8\u4e00\u4e2a\u5b57\u6bb5\u6846\u540e\u518d\u4fdd\u5b58\u3002");
+      onError?.(t("annotation.saveNeedBox"));
       return;
     }
 
@@ -1123,7 +1148,7 @@ export function TrainingAnnotationWorkbench({
 
       const payload = (await response.json()) as { error?: string; totalExamples?: number };
       if (!response.ok) {
-        throw new Error(payload.error || "\u4fdd\u5b58\u8bad\u7ec3\u6837\u672c\u5931\u8d25\u3002");
+        throw new Error(payload.error || t("annotation.errSaveSample"));
       }
 
       await Promise.resolve(
@@ -1136,7 +1161,7 @@ export function TrainingAnnotationWorkbench({
       );
       handleClose();
     } catch (error) {
-      onError?.(error instanceof Error ? error.message : "\u4fdd\u5b58\u8bad\u7ec3\u6837\u672c\u5931\u8d25\u3002");
+      onError?.(error instanceof Error ? error.message : t("annotation.errSaveSample"));
     } finally {
       setIsSavingTraining(false);
     }
@@ -1157,25 +1182,24 @@ export function TrainingAnnotationWorkbench({
         <div className="sticky top-0 z-10 mb-4 flex flex-wrap items-center justify-between gap-3 bg-white pb-2">
           <div>
             <h2 id="annotation-dialog-title" className="text-lg font-semibold">
-              图片框选标注
+              {t("annotation.title")}
             </h2>
-            <p className="mt-1 text-sm text-slate-500">
-              适合 POD 屏摄：先选字段，再在图上拖出矩形框；可触摸屏操作。填好右侧数值后保存。
-            </p>
+            <p className="mt-1 text-sm text-slate-500">{t("annotation.subtitle")}</p>
             <ol className="mt-2 list-decimal space-y-0.5 pl-5 text-xs text-slate-600">
-              <li>选中字段后在图上画框；同一字段可画多个框（如两条「未领取」各画一框）</li>
-              <li>多框时在列表里选择合并方式：数字相加、逗号/换行并列，或仅取第一处</li>
-              <li>右侧填写该字段最终应写入表格的值（如 1+0=1），最后点「存入训练池」</li>
+              <li>{t("annotation.li1")}</li>
+              <li>{t("annotation.li2")}</li>
+              <li>{t("annotation.li3")}</li>
               <li>
-                画框坐标会按<strong>原图像素</strong>对齐后再参与「AI 试填」（避免适应容器时的留白导致模型读到框外文字，例如抽查路线框到
-                IAH01-050-R 却填成 IAH-MEL）。
+                {t("annotation.li4Start")}
+                <strong>{t("annotation.pixelsStrong")}</strong>
+                {t("annotation.li4End")}
               </li>
             </ol>
           </div>
           <div className="flex items-center gap-2">
             <button
               type="button"
-              aria-label="关闭标注弹窗"
+              aria-label={t("annotation.closePanel")}
               className="inline-flex h-10 w-10 items-center justify-center rounded-xl border border-slate-300 text-lg font-medium text-slate-600 hover:bg-slate-50"
               onClick={handleClose}
             >
@@ -1186,7 +1210,7 @@ export function TrainingAnnotationWorkbench({
             className="shrink-0 rounded-xl border border-slate-300 px-4 py-2 text-sm font-medium hover:bg-slate-50"
             onClick={handleClose}
           >
-            关闭（Esc）
+            {t("annotation.closeEsc")}
           </button>
         </div>
         </div>
@@ -1195,9 +1219,9 @@ export function TrainingAnnotationWorkbench({
           <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
             <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
               <div>
-                <div className="text-sm font-medium text-slate-700">标注图片：{imageName}</div>
-                <div className="mt-1 text-xs text-slate-500">保存后，模型参考时会直接看到带框的人工标注图。</div>
-                <div className="mt-1 text-xs text-slate-500">默认会尽量完整显示整张图；放大后可切换到拖动画面，再拖拽查看局部。</div>
+                <div className="text-sm font-medium text-slate-700">{t("annotation.imageLabel", { name: imageName })}</div>
+                <div className="mt-1 text-xs text-slate-500">{t("annotation.saveHint1")}</div>
+                <div className="mt-1 text-xs text-slate-500">{t("annotation.saveHint2")}</div>
               </div>
               <div className="flex flex-wrap items-center gap-2">
                 <div className="inline-flex rounded-lg border border-slate-300 bg-white p-1">
@@ -1211,7 +1235,7 @@ export function TrainingAnnotationWorkbench({
                       setAnnotationInteractionMode("draw");
                     }}
                   >
-                    画框
+                    {t("annotation.drawMode")}
                   </button>
                   <button
                     type="button"
@@ -1220,7 +1244,7 @@ export function TrainingAnnotationWorkbench({
                     }`}
                     onClick={() => setAnnotationInteractionMode("pan")}
                   >
-                    拖动画面
+                    {t("annotation.panMode")}
                   </button>
                 </div>
                 <button
@@ -1229,7 +1253,7 @@ export function TrainingAnnotationWorkbench({
                   onClick={undoLastAnnotationBoxChange}
                   disabled={!canUndoAnnotationBoxes}
                 >
-                  撤回 Ctrl+Z
+                  {t("annotation.undo")}
                 </button>
                 <button
                   type="button"
@@ -1237,7 +1261,7 @@ export function TrainingAnnotationWorkbench({
                   onClick={() => setAnnotationZoom((current) => Math.max(50, current - 25))}
                   disabled={annotationZoom <= 50}
                 >
-                  缩小
+                  {t("annotation.zoomOut")}
                 </button>
                 <button
                   type="button"
@@ -1255,7 +1279,7 @@ export function TrainingAnnotationWorkbench({
                   onClick={() => setAnnotationZoom((current) => Math.min(300, current + 25))}
                   disabled={annotationZoom >= 300}
                 >
-                  放大
+                  {t("annotation.zoomIn")}
                 </button>
               </div>
             </div>
@@ -1307,7 +1331,9 @@ export function TrainingAnnotationWorkbench({
                   }`}
                 />
               ) : (
-                <div className="flex min-h-[200px] items-center justify-center text-sm text-slate-400">加载图片中…</div>
+                <div className="flex min-h-[200px] items-center justify-center text-sm text-slate-400">
+                  {t("annotation.loadingImage")}
+                </div>
               )}
               {visibleAnnotationBoxes.map((box) => {
                 const sameField = visibleAnnotationBoxes.filter((b) => b.field === box.field);
@@ -1350,14 +1376,16 @@ export function TrainingAnnotationWorkbench({
             <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
               <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
                 <div>
-                  <div className="text-sm font-medium text-slate-700">{"填写正确数值"}</div>
+                  <div className="text-sm font-medium text-slate-700">{t("annotation.fillValues")}</div>
                   <div className="mt-1 text-xs text-slate-500">
                     {annotationMode === "table"
-                      ? `完整表格模式：每个字段按行填写，每行对应表格里的一条记录。当前约 ${Math.max(
-                          1,
-                          ...Object.values(parsedTableFieldValues || {}).map((series) => series.length),
-                        )} 行。`
-                      : "单条记录模式：每个字段填写一个最终值。"}
+                      ? t("annotation.modeTable", {
+                          n: Math.max(
+                            1,
+                            ...Object.values(parsedTableFieldValues || {}).map((series) => series.length),
+                          ),
+                        })
+                      : t("annotation.modeRecord")}
                   </div>
                 </div>
                 <div className="inline-flex rounded-xl border border-slate-300 bg-white p-1 text-xs">
@@ -1368,7 +1396,7 @@ export function TrainingAnnotationWorkbench({
                     }`}
                     onClick={() => switchAnnotationMode("record")}
                   >
-                    {"单条记录"}
+                    {t("annotation.modeRecordShort")}
                   </button>
                   <button
                     type="button"
@@ -1377,7 +1405,7 @@ export function TrainingAnnotationWorkbench({
                     }`}
                     onClick={() => switchAnnotationMode("table")}
                   >
-                    {"完整表格"}
+                    {t("annotation.modeTableShort")}
                   </button>
                 </div>
               </div>
@@ -1388,13 +1416,17 @@ export function TrainingAnnotationWorkbench({
                     <div key={field.id}>
                       <div className="mb-1 flex items-center justify-between gap-2 text-xs text-slate-500">
                         <label>{field.label}</label>
-                        <span>{(parsedTableFieldValues?.[field.id]?.length ?? 0) || 0} 行</span>
+                        <span>
+                          {t("annotation.rowsCount", {
+                            n: (parsedTableFieldValues?.[field.id]?.length ?? 0) || 0,
+                          })}
+                        </span>
                       </div>
                       <textarea
                         className="min-h-[88px] w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-blue-500"
                         value={tableFieldTexts[field.id] ?? ""}
                         onChange={(e) => setAnnotationFieldValue(field, e.target.value)}
-                        placeholder={`每行一个${field.label}，按表格从上到下顺序填写`}
+                        placeholder={t("annotation.phTableLines", { label: field.label })}
                       />
                     </div>
                   ))}
@@ -1409,7 +1441,7 @@ export function TrainingAnnotationWorkbench({
                         className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-blue-500"
                         value={getAnnotationFieldValue(field.id)}
                         onChange={(e) => setAnnotationFieldValue(field, e.target.value)}
-                        placeholder={`输入${field.label}`}
+                        placeholder={t("annotation.phField", { label: field.label })}
                       />
                       {field.id === "total" && (
                         <input
@@ -1417,7 +1449,7 @@ export function TrainingAnnotationWorkbench({
                           className="mt-2 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-blue-500"
                           value={manualRecord.totalSourceLabel || ""}
                           onChange={(e) => setManualRecord({ ...manualRecord, totalSourceLabel: e.target.value })}
-                          placeholder="输入运单数量的来源标签 (如: 应领件数)"
+                          placeholder={t("annotation.phTotalSource")}
                         />
                       )}
                     </div>
@@ -1426,7 +1458,7 @@ export function TrainingAnnotationWorkbench({
               )}
             </div>
             <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-              <div className="mb-3 text-sm font-medium text-slate-700">选择字段并画框</div>
+              <div className="mb-3 text-sm font-medium text-slate-700">{t("annotation.pickField")}</div>
               <div className="space-y-3">
                 {activeFieldDefinitions.map((field) => {
                   const boxesFor = visibleAnnotationBoxes.filter((box) => box.field === field.id);
@@ -1445,7 +1477,9 @@ export function TrainingAnnotationWorkbench({
                           />
                           <span className={hasBox ? "font-medium text-slate-900" : "text-slate-500"}>{field.label}</span>
                           {count > 0 ? (
-                            <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-600">{count} 框</span>
+                            <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-600">
+                              {t("annotation.boxesCount", { n: count })}
+                            </span>
                           ) : null}
                         </label>
                         {count >= 2 ? (
@@ -1459,10 +1493,10 @@ export function TrainingAnnotationWorkbench({
                               }))
                             }
                           >
-                            <option value="sum">多框：数字相加</option>
-                            <option value="join_comma">多框：逗号并列</option>
-                            <option value="join_newline">多框：换行并列</option>
-                            <option value="first">多框：仅第一处</option>
+                            <option value="sum">{t("annotation.aggSum")}</option>
+                            <option value="join_comma">{t("annotation.aggComma")}</option>
+                            <option value="join_newline">{t("annotation.aggNl")}</option>
+                            <option value="first">{t("annotation.aggFirst")}</option>
                           </select>
                         ) : null}
                         {hasBox ? (
@@ -1471,10 +1505,10 @@ export function TrainingAnnotationWorkbench({
                             className="text-xs text-rose-500 hover:text-rose-700"
                             onClick={() => clearAnnotationFieldBoxes(field.id)}
                           >
-                            清除全部
+                            {t("annotation.clearAll")}
                           </button>
                         ) : (
-                          <span className="text-xs text-slate-400">未框选</span>
+                          <span className="text-xs text-slate-400">{t("annotation.noSelection")}</span>
                         )}
                       </div>
                       {count > 1 ? (
@@ -1482,15 +1516,15 @@ export function TrainingAnnotationWorkbench({
                           {boxesFor.map((b, i) => (
                             <li key={b.id} className="flex items-center justify-between gap-2">
                               <span>
-                                框 {i + 1}
-                                {b.value ? `（参考值 ${b.value}）` : ""}
+                                {t("annotation.boxN", { n: i + 1 })}
+                                {b.value ? t("annotation.refValue", { v: b.value }) : ""}
                               </span>
                               <button
                                 type="button"
                                 className="shrink-0 text-rose-500 hover:text-rose-700"
                                 onClick={() => removeAnnotationBoxById(b.id)}
                               >
-                                删除
+                                {t("annotation.delete")}
                               </button>
                             </li>
                           ))}
@@ -1501,18 +1535,18 @@ export function TrainingAnnotationWorkbench({
                 })}
               </div>
               <p className="mt-3 text-xs text-slate-500">
-                同一字段可连续画多个框；未收数量等数字字段默认「相加」。单框时无需选择合并方式。
+                {t("annotation.multiBoxHint")}
               </p>
             </div>
 
             <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-              <div className="mb-3 text-sm font-medium text-slate-700">附加说明</div>
+              <div className="mb-3 text-sm font-medium text-slate-700">{t("annotation.extraNotes")}</div>
               <textarea
                 className="w-full resize-none rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-blue-500"
                 rows={2}
                 value={annotationNotes}
                 onChange={(e) => setAnnotationNotes(e.target.value)}
-                placeholder="选填：记录特殊情况或标注说明..."
+                placeholder={t("annotation.notesPh")}
               />
             </div>
 
@@ -1522,7 +1556,7 @@ export function TrainingAnnotationWorkbench({
                 className="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm font-medium text-slate-700 hover:bg-slate-50"
                 onClick={handleClose}
               >
-                关闭标注弹窗
+                {t("annotation.closePanel")}
               </button>
               <button
                 type="button"
@@ -1530,7 +1564,7 @@ export function TrainingAnnotationWorkbench({
                 onClick={() => void previewFillFromAnnotations()}
                 disabled={isPreviewFillLoading || isSavingTraining || !resolvedImageSrc || visibleAnnotationBoxes.length === 0}
               >
-                {isPreviewFillLoading ? "试填识别中…" : "AI 试填预览（自动判断单条/完整表格）"}
+                {isPreviewFillLoading ? t("annotation.previewLoading") : t("annotation.previewAi")}
               </button>
               <button
                 type="button"
@@ -1538,7 +1572,7 @@ export function TrainingAnnotationWorkbench({
                 onClick={() => void saveAnnotationToTrainingPool()}
                 disabled={isSavingTraining || isPreviewFillLoading}
               >
-                {isSavingTraining ? "保存中..." : "存入训练池"}
+                {isSavingTraining ? t("annotation.saving") : t("annotation.saveTrain")}
               </button>
             </div>
           </div>

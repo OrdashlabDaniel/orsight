@@ -2,6 +2,7 @@
 
 import { useRouter } from "next/navigation";
 
+import { useLocale } from "@/i18n/LocaleProvider";
 import { createClient } from "@/lib/supabase/browser";
 
 type Props = {
@@ -11,6 +12,7 @@ type Props = {
 
 export function SignOutButton({ devMock }: Props) {
   const router = useRouter();
+  const { t } = useLocale();
 
   async function handleSignOut() {
     if (devMock) {
@@ -29,7 +31,7 @@ export function SignOutButton({ devMock }: Props) {
       onClick={() => void handleSignOut()}
       className="rounded-xl border border-rose-300 bg-rose-50 px-4 py-2 text-sm font-medium text-rose-700 hover:bg-rose-100"
     >
-      退出登录
+      {t("signOut.button")}
     </button>
   );
 }

@@ -1,5 +1,8 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
+
+import { AppProviders } from "@/components/AppProviders";
+
 import "./globals.css";
 
 const geistSans = Geist({
@@ -14,7 +17,8 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "OrSight",
-  description: "OrSight：批量上传 POD 签退截图，AI 自动填表，支持复制与导出 Excel。",
+  description:
+    "OrSight: batch POD screenshots, AI-assisted forms, copy & Excel export. / OrSight：批量上传 POD 签退截图，AI 自动填表，支持复制与导出 Excel。",
 };
 
 export default function RootLayout({
@@ -24,10 +28,8 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="zh-CN">
-      <body
-        className={`${geistSans.variable} ${geistMono.variable} antialiased`}
-      >
-        {children}
+      <body className={`${geistSans.variable} ${geistMono.variable} antialiased`}>
+        <AppProviders>{children}</AppProviders>
       </body>
     </html>
   );
