@@ -399,6 +399,7 @@ export const en = {
     copy: "Copy",
     excel: "Excel",
     reminders: "Alerts",
+    resizeRemindersPanel: "Resize alerts and table area",
     sourceCol: "Source",
     groupRoute: "Route: {route} · {n} rows",
     mergedCross: "Merged across images",

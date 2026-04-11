@@ -399,6 +399,7 @@ export const zh = {
     copy: "复制",
     excel: "Excel",
     reminders: "提醒",
+    resizeRemindersPanel: "拖动调整提醒区与表格区域高度",
     sourceCol: "来源",
     groupRoute: "路线分组：{route} · {n} 条",
     mergedCross: "跨图合并",

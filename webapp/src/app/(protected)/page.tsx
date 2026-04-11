@@ -276,6 +276,17 @@ function HomeContent() {
   const filterDropdownRef = useRef<HTMLDivElement | null>(null);
   const viewerAnchorRef = useRef<HTMLElement | null>(null);
   const uploadPanelRef = useRef<HTMLDivElement | null>(null);
+  const splitResultsRef = useRef<HTMLDivElement | null>(null);
+  const columnDragRef = useRef<{ startX: number; startWidth: number } | null>(null);
+  const rowDragRef = useRef<{ startY: number; startHeight: number; shellHeight: number } | null>(null);
+  const uploadPanelWidthRef = useRef(380);
+  const remindersPanelHeightRef = useRef(160);
+
+  const UPLOAD_PANEL_WIDTH_KEY = "orsight-home-upload-width";
+  const RESULTS_REMINDERS_HEIGHT_KEY = "orsight-home-results-reminders-height";
+  const [uploadPanelWidthPx, setUploadPanelWidthPx] = useState(380);
+  const [remindersPanelHeightPx, setRemindersPanelHeightPx] = useState(160);
+  const [isDesktopLayout, setIsDesktopLayout] = useState(false);
 
   const uploadsRef = useRef(uploads);
   uploadsRef.current = uploads;
@@ -285,6 +296,116 @@ function HomeContent() {
       uploadsRef.current.forEach((upload) => URL.revokeObjectURL(upload.previewUrl));
     };
   }, []);
+
+  useEffect(() => {
+    uploadPanelWidthRef.current = uploadPanelWidthPx;
+  }, [uploadPanelWidthPx]);
+
+  useEffect(() => {
+    remindersPanelHeightRef.current = remindersPanelHeightPx;
+  }, [remindersPanelHeightPx]);
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(UPLOAD_PANEL_WIDTH_KEY);
+      const n = raw ? Number.parseInt(raw, 10) : NaN;
+      if (Number.isFinite(n)) {
+        setUploadPanelWidthPx(Math.min(640, Math.max(260, n)));
+      }
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(RESULTS_REMINDERS_HEIGHT_KEY);
+      const n = raw ? Number.parseInt(raw, 10) : NaN;
+      if (Number.isFinite(n)) {
+        setRemindersPanelHeightPx(Math.min(480, Math.max(96, n)));
+      }
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  useEffect(() => {
+    const mq = window.matchMedia("(min-width: 1024px)");
+    const apply = () => setIsDesktopLayout(mq.matches);
+    apply();
+    mq.addEventListener("change", apply);
+    return () => mq.removeEventListener("change", apply);
+  }, []);
+
+  useEffect(() => {
+    function onMove(event: PointerEvent) {
+      const col = columnDragRef.current;
+      if (col) {
+        const deltaX = event.clientX - col.startX;
+        const w = Math.min(640, Math.max(260, col.startWidth + deltaX));
+        uploadPanelWidthRef.current = w;
+        setUploadPanelWidthPx(w);
+      }
+      const row = rowDragRef.current;
+      if (row) {
+        const splitter = 12;
+        const minTable = 120;
+        const maxRem = Math.max(96, row.shellHeight - splitter - minTable);
+        const deltaY = event.clientY - row.startY;
+        const h = Math.min(maxRem, Math.max(96, row.startHeight + deltaY));
+        remindersPanelHeightRef.current = h;
+        setRemindersPanelHeightPx(h);
+      }
+    }
+    function onUp() {
+      if (columnDragRef.current) {
+        columnDragRef.current = null;
+        try {
+          localStorage.setItem(UPLOAD_PANEL_WIDTH_KEY, String(uploadPanelWidthRef.current));
+        } catch {
+          /* ignore */
+        }
+      }
+      if (rowDragRef.current) {
+        rowDragRef.current = null;
+        try {
+          localStorage.setItem(RESULTS_REMINDERS_HEIGHT_KEY, String(remindersPanelHeightRef.current));
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+    };
+  }, []);
+
+  function beginWorkspaceColumnResize(event: React.PointerEvent) {
+    if (event.button !== 0) {
+      return;
+    }
+    event.preventDefault();
+    columnDragRef.current = { startX: event.clientX, startWidth: uploadPanelWidthPx };
+    (event.currentTarget as HTMLElement).setPointerCapture?.(event.pointerId);
+  }
+
+  function beginRemindersTableResize(event: React.PointerEvent) {
+    if (event.button !== 0) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    const rect = splitResultsRef.current?.getBoundingClientRect();
+    const fallback = Math.min(Math.max(window.innerHeight * 0.68, 360), 880);
+    const shellHeight = rect && rect.height > 48 ? rect.height : fallback;
+    rowDragRef.current = { startY: event.clientY, startHeight: remindersPanelHeightPx, shellHeight };
+    (event.currentTarget as HTMLElement).setPointerCapture?.(event.pointerId);
+  }
 
   useEffect(() => {
     void loadTableFieldConfig();
@@ -1503,42 +1624,193 @@ function HomeContent() {
     );
   }
 
+  const renderResultsTable = () => (
+    <table className="min-w-full border-separate border-spacing-0 text-sm">
+      <thead className="sticky top-0 z-20 bg-[var(--background)] text-[var(--foreground)] shadow-[0_1px_0_var(--border)]">
+        <tr>
+          <th className="px-3 py-2 text-left text-xs font-medium text-[var(--muted-foreground)]">
+            {t("home.sourceCol")}
+          </th>
+          {activeTableFields.map((column) => (
+            <th key={column.id} className="px-3 py-2 text-left text-xs font-medium text-[var(--muted-foreground)]">
+              {column.label}
+            </th>
+          ))}
+        </tr>
+      </thead>
+      <tbody>
+          {filteredRecordsResult.records.length ? (
+            groupedRecords.map(([route, routeRecords]) => (
+              <Fragment key={route}>
+                {routeFieldActive ? (
+                  <tr className="bg-slate-200">
+                    <td colSpan={activeTableFields.length + 1} className="border-b border-slate-300 px-3 py-2 text-left font-semibold text-slate-800">
+                      {t("home.groupRoute", {
+                        route: route === UNGROUPED_ROUTE_KEY ? t("home.ungrouped") : route,
+                        n: routeRecords.length,
+                      })}
+                    </td>
+                  </tr>
+                ) : null}
+                {routeRecords.map((record) => (
+                  <tr
+                    key={record.id}
+                    id={`record-row-${record.id}`}
+                    className={`${
+                      needsManualAnnotation(record)
+                        ? "bg-rose-50/70"
+                        : isCrossImageMergedRow(record)
+                          ? "bg-violet-50/60 odd:bg-violet-50/50 even:bg-violet-50/60"
+                          : "odd:bg-white even:bg-slate-50"
+                    } ${
+                      activePopupRecordId === record.id
+                        ? "relative ring-2 ring-blue-400 ring-inset bg-blue-50/80"
+                        : ""
+                    }`}
+                  >
+                    <td className="border-b border-slate-200 px-3 py-2 align-top text-slate-600">
+                      <div className="max-w-56 whitespace-pre-wrap break-words">{record.imageName}</div>
+                      {isCrossImageMergedRow(record) ? (
+                        <div className="mt-1 inline-flex max-w-full flex-wrap items-center gap-1">
+                          <span className="inline-flex rounded-full bg-violet-100 px-2 py-0.5 text-xs font-medium text-violet-800">
+                            {t("home.mergedCross")}
+                          </span>
+                          <span className="text-xs text-violet-700">
+                            {t("home.mergedSources", { n: mergedSourceImageCount(record) })}
+                          </span>
+                        </div>
+                      ) : null}
+                      {recordNeedsReviewBadge(record) ? (
+                        <div className="mt-1 inline-flex rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-700">
+                          {t("home.pendingReview")}
+                        </div>
+                      ) : null}
+                      {isRecordConfirmedCorrect(record) ? (
+                        <div className="mt-1 inline-flex rounded-full bg-emerald-100 px-2 py-0.5 text-xs text-emerald-700">
+                          {t("home.confirmed")}
+                        </div>
+                      ) : null}
+                      {getConsistencyRatio(record) ? (
+                        <div
+                          className={`mt-1 inline-flex rounded-full px-2 py-0.5 text-xs ${
+                            hasConsistencyMismatch(record)
+                              ? "bg-rose-100 text-rose-700"
+                              : "bg-emerald-100 text-emerald-700"
+                          }`}
+                        >
+                          {t("home.consistency", { ratio: getConsistencyRatio(record) ?? "" })}
+                        </div>
+                      ) : null}
+                      {hasTotalSourceMismatch(record) ? (
+                        <div className="mt-1 inline-flex rounded-full bg-rose-100 px-2 py-0.5 text-xs text-rose-700">
+                          {t("home.totalSourceBad")}
+                        </div>
+                      ) : null}
+                      {getRecordIssues(record).length ? (
+                        <div className="mt-2">
+                          <button
+                            className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-medium text-amber-700 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-60"
+                            onClick={() => retryRecord(record)}
+                            disabled={retryingKeys.includes(record.id)}
+                          >
+                            {retryingKeys.includes(record.id) ? t("home.retrying") : t("home.retryExtract")}
+                          </button>
+                        </div>
+                      ) : null}
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        <button
+                          className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100"
+                          onClick={(event) => openRecordImage(record, event.currentTarget)}
+                        >
+                          {t("home.viewImage")}
+                        </button>
+                        <button
+                          className={`rounded-lg px-3 py-1.5 text-xs font-medium ${
+                            isRecordConfirmedCorrect(record)
+                              ? "border border-emerald-300 bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
+                              : "border border-emerald-300 bg-white text-emerald-700 hover:bg-emerald-50"
+                          }`}
+                          onClick={() => toggleRecordConfirmedCorrect(record)}
+                        >
+                          {isRecordConfirmedCorrect(record) ? t("home.unconfirm") : t("home.markCorrect")}
+                        </button>
+                        {needsManualAnnotation(record) ? (
+                          <button
+                            className="rounded-lg border border-blue-300 bg-blue-50 px-3 py-1.5 text-xs font-medium text-blue-700 hover:bg-blue-100"
+                            onClick={(event) => void openAnnotationPanel(record, event.currentTarget)}
+                          >
+                            {t("home.openAnnotation")}
+                          </button>
+                        ) : null}
+                        <button
+                          className="rounded-lg border border-rose-300 bg-rose-50 px-3 py-1.5 text-xs font-medium text-rose-700 hover:bg-rose-100"
+                          onClick={() => deleteRecord(record)}
+                        >
+                          {t("home.deleteRow")}
+                        </button>
+                      </div>
+                    </td>
+                    {activeTableFields.map((column) => (
+                      <td key={column.id} className="border-b border-slate-200 px-2 py-2 align-top">
+                        <input
+                          type={column.type === "number" ? "number" : "text"}
+                          value={String(getRecordFieldValue(record, column) ?? "")}
+                          onChange={(event) => updateRecord(record.id, column, event.target.value)}
+                          className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 outline-none focus:border-slate-500"
+                        />
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </Fragment>
+            ))
+          ) : (
+            <tr>
+              <td colSpan={activeTableFields.length + 1} className="px-4 py-16 text-center text-slate-500">
+                {routeFilter ? t("home.emptyFilter") : t("home.emptyNoData")}
+              </td>
+          </tr>
+        )}
+      </tbody>
+    </table>
+  );
+
   const nLoc = locale === "en" ? "en-US" : "zh-CN";
 
   return (
-    <main className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[var(--background)] px-3 py-6 text-[var(--foreground)]">
-      <div className="mx-auto flex h-full min-h-0 w-full max-w-[1600px] flex-col gap-6">
-        <header className="shrink-0 border-b border-[var(--border)] pb-6">
-          <div className="flex flex-wrap items-center justify-between gap-3 text-sm">
-            <Link href="/forms" className="text-[var(--muted-foreground)] hover:text-[var(--foreground)]">
-              {t("nav.backToPool")}
-            </Link>
+    <main className="flex min-h-0 flex-1 flex-col bg-[var(--background)] px-3 py-6 text-[var(--foreground)]">
+      <div className="mx-auto flex min-h-0 w-full max-w-[1600px] flex-1 flex-col gap-6">
+        <header className="shrink-0 pb-2">
+          <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex items-center gap-4">
-              <button
-                type="button"
-                className="text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
-                onClick={openFieldManager}
-              >
-                {t("home.tableFields")}
-              </button>
               <Link
-                href={buildFormTrainingHref(currentFormId)}
-                className="text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
+                href="/forms"
+                className="inline-flex items-center justify-center rounded-md border border-[var(--border)] bg-[var(--background)] px-3 py-1.5 text-sm font-medium hover:bg-[var(--accent-muted)]"
               >
-                {t("home.training")}
+                {t("nav.backToPool")}
               </Link>
+              <div className="h-5 w-px bg-[var(--border)]" />
+              <div className="flex items-center rounded-lg bg-slate-200/60 p-1">
+                <div className="rounded-md bg-white px-4 py-1.5 text-sm font-medium text-slate-900 shadow-sm">
+                  {t("home.title")}
+                </div>
+                <Link
+                  href={buildFormTrainingHref(currentFormId)}
+                  className="rounded-md px-4 py-1.5 text-sm font-medium text-slate-500 hover:text-slate-900"
+                >
+                  {t("home.training")}
+                </Link>
+              </div>
+              <p className="hidden text-xs text-[var(--muted-foreground)] sm:block">
+                {t("home.statsLine", {
+                  primary: primaryModelName,
+                  review: reviewModelName,
+                  samples: trainingExamplesLoaded,
+                  images: trainingStatus?.totalImages ?? 0,
+                })}
+              </p>
             </div>
           </div>
-          <h1 className="mt-4 text-xl font-medium tracking-tight">{t("home.title")}</h1>
-          <p className="mt-1 max-w-2xl text-sm text-[var(--muted-foreground)]">{t("home.subtitle")}</p>
-          <p className="mt-2 text-xs text-[var(--muted-foreground)]">
-            {t("home.statsLine", {
-              primary: primaryModelName,
-              review: reviewModelName,
-              samples: trainingExamplesLoaded,
-              images: trainingStatus?.totalImages ?? 0,
-            })}
-          </p>
         </header>
 
         {isFieldManagerOpen ? (
@@ -1707,18 +1979,22 @@ function HomeContent() {
           </div>
         ) : null}
 
-        <section className="flex min-h-0 flex-1 flex-col gap-6 overflow-hidden lg:flex-row lg:items-stretch">
+        <section className="flex min-h-0 flex-1 flex-col gap-4 lg:flex-row lg:items-stretch lg:gap-0">
           <div
             ref={uploadPanelRef}
-            className="flex min-h-0 w-full min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--surface)] lg:max-w-[380px] lg:flex-none lg:basis-[min(100%,380px)]"
+            className="flex w-full min-h-0 min-w-0 flex-col overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--surface)] lg:shrink-0"
+            style={
+              isDesktopLayout
+                ? { width: uploadPanelWidthPx, maxWidth: "min(100%, 90vw)" }
+                : undefined
+            }
           >
             <div className="shrink-0 border-b border-[var(--border)] px-4 py-3">
               <h2 className="text-sm font-medium">{t("home.uploadTitle")}</h2>
               <p className="mt-0.5 text-xs text-[var(--muted-foreground)]">{t("upload.workspaceHelper")}</p>
             </div>
 
-            <div className="min-h-0 flex-1 overflow-y-auto">
-              <div className="flex flex-col gap-4 p-4">
+            <div className="flex flex-col gap-4 p-4 pb-3">
               <label
                 className={`flex min-h-[140px] cursor-pointer flex-col items-center justify-center rounded-lg border border-dashed px-3 py-6 text-center transition ${
                   isDraggingFiles
@@ -1829,39 +2105,49 @@ function HomeContent() {
               {noticeMessage ? (
                 <div className="rounded-lg border border-emerald-200/80 bg-emerald-50/80 px-3 py-2 text-sm text-emerald-900">{noticeMessage}</div>
               ) : null}
+            </div>
 
-              <div className="rounded-lg border border-[var(--border)]">
-                  {uploads.length ? (
-                    <ul className="divide-y divide-[var(--border)]">
-                      {uploads.map((upload) => (
-                        <li key={upload.id}>
-                          <button
-                            className={`flex w-full items-center gap-3 px-3 py-2 text-left text-sm transition-colors ${
-                              selectedUpload?.id === upload.id ? "bg-[var(--accent-muted)]" : "hover:bg-[var(--background)]"
-                            }`}
-                            onClick={(e) => handleImageClick(upload, e)}
-                          >
-                            <div className="relative h-11 w-11 shrink-0 overflow-hidden rounded border border-[var(--border)] bg-[var(--background)]">
-                              <Image src={upload.previewUrl} alt={upload.file.name} className="object-cover" fill unoptimized />
+            <div className="border-t border-[var(--border)] px-2 pb-2 pt-1">
+              <div className="max-h-[min(50vh,420px)] overflow-y-auto rounded-lg border border-[var(--border)] bg-[var(--background)]">
+                {uploads.length ? (
+                  <ul className="divide-y divide-[var(--border)]">
+                    {uploads.map((upload) => (
+                      <li key={upload.id}>
+                        <button
+                          type="button"
+                          className={`flex w-full items-center gap-3 px-3 py-2 text-left text-sm transition-colors ${
+                            selectedUpload?.id === upload.id ? "bg-[var(--accent-muted)]" : "hover:bg-[var(--background)]"
+                          }`}
+                          onClick={(e) => handleImageClick(upload, e)}
+                        >
+                          <div className="relative h-11 w-11 shrink-0 overflow-hidden rounded border border-[var(--border)] bg-[var(--background)]">
+                            <Image src={upload.previewUrl} alt={upload.file.name} className="object-cover" fill unoptimized />
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <div className="truncate font-medium">{upload.file.name}</div>
+                            <div className="mt-0.5 text-xs text-[var(--muted-foreground)]">
+                              {(upload.file.size / 1024).toFixed(1)} KB
                             </div>
-                            <div className="min-w-0 flex-1">
-                              <div className="truncate font-medium">{upload.file.name}</div>
-                              <div className="mt-0.5 text-xs text-[var(--muted-foreground)]">
-                                {(upload.file.size / 1024).toFixed(1)} KB
-                              </div>
-                            </div>
-                          </button>
-                        </li>
-                      ))}
-                    </ul>
-                  ) : (
-                    <div className="px-4 py-10 text-center text-sm text-[var(--muted-foreground)]">
-                      {t("home.uploadQueueEmpty")}
-                    </div>
-                  )}
-              </div>
+                          </div>
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <div className="px-4 py-10 text-center text-sm text-[var(--muted-foreground)]">{t("home.uploadQueueEmpty")}</div>
+                )}
               </div>
             </div>
+          </div>
+
+          <div
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize workspace columns"
+            className="relative hidden w-3 shrink-0 cursor-col-resize select-none self-stretch lg:block"
+            onPointerDown={beginWorkspaceColumnResize}
+          >
+            <div className="absolute inset-y-6 left-1/2 w-px -translate-x-1/2 bg-[var(--border)] hover:bg-blue-500" />
           </div>
 
           <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--surface)]">
@@ -1943,12 +2229,6 @@ function HomeContent() {
                 ) : null}
                 <div className="flex flex-wrap gap-2">
                   <button
-                    className="rounded-md border border-[var(--border)] px-3 py-1.5 text-sm hover:bg-[var(--background)]"
-                    onClick={openFieldManager}
-                  >
-                    {t("home.tableFields")}
-                  </button>
-                  <button
                     className="rounded-md border border-[var(--border)] px-3 py-1.5 text-sm hover:bg-[var(--background)] disabled:cursor-not-allowed disabled:opacity-40"
                     onClick={() => void retryAllReviewRecords()}
                     disabled={!reviewRecords.length || isExtracting || isRetryingReviewAll}
@@ -1976,246 +2256,125 @@ function HomeContent() {
             </div>
 
             {visibleIssues.length ? (
-              <div className="shrink-0 border-b border-[var(--border)] bg-[var(--background)] px-4 py-3">
-                <div className="mb-1.5 text-xs font-medium text-[var(--muted-foreground)]">{t("home.reminders")}</div>
-                <div className="max-h-32 space-y-1.5 overflow-auto text-sm">
-                  {visibleIssues.map((issue, index) => (
-                    <div
-                      key={`${issue.imageName}-${issue.route || "none"}-${index}`}
-                      className={`rounded-md px-2 py-1.5 ${issue.level === "error" ? "bg-red-50 text-red-800" : "bg-amber-50 text-amber-900"}`}
-                    >
-                      <span className="font-medium">{issue.imageName}</span>
-                      {issue.route ? ` / ${issue.route}` : ""}
-                      {`：${issue.message}`}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ) : null}
-
-            <div className="min-h-0 flex-1 overflow-auto">
-              <table className="min-w-full border-separate border-spacing-0 text-sm">
-                <thead className="sticky top-0 z-10 border-b border-[var(--border)] bg-[var(--background)] text-[var(--foreground)]">
-                  <tr>
-                    <th className="px-3 py-2 text-left text-xs font-medium text-[var(--muted-foreground)]">
-                      {t("home.sourceCol")}
-                    </th>
-                    {activeTableFields.map((column) => (
-                      <th key={column.id} className="px-3 py-2 text-left text-xs font-medium text-[var(--muted-foreground)]">
-                        {column.label}
-                      </th>
+              <div
+                ref={splitResultsRef}
+                className="flex min-h-0 flex-1 flex-col overflow-hidden"
+              >
+                <div
+                  className="flex min-h-0 shrink-0 flex-col border-b border-[var(--border)] bg-[var(--background)] px-4 pt-3"
+                  style={{ height: remindersPanelHeightPx }}
+                >
+                  <div className="mb-1.5 shrink-0 text-xs font-medium text-[var(--muted-foreground)]">
+                    {t("home.reminders")}
+                  </div>
+                  <div className="min-h-0 flex-1 space-y-1.5 overflow-auto pb-3 text-sm">
+                    {visibleIssues.map((issue, index) => (
+                      <div
+                        key={`${issue.imageName}-${issue.route || "none"}-${index}`}
+                        className={`rounded-md px-2 py-1.5 ${issue.level === "error" ? "bg-red-50 text-red-800" : "bg-amber-50 text-amber-900"}`}
+                      >
+                        <span className="font-medium">{issue.imageName}</span>
+                        {issue.route ? ` / ${issue.route}` : ""}
+                        {`：${issue.message}`}
+                      </div>
                     ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {filteredRecordsResult.records.length ? (
-                    groupedRecords.map(([route, routeRecords]) => (
-                      <Fragment key={route}>
-                        {routeFieldActive ? (
-                          <tr className="bg-slate-200">
-                            <td colSpan={activeTableFields.length + 1} className="border-b border-slate-300 px-3 py-2 text-left font-semibold text-slate-800">
-                              {t("home.groupRoute", {
-                                route: route === UNGROUPED_ROUTE_KEY ? t("home.ungrouped") : route,
-                                n: routeRecords.length,
-                              })}
-                            </td>
-                          </tr>
-                        ) : null}
-                        {routeRecords.map((record) => (
-                          <tr
-                            key={record.id}
-                            id={`record-row-${record.id}`}
-                            className={`${
-                              needsManualAnnotation(record)
-                                ? "bg-rose-50/70"
-                                : isCrossImageMergedRow(record)
-                                  ? "bg-violet-50/60 odd:bg-violet-50/50 even:bg-violet-50/60"
-                                  : "odd:bg-white even:bg-slate-50"
-                            } ${
-                              activePopupRecordId === record.id
-                                ? "relative ring-2 ring-blue-400 ring-inset bg-blue-50/80"
-                                : ""
-                            }`}
-                          >
-                            <td className="border-b border-slate-200 px-3 py-2 align-top text-slate-600">
-                              <div className="max-w-56 whitespace-pre-wrap break-words">{record.imageName}</div>
-                              {isCrossImageMergedRow(record) ? (
-                                <div className="mt-1 inline-flex max-w-full flex-wrap items-center gap-1">
-                                  <span className="inline-flex rounded-full bg-violet-100 px-2 py-0.5 text-xs font-medium text-violet-800">
-                                    {t("home.mergedCross")}
-                                  </span>
-                                  <span className="text-xs text-violet-700">
-                                    {t("home.mergedSources", { n: mergedSourceImageCount(record) })}
-                                  </span>
-                                </div>
-                              ) : null}
-                              {recordNeedsReviewBadge(record) ? (
-                                <div className="mt-1 inline-flex rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-700">
-                                  {t("home.pendingReview")}
-                                </div>
-                              ) : null}
-                              {isRecordConfirmedCorrect(record) ? (
-                                <div className="mt-1 inline-flex rounded-full bg-emerald-100 px-2 py-0.5 text-xs text-emerald-700">
-                                  {t("home.confirmed")}
-                                </div>
-                              ) : null}
-                              {getConsistencyRatio(record) ? (
-                                <div
-                                  className={`mt-1 inline-flex rounded-full px-2 py-0.5 text-xs ${
-                                    hasConsistencyMismatch(record)
-                                      ? "bg-rose-100 text-rose-700"
-                                      : "bg-emerald-100 text-emerald-700"
-                                  }`}
-                                >
-                                  {t("home.consistency", { ratio: getConsistencyRatio(record) ?? "" })}
-                                </div>
-                              ) : null}
-                              {hasTotalSourceMismatch(record) ? (
-                                <div className="mt-1 inline-flex rounded-full bg-rose-100 px-2 py-0.5 text-xs text-rose-700">
-                                  {t("home.totalSourceBad")}
-                                </div>
-                              ) : null}
-                              {getRecordIssues(record).length ? (
-                                <div className="mt-2">
-                                  <button
-                                    className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-medium text-amber-700 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-60"
-                                    onClick={() => retryRecord(record)}
-                                    disabled={retryingKeys.includes(record.id)}
-                                  >
-                                    {retryingKeys.includes(record.id) ? t("home.retrying") : t("home.retryExtract")}
-                                  </button>
-                                </div>
-                              ) : null}
-                              <div className="mt-2 flex flex-wrap gap-2">
-                                <button
-                                  className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100"
-                                  onClick={(event) => openRecordImage(record, event.currentTarget)}
-                                >
-                                  {t("home.viewImage")}
-                                </button>
-                                <button
-                                  className={`rounded-lg px-3 py-1.5 text-xs font-medium ${
-                                    isRecordConfirmedCorrect(record)
-                                      ? "border border-emerald-300 bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
-                                      : "border border-emerald-300 bg-white text-emerald-700 hover:bg-emerald-50"
-                                  }`}
-                                  onClick={() => toggleRecordConfirmedCorrect(record)}
-                                >
-                                  {isRecordConfirmedCorrect(record) ? t("home.unconfirm") : t("home.markCorrect")}
-                                </button>
-                                {needsManualAnnotation(record) ? (
-                                  <button
-                                    className="rounded-lg border border-blue-300 bg-blue-50 px-3 py-1.5 text-xs font-medium text-blue-700 hover:bg-blue-100"
-                                    onClick={(event) => void openAnnotationPanel(record, event.currentTarget)}
-                                  >
-                                    {t("home.openAnnotation")}
-                                  </button>
-                                ) : null}
-                                <button
-                                  className="rounded-lg border border-rose-300 bg-rose-50 px-3 py-1.5 text-xs font-medium text-rose-700 hover:bg-rose-100"
-                                  onClick={() => deleteRecord(record)}
-                                >
-                                  {t("home.deleteRow")}
-                                </button>
-                              </div>
-                            </td>
-                            {activeTableFields.map((column) => (
-                              <td key={column.id} className="border-b border-slate-200 px-2 py-2 align-top">
-                                <input
-                                  type={column.type === "number" ? "number" : "text"}
-                                  value={String(getRecordFieldValue(record, column) ?? "")}
-                                  onChange={(event) => updateRecord(record.id, column, event.target.value)}
-                                  className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 outline-none focus:border-slate-500"
-                                />
-                              </td>
-                            ))}
-                          </tr>
-                        ))}
-                      </Fragment>
-                    ))
-                  ) : (
-                    <tr>
-                      <td colSpan={activeTableFields.length + 1} className="px-4 py-16 text-center text-slate-500">
-                        {routeFilter ? t("home.emptyFilter") : t("home.emptyNoData")}
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
+                  </div>
+                </div>
+                <div
+                  role="separator"
+                  aria-orientation="horizontal"
+                  aria-label={t("home.resizeRemindersPanel")}
+                  className="relative z-10 h-3 w-full shrink-0 cursor-row-resize touch-none select-none"
+                  onPointerDown={beginRemindersTableResize}
+                >
+                  <div className="pointer-events-none absolute inset-x-4 top-1/2 h-0.5 -translate-y-1/2 rounded-full bg-[var(--border)] group-hover:bg-blue-500" />
+                </div>
+                <div className="min-h-0 min-w-0 flex-1 overflow-auto bg-slate-50">{renderResultsTable()}</div>
+              </div>
+            ) : (
+              <div className="min-h-0 min-w-0 flex-1 overflow-auto bg-slate-50">{renderResultsTable()}</div>
+            )}
+
           </div>
         </section>
 
         {viewerPopupPosition && (viewerGallery.length > 0 || viewerLoadError || viewerGalleryLoading) ? (
           <div
-            className="fixed z-50 max-h-[85vh] overflow-hidden rounded-3xl border border-slate-200 bg-white p-5 shadow-2xl"
+            className="fixed z-50 flex max-h-[85vh] flex-col overflow-hidden rounded-3xl border border-slate-200 bg-white p-5 shadow-2xl"
             style={{
               top: viewerPopupPosition.top,
               left: viewerPopupPosition.left,
               width: viewerPopupPosition.width,
             }}
           >
-            <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <h2 className="text-lg font-semibold">{t("home.viewerTitle")}</h2>
-                <p className="mt-1 text-sm text-slate-500">
-                  {viewerGallery.length > 1
-                    ? t("home.viewerMulti", { n: viewerGallery.length })
-                    : t("home.viewerSingle")}
-                </p>
-              </div>
-              <button
-                className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-medium hover:bg-slate-50"
-                onClick={closeViewerPopup}
-              >
-                {t("home.closeWindow")}
-              </button>
-            </div>
-
-            <div className="mb-3 flex flex-wrap items-center gap-2">
-              {viewingRecord ? (
-                <span className="rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-700">
-                  {viewingRecord.route} / {viewingRecord.driver}
-                </span>
-              ) : (
-                <span className="rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-700">{t("home.noRecordYet")}</span>
-              )}
-              <button
-                className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100"
-                onClick={() => zoomViewer(0.25)}
-              >
-                {t("annotation.zoomIn")}
-              </button>
-              <button
-                className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100"
-                onClick={() => zoomViewer(-0.25)}
-              >
-                {t("annotation.zoomOut")}
-              </button>
-              <button
-                className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100"
-                onClick={resetViewer}
-              >
-                {t("home.viewerReset")}
-              </button>
-              {viewingRecord && (
+            <div className="shrink-0">
+              <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-lg font-semibold">{t("home.viewerTitle")}</h2>
+                  <p className="mt-1 text-sm text-slate-500">
+                    {viewerGallery.length > 1
+                      ? t("home.viewerMulti", { n: viewerGallery.length })
+                      : t("home.viewerSingle")}
+                  </p>
+                </div>
                 <button
-                  className="rounded-lg border border-blue-300 bg-blue-50 px-3 py-1.5 text-xs font-medium text-blue-700 hover:bg-blue-100"
-                  onClick={(event) => void openAnnotationPanel(viewingRecord, event.currentTarget)}
+                  type="button"
+                  className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-medium hover:bg-slate-50"
+                  onClick={closeViewerPopup}
                 >
-                  {t("home.gotoAnnotation")}
+                  {t("home.closeWindow")}
                 </button>
-              )}
-            </div>
-
-            {viewerLoadError && viewerGallery.length > 0 ? (
-              <div className="mb-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
-                {t("home.partialLoad", { detail: viewerLoadError })}
               </div>
-            ) : null}
+
+              <div className="mb-3 flex flex-wrap items-center gap-2">
+                {viewingRecord ? (
+                  <span className="rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-700">
+                    {viewingRecord.route} / {viewingRecord.driver}
+                  </span>
+                ) : (
+                  <span className="rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-700">{t("home.noRecordYet")}</span>
+                )}
+                <button
+                  type="button"
+                  className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100"
+                  onClick={() => zoomViewer(0.25)}
+                >
+                  {t("annotation.zoomIn")}
+                </button>
+                <button
+                  type="button"
+                  className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100"
+                  onClick={() => zoomViewer(-0.25)}
+                >
+                  {t("annotation.zoomOut")}
+                </button>
+                <button
+                  type="button"
+                  className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100"
+                  onClick={resetViewer}
+                >
+                  {t("home.viewerReset")}
+                </button>
+                {viewingRecord && (
+                  <button
+                    type="button"
+                    className="rounded-lg border border-blue-300 bg-blue-50 px-3 py-1.5 text-xs font-medium text-blue-700 hover:bg-blue-100"
+                    onClick={(event) => void openAnnotationPanel(viewingRecord, event.currentTarget)}
+                  >
+                    {t("home.gotoAnnotation")}
+                  </button>
+                )}
+              </div>
+
+              {viewerLoadError && viewerGallery.length > 0 ? (
+                <div className="mb-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                  {t("home.partialLoad", { detail: viewerLoadError })}
+                </div>
+              ) : null}
+            </div>
 
             <div
-              className="relative h-[520px] overflow-auto rounded-2xl border border-slate-200 bg-slate-50"
+              className="relative min-h-[200px] flex-1 overflow-auto rounded-2xl border border-slate-200 bg-slate-50"
               onMouseDown={beginViewerDrag}
               onMouseMove={updateViewerDrag}
               onMouseUp={endViewerDrag}

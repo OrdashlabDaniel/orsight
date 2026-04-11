@@ -524,64 +524,76 @@ function TrainingModeContent() {
   }
 
   return (
-    <main className="flex min-h-0 flex-1 flex-col overflow-hidden bg-slate-100 px-4 py-4 text-slate-900">
-      <div className="mx-auto flex h-full min-h-0 w-full max-w-[1800px] flex-col gap-4">
-        <header className="shrink-0 rounded-3xl border border-slate-200 bg-white px-6 py-5 shadow-sm">
-          <div className="mb-3 flex flex-wrap items-center justify-between gap-2 text-sm">
-            <Link href="/forms" className="font-medium text-blue-600 hover:underline">
-              {t("training.backForms")}
-            </Link>
-            <Link
-              href={buildFormFillHref(currentFormId)}
-              className="font-medium text-slate-700 hover:text-slate-900 hover:underline"
-            >
-              {t("training.switchFill")}
-            </Link>
-          </div>
-
-          <h1 className="text-2xl font-semibold">{t("training.title")}</h1>
-          <p className="mt-2 text-sm text-slate-600">{t("training.intro")}</p>
-          {setupFieldDefinition ? (
-            <div className="mt-4 rounded-2xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-800">
-              <div className="font-medium">{t("training.setupBanner", { label: setupFieldDefinition.label })}</div>
-              <div className="mt-1">{t("training.setupHint", { label: setupFieldDefinition.label })}</div>
+    <main className="flex min-h-0 flex-1 flex-col bg-[var(--background)] px-3 py-6 text-[var(--foreground)]">
+      <div className="mx-auto flex min-h-0 w-full max-w-[1600px] flex-1 flex-col gap-6">
+        <header className="shrink-0 pb-2">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-4">
+              <Link
+                href="/forms"
+                className="inline-flex items-center justify-center rounded-md border border-[var(--border)] bg-[var(--background)] px-3 py-1.5 text-sm font-medium hover:bg-[var(--accent-muted)]"
+              >
+                {t("nav.backToPool")}
+              </Link>
+              <div className="h-5 w-px bg-[var(--border)]" />
+              <div className="flex items-center rounded-lg bg-slate-200/60 p-1">
+                <Link
+                  href={buildFormFillHref(currentFormId)}
+                  className="rounded-md px-4 py-1.5 text-sm font-medium text-slate-500 hover:text-slate-900"
+                >
+                  {t("home.title")}
+                </Link>
+                <div className="rounded-md bg-white px-4 py-1.5 text-sm font-medium text-slate-900 shadow-sm">
+                  {t("home.training")}
+                </div>
+              </div>
+              <p className="hidden text-xs text-[var(--muted-foreground)] sm:block">
+                {t("training.intro")}
+              </p>
             </div>
-          ) : null}
-          <div className="mt-3 flex flex-wrap gap-2 text-xs">
-            {trainingStatus ? (
-              <>
-                <span className="rounded-full bg-slate-100 px-3 py-1 text-slate-700">
-                  {t("training.statImages", { n: trainingStatus.totalImages })}
-                </span>
-                <span className="rounded-full bg-emerald-100 px-3 py-1 text-emerald-700">
-                  {t("training.statLabeled", { n: trainingStatus.labeledImages })}
-                </span>
-                <span className="rounded-full bg-amber-100 px-3 py-1 text-amber-700">
-                  {t("training.statUnlabeled", { n: trainingStatus.unlabeledImages })}
-                </span>
-              </>
-            ) : null}
           </div>
         </header>
 
+        {setupFieldDefinition ? (
+          <div className="shrink-0 rounded-2xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-800 shadow-sm">
+            <div className="font-medium">{t("training.setupBanner", { label: setupFieldDefinition.label })}</div>
+            <div className="mt-1">{t("training.setupHint", { label: setupFieldDefinition.label })}</div>
+          </div>
+        ) : null}
+
         <section className="flex min-h-0 flex-1 flex-col gap-4 overflow-hidden xl:flex-row xl:items-stretch">
           <div className="flex min-h-0 w-full min-w-0 flex-1 flex-col gap-4 overflow-hidden xl:max-w-[420px] xl:flex-none xl:basis-[min(100%,420px)]">
-            <div className="flex min-h-0 flex-[0.85] flex-col overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
-              <div className="shrink-0 border-b border-slate-200 px-5 py-4">
-                <h2 className="text-lg font-semibold">{t("training.poolHelpTitle")}</h2>
-                <p className="mt-1 text-sm text-slate-500">{t("training.poolHelp1")}</p>
+            {trainingStatus ? (
+              <div className="flex shrink-0 flex-col overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
+                <div className="px-5 py-4">
+                  <h2 className="text-sm font-medium text-slate-500">训练池状态</h2>
+                  <div className="mt-3 flex flex-col gap-2.5 text-sm font-medium text-slate-700">
+                    <div className="flex items-center justify-between">
+                      <span>训练图片</span>
+                      <span className="text-slate-900">{trainingStatus.totalImages}</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <div className="h-2 w-2 rounded-full bg-emerald-500" />
+                        <span>已标注</span>
+                      </div>
+                      <span className="text-emerald-700">{trainingStatus.labeledImages}</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <div className="h-2 w-2 rounded-full bg-amber-500" />
+                        <span>未标注</span>
+                      </div>
+                      <span className="text-amber-700">{trainingStatus.unlabeledImages}</span>
+                    </div>
+                  </div>
+                </div>
               </div>
-              <div className="min-h-0 flex-1 overflow-y-auto space-y-3 p-5 text-sm leading-6 text-slate-600">
-                <p>{t("training.poolHelp2")}</p>
-                <p>{t("training.poolHelp3")}</p>
-                <p>{t("training.poolHelp4")}</p>
-                <p>{t("training.poolHelp5")}</p>
-              </div>
-            </div>
+            ) : null}
 
             <div
               ref={uploadPanelRef}
-              className="flex min-h-0 flex-[1.15] flex-col overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm"
+              className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm"
             >
               <div className="shrink-0 border-b border-slate-200 px-5 py-4">
                 <h2 className="text-lg font-semibold">{t("training.uploadTitle")}</h2>
