@@ -5,6 +5,7 @@ import { getFormIdFromRequest } from "@/lib/form-request";
 import { getActiveTableFields, type TableFieldDefinition } from "@/lib/table-fields";
 import { loadTableFields } from "@/lib/table-fields-store";
 import {
+  isAgentContextImageName,
   saveTrainingImageDataUrl,
   type FieldAggregation,
   type TrainingAnnotationMode,
@@ -237,6 +238,9 @@ export async function POST(request: Request) {
     if (!imageName) {
       return NextResponse.json({ error: "Missing imageName." }, { status: 400 });
     }
+    if (isAgentContextImageName(imageName)) {
+      return NextResponse.json({ error: "识别管家上下文图片不能保存到训练池。" }, { status: 400 });
+    }
 
     const tableFields = getActiveTableFields(await loadTableFields(formId));
     const activeFieldIds = new Set(tableFields.map((field) => field.id));
@@ -274,7 +278,7 @@ export async function POST(request: Request) {
         total: hasField("total") ? normalizeNumber(output?.total) ?? normalizeNumber(firstValue("total")) ?? 0 : 0,
         totalSourceLabel: hasField("total") ? normalizeText(output?.totalSourceLabel) || undefined : undefined,
         unscanned: hasField("unscanned") ? normalizeNumber(output?.unscanned) ?? normalizeNumber(firstValue("unscanned")) ?? 0 : 0,
-        exceptions: hasField("exceptions") ? normalizeNumber(output?.exceptions) ?? normalizeNumber(firstValue("exceptions")) ?? 0 : 0,
+        exceptions: hasField("exceptions") ? normalizeNumber(output?.exceptions) ?? normalizeNumber(firstValue("exceptions")) ?? "" : "",
         waybillStatus:
           hasField("waybillStatus")
             ? normalizeText(output?.waybillStatus) || normalizeText(firstValue("waybillStatus")) || undefined

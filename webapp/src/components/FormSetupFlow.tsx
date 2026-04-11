@@ -62,7 +62,7 @@ type TrainingStatusItem = {
       total: number;
       totalSourceLabel?: string;
       unscanned: number;
-      exceptions: number;
+      exceptions: number | "";
       waybillStatus?: string;
       stationTeam?: string;
       customFieldValues?: Record<string, string | number | "">;
@@ -380,9 +380,17 @@ export function FormSetupFlow({ initialForm }: { initialForm: FormDefinition }) 
     let cancelled = false;
     const pendingNames = imageNames.filter((imageName) => !trainingThumbnailMap[imageName]);
 
-    setTrainingThumbnailMap((current) =>
-      Object.fromEntries(Object.entries(current).filter(([imageName]) => imageNames.includes(imageName))),
-    );
+    setTrainingThumbnailMap((current) => {
+      const next = Object.fromEntries(
+        Object.entries(current).filter(([imageName]) => imageNames.includes(imageName)),
+      );
+      const currentKeys = Object.keys(current);
+      const nextKeys = Object.keys(next);
+      const unchanged =
+        currentKeys.length === nextKeys.length &&
+        currentKeys.every((key) => next[key] === current[key]);
+      return unchanged ? current : next;
+    });
 
     if (!pendingNames.length) {
       return;

@@ -7,6 +7,7 @@ import { getSupabaseAdmin } from "@/lib/supabase";
 import {
   type ExtractionIssue,
   type PodRecord,
+  isMissingFieldAllowedByRecognitionRules,
   isTaskCodeFormatValid,
   isRouteFormatValid,
   isStationTeamCodeNotCourierRoute,
@@ -17,13 +18,18 @@ import {
   validateRecord,
 } from "@/lib/pod";
 import {
+  buildRecognitionRuleCodePromptSection,
   buildEditableRecognitionRulesSection,
   buildVisualReferencePack,
+  extractRecognitionRuleCodeFromWorkingRules,
+  extractRecognitionValidationConfigFromWorkingRules,
   type FieldAggregation,
   getTrainingImageDataUrl,
   loadGlobalRules,
   loadTrainingExamples,
   mergeLegacyIntoAgentThreadIfEmpty,
+  type RecognitionRuleCode,
+  type RecognitionValidationConfig,
   seedWorkingRulesFromLegacy,
   type TrainingBox,
   type TrainingExample,
@@ -73,7 +79,8 @@ const SIMPLE_EXTRACTION_STRICT_APPENDIX = `
 4. unscanned 只能读取“未领取 / 未收”旁边直接对应的数字，绝不能从旁边的“已领 / 应领件数 / 实领件数”里截取前缀或后缀。
 5. 如果图上未收数量是 1，就只能写 1，不能把附近的 150 / 151 误拼成 15。
 6. 对每个字段都先看标签，再看标签直接对应的值，不要按位置猜。
-7. 如果当前图片是网页输入表格/系统列表，而画面里没有明确的“站点车队/站点/车队”列或顶部站点标签，stationTeam 必须留空；绝不能从 route、线路区域名称或其他列猜一个 stationTeam。`;
+7. 如果当前图片是网页输入表格/系统列表，而画面里没有明确的“站点车队/站点/车队”列或顶部站点标签，stationTeam 必须留空；绝不能从 route、线路区域名称或其他列猜一个 stationTeam。
+8. exceptions 不是默认 0 字段。只有当你明确看到“错扫/错分/误扫”列或标签，且其值确实为 0 时，才允许返回 0；如果当前图根本没有这类列/标签，必须返回 null/空。`;
 
 const TASK_CODE_RECOVERY_APPENDIX = `
 
@@ -96,10 +103,257 @@ type ExtractVisionContext = {
   visualPack: Awaited<ReturnType<typeof buildVisualReferencePack>>;
   imageGuidance: Array<{ example: TrainingExample; fingerprint: number[] }>;
   tableFields: TableFieldDefinition[];
+  activeFieldIds: ReadonlySet<string>;
+  activeBuiltInFieldIds: ReadonlySet<string>;
   editableRecognitionRulesText: string;
+  recognitionRuleCode: RecognitionRuleCode;
+  recognitionValidationConfig: RecognitionValidationConfig;
   currentImageVisualPacks: WeakMap<File, Promise<Awaited<ReturnType<typeof buildVisualReferencePack>>>>;
   currentImageSimilarExamples: WeakMap<File, Promise<TrainingExample[]>>;
 };
+
+function activeBuiltInIdsFromTableFields(tableFields: TableFieldDefinition[]): ReadonlySet<string> {
+  return new Set(
+    tableFields.filter((field) => field.builtIn && isBuiltInFieldId(field.id)).map((field) => field.id),
+  );
+}
+
+function buildPrimaryExtractionPrompt(
+  tableFields: TableFieldDefinition[],
+  activeBuiltInFieldIds: ReadonlySet<string>,
+  recognitionRuleCode?: RecognitionRuleCode | null,
+): string {
+  const activeBuiltIns = tableFields.filter((field) => field.builtIn && activeBuiltInFieldIds.has(field.id));
+  const lines = [
+    "你是 OrSight。你会先看到几张人工标注参考图，再看到最后一张当前待识别图片。",
+    "请严格遵守：",
+    "1. 参考图只用于理解界面布局、字段标签和示例，不得抄参考图中的任何数字或文字。",
+    "2. 最终输出只能依据最后一张“当前待识别图片”的可见内容。",
+    "3. 不要猜测；看不清、标签不明确、值和字段对不上时，就留空并把 reviewRequired 设为 true，reviewReason 写清原因。",
+    "4. 如果当前图里存在多个任务或多行记录，请为每个清晰可见的任务输出一条 records。",
+    "5. 只允许填写当前表单已启用的字段；未启用的内置字段必须留空。",
+    "6. imageType 只按当前图片判断：网页输入表格/在线表格返回 WEB_TABLE，签退/POD 列表返回 POD，其他返回 OTHER。",
+  ];
+
+  if (activeBuiltIns.length > 0) {
+    lines.push("", "【当前启用的内置字段】");
+    for (const field of activeBuiltIns) {
+      lines.push(`- ${field.id}（显示名「${field.label}」）`);
+    }
+  } else {
+    lines.push("", "【当前启用的内置字段】无。");
+  }
+
+  if (activeBuiltInFieldIds.has("date")) {
+    lines.push("- date（日期）：只有当前图里明确出现日期时才填写。");
+  }
+  if (activeBuiltInFieldIds.has("route")) {
+    lines.push(
+      "- route（抽查路线）：只填写快递员路线；像 IAH-BAA、IAH-BCE 这类站点车队代码不要填到 route。",
+    );
+  }
+  if (activeBuiltInFieldIds.has("driver")) {
+    lines.push("- driver（抽查司机）：只有当前图里明确出现司机姓名时才填写。");
+  }
+  if (activeBuiltInFieldIds.has("taskCode")) {
+    lines.push("- taskCode（任务编码）：只有看清完整 TASK + 12位数字时才允许填写；看不清就留空。");
+  }
+  if (activeBuiltInFieldIds.has("total")) {
+    lines.push(
+      "- total（运单数量）：只填写与“应领件数 / 应收件数 / 运单数量”等直接对应的值，并把原标签写入 totalSourceLabel。",
+    );
+  }
+  if (activeBuiltInFieldIds.has("unscanned")) {
+    lines.push(
+      "- unscanned（未收数量）：只能读取“未领取 / 未收”旁边直接对应的数字，绝不能从已领、实领、应领件数、任务编码或时间中截取前缀或后缀。",
+    );
+  }
+  if (activeBuiltInFieldIds.has("exceptions")) {
+    lines.push(
+      "- exceptions（错扫数量）：只填写与“错扫 / 错分 / 误扫”直接对应的值；如果当前图根本没有这类列/标签，就留空，不要默认填 0。",
+    );
+  }
+  if (activeBuiltInFieldIds.has("stationTeam")) {
+    lines.push(
+      "- stationTeam（站点车队）：只有当前图顶部或当前行里清晰看到明确站点/车队标签时才填写；WEB_TABLE 看不到明确站点/车队列时必须留空。",
+    );
+  }
+  if (activeBuiltInFieldIds.has("waybillStatus")) {
+    lines.push("- waybillStatus（响应更新状态）：只有当前图里明确显示该状态时才填写；不要从其他字段推断。");
+  }
+
+  const ruleCodePrompt = buildRecognitionRuleCodePromptSection(recognitionRuleCode).trim();
+  if (ruleCodePrompt) {
+    lines.push("", ruleCodePrompt);
+  }
+
+  const customPrompt = buildRecognitionModeDynamicFieldPrompt(tableFields).trim();
+  if (customPrompt) {
+    lines.push("", customPrompt);
+  }
+
+  lines.push(
+    "",
+    "【禁止】",
+    "- 不要把其它表单的 route / driver / taskCode / total / unscanned / exceptions / stationTeam 规则套到当前表单。",
+    "- 如果当前表单没启用某个内置字段，即使画面里出现相似信息，也不要把它塞进未启用的字段。",
+    "",
+    "返回 JSON：",
+    "{",
+    '  "imageType": "POD" | "WEB_TABLE" | "OTHER",',
+    '  "records": []',
+    "}",
+    "不要输出 Markdown，不要额外解释。",
+  );
+
+  return lines.join("\n");
+}
+
+function stripInactiveBuiltInValues(
+  record: PodRecord,
+  activeBuiltInFieldIds: ReadonlySet<string>,
+): PodRecord {
+  const next = { ...record };
+
+  if (!activeBuiltInFieldIds.has("date")) next.date = "";
+  if (!activeBuiltInFieldIds.has("route")) next.route = "";
+  if (!activeBuiltInFieldIds.has("driver")) next.driver = "";
+  if (!activeBuiltInFieldIds.has("taskCode")) next.taskCode = "";
+  if (!activeBuiltInFieldIds.has("total")) {
+    next.total = "" as const;
+    next.totalSourceLabel = "";
+  }
+  if (!activeBuiltInFieldIds.has("unscanned")) next.unscanned = "" as const;
+  if (!activeBuiltInFieldIds.has("exceptions")) next.exceptions = "" as const;
+  if (!activeBuiltInFieldIds.has("waybillStatus")) next.waybillStatus = "";
+  if (!activeBuiltInFieldIds.has("stationTeam")) next.stationTeam = "";
+
+  return next;
+}
+
+function getRecognitionFieldDirective(ruleCode: RecognitionRuleCode, fieldId: string) {
+  return ruleCode.fieldDirectives.find((directive) => directive.fieldId === fieldId);
+}
+
+function detectDateOutputFormatFromExample(exampleValue: string | undefined): string | null {
+  const value = normalizeText(exampleValue);
+  if (!value) return null;
+  if (/^\d{4}\.\d{1,2}\.\d{1,2}$/.test(value)) return "YYYY.MM.DD";
+  if (/^\d{4}-\d{1,2}-\d{1,2}$/.test(value)) return "YYYY-MM-DD";
+  if (/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(value)) return "MM/DD/YYYY";
+  return null;
+}
+
+function parseDateParts(rawValue: string): { year: number; month: number; day: number } | null {
+  const value = rawValue.trim();
+  if (!value) {
+    return null;
+  }
+
+  let match = value.match(/^(\d{4})[./-](\d{1,2})[./-](\d{1,2})$/);
+  if (match) {
+    return {
+      year: Number(match[1]),
+      month: Number(match[2]),
+      day: Number(match[3]),
+    };
+  }
+
+  match = value.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (match) {
+    return {
+      month: Number(match[1]),
+      day: Number(match[2]),
+      year: Number(match[3]),
+    };
+  }
+
+  match = value.match(
+    /^(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(\d{1,2}),?\s+(\d{4})$/i,
+  );
+  if (match) {
+    const monthNames = [
+      "jan",
+      "feb",
+      "mar",
+      "apr",
+      "may",
+      "jun",
+      "jul",
+      "aug",
+      "sep",
+      "oct",
+      "nov",
+      "dec",
+    ];
+    const month = monthNames.findIndex((token) => match?.[1]?.toLowerCase().startsWith(token)) + 1;
+    if (month > 0) {
+      return {
+        month,
+        day: Number(match[2]),
+        year: Number(match[3]),
+      };
+    }
+  }
+
+  return null;
+}
+
+function formatDateWithOutputFormat(
+  parts: { year: number; month: number; day: number },
+  outputFormat: string,
+) {
+  const yyyy = String(parts.year).padStart(4, "0");
+  const mm = String(parts.month).padStart(2, "0");
+  const dd = String(parts.day).padStart(2, "0");
+
+  switch (outputFormat) {
+    case "YYYY.MM.DD":
+      return `${yyyy}.${mm}.${dd}`;
+    case "YYYY-MM-DD":
+      return `${yyyy}-${mm}-${dd}`;
+    case "MM/DD/YYYY":
+      return `${mm}/${dd}/${yyyy}`;
+    default:
+      return `${yyyy}-${mm}-${dd}`;
+  }
+}
+
+function applyRecognitionRuleCodeToRecord(
+  record: PodRecord,
+  ruleCode: RecognitionRuleCode,
+  activeBuiltInFieldIds: ReadonlySet<string>,
+): PodRecord {
+  if (!activeBuiltInFieldIds.has("date") || !record.date) {
+    return record;
+  }
+
+  const dateDirective = getRecognitionFieldDirective(ruleCode, "date");
+  if (!dateDirective) {
+    return record;
+  }
+
+  const outputFormat =
+    dateDirective.outputFormat && dateDirective.outputFormat !== "as_visible"
+      ? dateDirective.outputFormat
+      : detectDateOutputFormatFromExample(dateDirective.exampleValue);
+  if (!outputFormat) {
+    return record;
+  }
+
+  const parts = parseDateParts(record.date);
+  if (!parts) {
+    return record;
+  }
+
+  const formatted = formatDateWithOutputFormat(parts, outputFormat);
+  return formatted && formatted !== record.date
+    ? {
+        ...record,
+        date: formatted,
+      }
+    : record;
+}
 
 async function buildExtractVisionContext(formId: string): Promise<ExtractVisionContext> {
   const [examples, rawTableFields, globalRules] = await Promise.all([
@@ -117,13 +371,20 @@ async function buildExtractVisionContext(formId: string): Promise<ExtractVisionC
     buildTrainingImageGuidance(examples, formId),
   ]);
   const normalizedRules = seedWorkingRulesFromLegacy(mergeLegacyIntoAgentThreadIfEmpty(globalRules));
+  const activeFieldIds = new Set(tableFields.map((field) => field.id));
+  const activeBuiltInFieldIds = activeBuiltInIdsFromTableFields(tableFields);
+  const recognitionRuleCode = extractRecognitionRuleCodeFromWorkingRules(normalizedRules.workingRules);
   return {
     formId,
     examples,
     visualPack,
     imageGuidance,
     tableFields,
+    activeFieldIds,
+    activeBuiltInFieldIds,
     editableRecognitionRulesText: buildEditableRecognitionRulesSection(normalizedRules),
+    recognitionRuleCode,
+    recognitionValidationConfig: extractRecognitionValidationConfigFromWorkingRules(normalizedRules.workingRules),
     currentImageVisualPacks: new WeakMap(),
     currentImageSimilarExamples: new WeakMap(),
   };
@@ -592,7 +853,25 @@ async function runLiveAggregationRefine(
     return { records, collapsed: false };
   }
 
-  const refined = await refinePODFromTrainingExampleBoxes(file, aggregationExample, records, model);
+  const activeBoxes = imageCoordBoxes(aggregationExample).filter((box) => ctx.activeFieldIds.has(box.field));
+  if (activeBoxes.length === 0) {
+    return { records, collapsed: false };
+  }
+
+  const refined = await refinePODFromTrainingExampleBoxes(
+    file,
+    {
+      ...aggregationExample,
+      boxes: activeBoxes,
+      fieldAggregations: Object.fromEntries(
+        Object.entries(aggregationExample.fieldAggregations || {}).filter(([field]) =>
+          ctx.activeFieldIds.has(field),
+        ),
+      ) as Partial<Record<TrainingField, FieldAggregation>>,
+    },
+    records,
+    model,
+  );
   return {
     ...refined,
     collapsed: records.length > 1 && refined.records.length === 1,
@@ -669,19 +948,31 @@ function buildBoxGuidedCropInstructionText(
   ];
 
   boxes.forEach((box, index) => {
-    lines.push(`图${index + 1} → 【${TRAINING_FIELD_CN[box.field]}】（JSON 键名 ${box.field}）`);
+    lines.push(`图${index + 1} → 【${TRAINING_FIELD_CN[box.field] || box.field}】（JSON 键名 ${box.field}）`);
   });
 
   lines.push("", "同字段多张小图时的合并规则：");
   for (const [field, fieldBoxes] of byField) {
     if (fieldBoxes.length <= 1) continue;
     const mode = aggs[field] ?? inferFieldAggregation(field, fieldBoxes.length);
-    lines.push(`- ${field}（${TRAINING_FIELD_CN[field]}）：${describeFieldAggregation(mode)}`);
+    lines.push(`- ${field}（${TRAINING_FIELD_CN[field] || field}）：${describeFieldAggregation(mode)}`);
+  }
+
+  const responseKeys = new Set<string>(["previewNote"]);
+  for (const field of byField.keys()) {
+    if (isBuiltInFieldId(field)) {
+      responseKeys.add(field);
+      if (field === "total") {
+        responseKeys.add("totalSourceLabel");
+      }
+      continue;
+    }
+    responseKeys.add("customFieldValues");
   }
 
   lines.push(
     "",
-    "输出一个 JSON 对象，键可包括：date, route, driver, taskCode, total, totalSourceLabel, unscanned, exceptions, stationTeam, previewNote。",
+    `输出一个 JSON 对象，键可包括：${Array.from(responseKeys).join(", ")}。`,
     "规则：只有当小图里可见标签足以证明字段语义时，才允许输出该字段值；否则输出 null 或省略。",
   );
 
@@ -1446,7 +1737,11 @@ async function callVisionModel(
   const bytes = Buffer.from(await file.arrayBuffer());
   const dataUrl = `data:${file.type || "image/jpeg"};base64,${bytes.toString("base64")}`;
   const visualPack = await buildVisualPackForCurrentImage(file, ctx);
-  const baseText = `${SIMPLE_EXTRACTION_PROMPT}${SIMPLE_EXTRACTION_STRICT_APPENDIX}${TASK_CODE_RECOVERY_APPENDIX}${buildRecognitionModeDynamicFieldPrompt(ctx.tableFields)}${ctx.editableRecognitionRulesText}${visualPack.hintText}`;
+  const baseText = `${buildPrimaryExtractionPrompt(
+    ctx.tableFields,
+    ctx.activeBuiltInFieldIds,
+    ctx.recognitionRuleCode,
+  )}\n${ctx.editableRecognitionRulesText}${visualPack.hintText}`;
 
   const userContent: OpenAIMessageContent[] = [{ type: "text", text: baseText }];
   for (const ref of visualPack.referenceImages) {
@@ -1578,7 +1873,10 @@ function sanitizeStationTeamRecord(record: PodRecord): PodRecord {
       };
 }
 
-function enforceTaskCodeIntegrity(record: PodRecord): PodRecord {
+function enforceTaskCodeIntegrity(
+  record: PodRecord,
+  recognitionValidationConfig?: RecognitionValidationConfig | null,
+): PodRecord {
   const taskCode = normalizeTaskCode(record.taskCode);
   if (!taskCode) {
     return {
@@ -1594,6 +1892,13 @@ function enforceTaskCodeIntegrity(record: PodRecord): PodRecord {
           ...record,
           taskCode,
         };
+  }
+
+  if (isMissingFieldAllowedByRecognitionRules(record, "taskCode", recognitionValidationConfig)) {
+    return {
+      ...record,
+      taskCode: "",
+    };
   }
 
   return {
@@ -1644,22 +1949,43 @@ type RecoveryPlan = {
   missingCustomFields: TableFieldDefinition[];
 };
 
-function collectRecoveryPlan(records: PodRecord[], tableFields: TableFieldDefinition[]): RecoveryPlan[] {
+function collectRecoveryPlan(
+  records: PodRecord[],
+  tableFields: TableFieldDefinition[],
+  recognitionValidationConfig: RecognitionValidationConfig,
+): RecoveryPlan[] {
+  const activeBuiltInFieldIds = activeBuiltInIdsFromTableFields(tableFields);
   const customFields = tableFields.filter((field) => !isBuiltInFieldId(field.id));
 
   return records.map((record, index) => {
     const missingBuiltIns: RecoveryFieldId[] = [];
 
-    if (!record.date) missingBuiltIns.push("date");
-    if (!record.route || !isRouteFormatValid(record.route)) missingBuiltIns.push("route");
-    if (!record.driver) missingBuiltIns.push("driver");
-    if (!record.taskCode || !isTaskCodeFormatValid(normalizeTaskCode(record.taskCode))) {
+    if (activeBuiltInFieldIds.has("date") && !record.date) missingBuiltIns.push("date");
+    if (activeBuiltInFieldIds.has("route") && (!record.route || !isRouteFormatValid(record.route))) {
+      missingBuiltIns.push("route");
+    }
+    if (activeBuiltInFieldIds.has("driver") && !record.driver) missingBuiltIns.push("driver");
+    if (
+      activeBuiltInFieldIds.has("taskCode") &&
+      (!record.taskCode || !isTaskCodeFormatValid(normalizeTaskCode(record.taskCode))) &&
+      !isMissingFieldAllowedByRecognitionRules(record, "taskCode", recognitionValidationConfig)
+    ) {
       missingBuiltIns.push("taskCode");
     }
-    if (record.total === "") missingBuiltIns.push("total");
-    if (record.total !== "" && !record.totalSourceLabel) missingBuiltIns.push("totalSourceLabel");
-    if (record.unscanned === "") missingBuiltIns.push("unscanned");
-    if (record.exceptions === "") missingBuiltIns.push("exceptions");
+    if (activeBuiltInFieldIds.has("total") && record.total === "") missingBuiltIns.push("total");
+    if (activeBuiltInFieldIds.has("total") && record.total !== "" && !record.totalSourceLabel) {
+      missingBuiltIns.push("totalSourceLabel");
+    }
+    if (activeBuiltInFieldIds.has("unscanned") && record.unscanned === "") {
+      missingBuiltIns.push("unscanned");
+    }
+    if (
+      activeBuiltInFieldIds.has("exceptions") &&
+      record.exceptions === "" &&
+      !isMissingFieldAllowedByRecognitionRules(record, "exceptions", recognitionValidationConfig)
+    ) {
+      missingBuiltIns.push("exceptions");
+    }
     const missingCustomFields = customFields.filter((field) => {
       const value = record.customFieldValues?.[field.id];
       return value === "" || value === undefined || value === null;
@@ -1675,6 +2001,8 @@ function collectRecoveryPlan(records: PodRecord[], tableFields: TableFieldDefini
 
 function buildRecoveryPrompt(records: PodRecord[], plans: RecoveryPlan[], tableFields: TableFieldDefinition[]) {
   const fieldLabelMap = getFieldLabelMap(tableFields);
+  const requestedBuiltIns = new Set<RecoveryFieldId>(plans.flatMap((plan) => plan.missingBuiltIns));
+  const needsCustomRecovery = plans.some((plan) => plan.missingCustomFields.length > 0);
   const lines = [
     "你正在执行 OrSight 的第二次补全识别。",
     "你会再次看到几张人工标注参考图，再看到最后一张当前待识别图片。",
@@ -1683,30 +2011,47 @@ function buildRecoveryPrompt(records: PodRecord[], plans: RecoveryPlan[], tableF
     "严格规则：",
     "1. records 顺序固定，对应当前图片里从上到下的任务/记录顺序。",
     "2. 可以使用每条记录已有的非空字段作为锚点去定位同一行，例如 driver、taskCode、total、stationTeam、route。",
-    "3. date 可以按整张图共用的顶部信息补到所有需要的记录；stationTeam 只有在整张图顶部或当前行里清晰看到明确站点/车队标签时才允许补。",
-    "4. route 必须是快递员路线，例如 IAH01-050-M；像 IAH-BCE、IAH-LEN 这样的站点车队代码只能写 stationTeam。",
-    "5. total 只有在当前图里看得到明确 total 标签语义（应领件数/应收件数/运单数量）时才填写，并尽量同时返回 totalSourceLabel。",
-    "6. unscanned 只能来自「未领取 / 未收」直接对应的数字；不能从已领、应领件数、实领件数、任务编码或时间中截取。",
-    "7. exceptions 只能来自「错扫 / 错分 / 误扫」直接对应的数字。",
-    "8. 对 WEB_TABLE 截图，如果看不到明确的站点车队列/标签，就把 stationTeam 留空，不要从 route 或其它列推断。",
-    "9. taskCode 必须是完整的 TASK + 12位数字；如果只能读到半截、混入字母 O/I、或尾部缺失，就返回 null。",
-    "10. 看不清就返回 null；不要为了补齐而猜。",
-    "11. 不要改动未请求的字段。",
-    "",
-    "下面是首轮识别后的部分记录与待补字段：",
+    "3. 看不清就返回 null；不要为了补齐而猜。",
+    "4. 不要改动未请求的字段，也不要把其他表单的旧字段规则套进当前表单。",
   ];
+
+  if (requestedBuiltIns.has("date")) {
+    lines.push("- date：可以按整张图共用的顶部信息补到所有需要的记录。");
+  }
+  if (requestedBuiltIns.has("route")) {
+    lines.push("- route：必须是快递员路线，例如 IAH01-050-M；像 IAH-BCE、IAH-LEN 这样的站点车队代码不能写到 route。");
+  }
+  if (requestedBuiltIns.has("driver")) {
+    lines.push("- driver：只有当前图里明确出现司机姓名时才填写。");
+  }
+  if (requestedBuiltIns.has("taskCode")) {
+    lines.push("- taskCode：必须是完整的 TASK + 12位数字；如果只能读到半截、混入字母 O/I、或尾部缺失，就返回 null。");
+  }
+  if (requestedBuiltIns.has("total") || requestedBuiltIns.has("totalSourceLabel")) {
+    lines.push("- total / totalSourceLabel：只有当前图里看得到明确 total 标签语义（应领件数/应收件数/运单数量）时才填写，并尽量同时返回来源标签。");
+  }
+  if (requestedBuiltIns.has("unscanned")) {
+    lines.push("- unscanned：只能来自「未领取 / 未收」直接对应的数字；不能从已领、应领件数、实领件数、任务编码或时间中截取。");
+  }
+  if (requestedBuiltIns.has("exceptions")) {
+    lines.push("- exceptions：只能来自「错扫 / 错分 / 误扫」直接对应的数字；若没有该字段列/标签，一律返回 null，不要默认填 0。");
+  }
+  if (needsCustomRecovery) {
+    lines.push("- customFieldValues：只补当前 need 里列出的自定义字段，键必须严格使用字段 id。");
+  }
+
+  lines.push("", "下面是首轮识别后的部分记录与待补字段：");
 
   for (const plan of plans) {
     const record = records[plan.index];
     const anchors = [
-      record.date ? `date=${record.date}` : "",
-      record.route ? `route=${record.route}` : "",
-      record.driver ? `driver=${record.driver}` : "",
-      record.taskCode ? `taskCode=${record.taskCode}` : "",
-      record.total !== "" ? `total=${record.total}` : "",
-      record.unscanned !== "" ? `unscanned=${record.unscanned}` : "",
-      record.exceptions !== "" ? `exceptions=${record.exceptions}` : "",
-      record.stationTeam ? `stationTeam=${record.stationTeam}` : "",
+      requestedBuiltIns.has("date") && record.date ? `date=${record.date}` : "",
+      requestedBuiltIns.has("route") && record.route ? `route=${record.route}` : "",
+      requestedBuiltIns.has("driver") && record.driver ? `driver=${record.driver}` : "",
+      requestedBuiltIns.has("taskCode") && record.taskCode ? `taskCode=${record.taskCode}` : "",
+      requestedBuiltIns.has("total") && record.total !== "" ? `total=${record.total}` : "",
+      requestedBuiltIns.has("unscanned") && record.unscanned !== "" ? `unscanned=${record.unscanned}` : "",
+      requestedBuiltIns.has("exceptions") && record.exceptions !== "" ? `exceptions=${record.exceptions}` : "",
       ...Object.entries(record.customFieldValues || {})
         .filter(([, value]) => value !== "" && value !== undefined && value !== null)
         .map(([key, value]) => `${fieldLabelMap[key] || key}=${value}`),
@@ -1728,16 +2073,15 @@ function buildRecoveryPrompt(records: PodRecord[], plans: RecoveryPlan[], tableF
     "{",
     '  "records": [',
     "    {",
-    '      "date": "..." | null,',
-    '      "route": "..." | null,',
-    '      "driver": "..." | null,',
-    '      "taskCode": "..." | null,',
-    '      "total": 123 | null,',
-    '      "totalSourceLabel": "应领件数" | null,',
-    '      "unscanned": 1 | null,',
-    '      "exceptions": 0 | null,',
-    '      "stationTeam": "IAH-BCE" | null,',
-    '      "customFieldValues": { "字段id": "值" | 123 | null }',
+    ...(requestedBuiltIns.has("date") ? ['      "date": "..." | null,'] : []),
+    ...(requestedBuiltIns.has("route") ? ['      "route": "..." | null,'] : []),
+    ...(requestedBuiltIns.has("driver") ? ['      "driver": "..." | null,'] : []),
+    ...(requestedBuiltIns.has("taskCode") ? ['      "taskCode": "..." | null,'] : []),
+    ...(requestedBuiltIns.has("total") ? ['      "total": 123 | null,'] : []),
+    ...(requestedBuiltIns.has("totalSourceLabel") ? ['      "totalSourceLabel": "应领件数" | null,'] : []),
+    ...(requestedBuiltIns.has("unscanned") ? ['      "unscanned": 1 | null,'] : []),
+    ...(requestedBuiltIns.has("exceptions") ? ['      "exceptions": 0 | null,'] : []),
+    ...(needsCustomRecovery ? ['      "customFieldValues": { "字段id": "值" | 123 | null }'] : []),
     "    }",
     "  ]",
     "}",
@@ -1769,6 +2113,7 @@ function mergeRecoveredRecords(
   parsed: RawModelRecord[],
   tableFields: TableFieldDefinition[],
 ): PodRecord[] {
+  const activeBuiltInFieldIds = activeBuiltInIdsFromTableFields(tableFields);
   const customFieldMap = new Map(tableFields.filter((field) => !isBuiltInFieldId(field.id)).map((field) => [field.id, field]));
 
   return records.map((record, index) => {
@@ -1779,45 +2124,45 @@ function mergeRecoveredRecords(
 
     const next: PodRecord = { ...record };
 
-    if (!next.date) {
+    if (activeBuiltInFieldIds.has("date") && !next.date) {
       next.date = normalizeText(recovered.date) || "";
     }
 
-    if (!next.route || !isRouteFormatValid(next.route)) {
+    if (activeBuiltInFieldIds.has("route") && (!next.route || !isRouteFormatValid(next.route))) {
       const route = normalizeRouteValue(normalizeText(recovered.route));
       next.route = route && isRouteFormatValid(route) ? route : next.route;
     }
 
-    if (!next.driver) {
+    if (activeBuiltInFieldIds.has("driver") && !next.driver) {
       next.driver = normalizeText(recovered.driver) || "";
     }
 
     const currentTaskCode = normalizeTaskCode(next.taskCode);
-    if (!currentTaskCode || !isTaskCodeFormatValid(currentTaskCode)) {
+    if (activeBuiltInFieldIds.has("taskCode") && (!currentTaskCode || !isTaskCodeFormatValid(currentTaskCode))) {
       const recoveredTaskCode = normalizeTaskCode(recovered.taskCode);
       next.taskCode = isTaskCodeFormatValid(recoveredTaskCode) ? recoveredTaskCode : "";
     }
 
-    if (next.total === "") {
+    if (activeBuiltInFieldIds.has("total") && next.total === "") {
       const total = normalizeNumber(recovered.total);
       next.total = typeof total === "number" ? total : "";
     }
 
-    if (!next.totalSourceLabel) {
+    if (activeBuiltInFieldIds.has("total") && !next.totalSourceLabel) {
       next.totalSourceLabel = normalizeText(recovered.totalSourceLabel) || "";
     }
 
-    if (next.unscanned === "") {
+    if (activeBuiltInFieldIds.has("unscanned") && next.unscanned === "") {
       const unscanned = normalizeNumber(recovered.unscanned);
       next.unscanned = typeof unscanned === "number" ? unscanned : "";
     }
 
-    if (next.exceptions === "") {
+    if (activeBuiltInFieldIds.has("exceptions") && next.exceptions === "") {
       const exceptions = normalizeNumber(recovered.exceptions);
       next.exceptions = typeof exceptions === "number" ? exceptions : "";
     }
 
-    if (!next.stationTeam) {
+    if (activeBuiltInFieldIds.has("stationTeam") && !next.stationTeam) {
       const recoveredStationTeam = normalizeText(recovered.stationTeam);
       next.stationTeam = isStationTeamCodeNotCourierRoute(recoveredStationTeam) ? recoveredStationTeam : "";
     }
@@ -1838,20 +2183,29 @@ function mergeRecoveredRecords(
       }
     }
 
-    return next;
+    return stripInactiveBuiltInValues(next, activeBuiltInFieldIds);
   });
 }
 
-function propagateSharedImageFields(records: PodRecord[]) {
-  const sharedDate = normalizeText(firstNonEmptyValue(records, (record) => record.date)) || "";
-  const sharedStationTeamRaw = normalizeText(firstNonEmptyValue(records, (record) => record.stationTeam)) || "";
+function propagateSharedImageFields(records: PodRecord[], activeBuiltInFieldIds: ReadonlySet<string>) {
+  const sharedDate = activeBuiltInFieldIds.has("date")
+    ? normalizeText(firstNonEmptyValue(records, (record) => record.date)) || ""
+    : "";
+  const sharedStationTeamRaw = activeBuiltInFieldIds.has("stationTeam")
+    ? normalizeText(firstNonEmptyValue(records, (record) => record.stationTeam)) || ""
+    : "";
   const sharedStationTeam = isStationTeamCodeNotCourierRoute(sharedStationTeamRaw) ? sharedStationTeamRaw : "";
 
-  return records.map((record) => ({
-    ...record,
-    date: record.date || sharedDate,
-    stationTeam: record.stationTeam || sharedStationTeam,
-  }));
+  return records.map((record) =>
+    stripInactiveBuiltInValues(
+      {
+        ...record,
+        date: activeBuiltInFieldIds.has("date") ? record.date || sharedDate : "",
+        stationTeam: activeBuiltInFieldIds.has("stationTeam") ? record.stationTeam || sharedStationTeam : "",
+      },
+      activeBuiltInFieldIds,
+    ),
+  );
 }
 
 async function recoverMissingFieldsFromVision(
@@ -1864,7 +2218,7 @@ async function recoverMissingFieldsFromVision(
     return { records };
   }
 
-  const plans = collectRecoveryPlan(records, ctx.tableFields).filter(
+  const plans = collectRecoveryPlan(records, ctx.tableFields, ctx.recognitionValidationConfig).filter(
     (plan) => plan.missingBuiltIns.length > 0 || plan.missingCustomFields.length > 0,
   );
 
@@ -1934,7 +2288,13 @@ async function recoverMissingFieldsFromVision(
 
   const merged = mergeRecoveredRecords(records, parsed.records || [], ctx.tableFields);
   return {
-    records: merged,
+    records: merged.map((record) =>
+      applyRecognitionRuleCodeToRecord(
+        stripInactiveBuiltInValues(record, ctx.activeBuiltInFieldIds),
+        ctx.recognitionRuleCode,
+        ctx.activeBuiltInFieldIds,
+      ),
+    ),
     usage: payload.usage,
   };
 }
@@ -2060,21 +2420,139 @@ function mapRecord(imageName: string, raw: RawModelRecord, index: number): PodRe
   };
 }
 
-function recordSignature(record: PodRecord): string {
+function recordConsistencySignature(record: PodRecord): string {
   return JSON.stringify({
-    date: record.date,
     route: record.route,
     driver: record.driver,
-    taskCode: record.taskCode || "",
     total: record.total,
-    totalSourceLabel: record.totalSourceLabel,
     unscanned: record.unscanned,
     exceptions: record.exceptions,
-    waybillStatus: record.waybillStatus,
   });
 }
 
-function markSourceMismatchForReview(records: PodRecord[], validLabels: Set<string>) {
+function normalizeRecordsForConsistency(
+  fileName: string,
+  records: PodRecord[],
+  imageType: string,
+  validLabels: Set<string>,
+  recognitionValidationConfig: RecognitionValidationConfig,
+  recognitionRuleCode: RecognitionRuleCode,
+  activeBuiltInFieldIds: ReadonlySet<string>,
+  counterVerificationResult?: CounterVerificationResult | null,
+): PodRecord[] {
+  const routeStationActive =
+    activeBuiltInFieldIds.has("route") || activeBuiltInFieldIds.has("stationTeam");
+  const taskCodeActive = activeBuiltInFieldIds.has("taskCode");
+
+  let nextRecords = records
+    .map((record) =>
+      applyRecognitionRuleCodeToRecord(
+        { ...record, imageType },
+        recognitionRuleCode,
+        activeBuiltInFieldIds,
+      ),
+    )
+    .map((record) => (routeStationActive ? repairRouteVersusStationTeamRecord(record) : record))
+    .map((record) => (routeStationActive ? sanitizeStationTeamRecord(record) : record))
+    .map((record) =>
+      taskCodeActive ? enforceTaskCodeIntegrity(record, recognitionValidationConfig) : record,
+    );
+
+  nextRecords = markSourceMismatchForReview(nextRecords, validLabels, activeBuiltInFieldIds);
+  nextRecords = applyRecordSanityChecks(fileName, nextRecords, activeBuiltInFieldIds).records;
+
+  if (imageType === "POD" && counterVerificationResult) {
+    nextRecords = applyCounterVerification(
+      fileName,
+      nextRecords,
+      counterVerificationResult,
+      validLabels,
+      activeBuiltInFieldIds,
+    ).records;
+  }
+
+  return deriveWaybillStatus(
+    nextRecords.map((record) => ({
+      ...stripInactiveBuiltInValues(record, activeBuiltInFieldIds),
+      imageType,
+    })),
+    activeBuiltInFieldIds,
+  );
+}
+
+function applyProcessedConsistencyAnalysis(
+  fileName: string,
+  finalRecords: PodRecord[],
+  attemptRecords: PodRecord[][],
+  imageType: string,
+  validLabels: Set<string>,
+  recognitionValidationConfig: RecognitionValidationConfig,
+  recognitionRuleCode: RecognitionRuleCode,
+  activeBuiltInFieldIds: ReadonlySet<string>,
+  counterVerificationResult?: CounterVerificationResult | null,
+): { records: PodRecord[]; issues: ExtractionIssue[] } {
+  const normalizedAttempts = attemptRecords.map((records) =>
+    normalizeRecordsForConsistency(
+      fileName,
+      records,
+      imageType,
+      validLabels,
+      recognitionValidationConfig,
+      recognitionRuleCode,
+      activeBuiltInFieldIds,
+      counterVerificationResult,
+    ),
+  );
+  const attemptCount = normalizedAttempts.length;
+  const issues: ExtractionIssue[] = [];
+
+  const records = finalRecords.map((record): PodRecord => {
+    const sig = recordConsistencySignature(record);
+    const matchedAttempts = normalizedAttempts.reduce(
+      (count, attempt) =>
+        count + (attempt.some((candidate) => recordConsistencySignature(candidate) === sig) ? 1 : 0),
+      0,
+    );
+
+    if (attemptCount > 0 && matchedAttempts < attemptCount) {
+      issues.push({
+        imageName: fileName,
+        route: record.route,
+        level: "warning",
+        code: "consistency_mismatch",
+        message: `该条目在后处理后的 ${matchedAttempts}/${attemptCount} 次识别中一致，请人工确认或再次识别。`,
+      });
+      return {
+        ...record,
+        consistencyMatchedAttempts: matchedAttempts,
+        consistencyTotalAttempts: attemptCount,
+        reviewRequired: true,
+        reviewReason: appendReviewReason(
+          record.reviewReason,
+          `后处理后一致性仅 ${matchedAttempts}/${attemptCount}，需要人工复核。`,
+        ),
+      };
+    }
+
+    return {
+      ...record,
+      consistencyMatchedAttempts: matchedAttempts,
+      consistencyTotalAttempts: attemptCount,
+    };
+  });
+
+  return { records, issues };
+}
+
+function markSourceMismatchForReview(
+  records: PodRecord[],
+  validLabels: Set<string>,
+  activeBuiltInFieldIds: ReadonlySet<string>,
+) {
+  if (!activeBuiltInFieldIds.has("total")) {
+    return records;
+  }
+
   return records.map((record) => {
     const normalizedSourceLabel = normalizeSafeTotalSourceLabel(record.totalSourceLabel);
 
@@ -2177,17 +2655,33 @@ function sanitizePodCountField(
   };
 }
 
-function applyRecordSanityChecks(fileName: string, records: PodRecord[]) {
+function applyRecordSanityChecks(
+  fileName: string,
+  records: PodRecord[],
+  activeBuiltInFieldIds: ReadonlySet<string>,
+) {
   const issues: ExtractionIssue[] = [];
 
   const nextRecords = records.map((record) => {
     let nextRecord = record;
 
-    nextRecord = sanitizePodCountField(nextRecord, fileName, "total", "运单数量", issues);
-    nextRecord = sanitizePodCountField(nextRecord, fileName, "unscanned", "未收数量", issues);
-    nextRecord = sanitizePodCountField(nextRecord, fileName, "exceptions", "错扫数量", issues);
+    if (activeBuiltInFieldIds.has("total")) {
+      nextRecord = sanitizePodCountField(nextRecord, fileName, "total", "运单数量", issues);
+    }
+    if (activeBuiltInFieldIds.has("unscanned")) {
+      nextRecord = sanitizePodCountField(nextRecord, fileName, "unscanned", "未收数量", issues);
+    }
+    if (activeBuiltInFieldIds.has("exceptions")) {
+      nextRecord = sanitizePodCountField(nextRecord, fileName, "exceptions", "错扫数量", issues);
+    }
 
-    if (nextRecord.total !== "" && nextRecord.unscanned !== "" && nextRecord.unscanned > nextRecord.total) {
+    if (
+      activeBuiltInFieldIds.has("total") &&
+      activeBuiltInFieldIds.has("unscanned") &&
+      nextRecord.total !== "" &&
+      nextRecord.unscanned !== "" &&
+      nextRecord.unscanned > nextRecord.total
+    ) {
       issues.push({
         imageName: fileName,
         route: nextRecord.route,
@@ -2206,7 +2700,13 @@ function applyRecordSanityChecks(fileName: string, records: PodRecord[]) {
       };
     }
 
-    if (nextRecord.total !== "" && nextRecord.exceptions !== "" && nextRecord.exceptions > nextRecord.total) {
+    if (
+      activeBuiltInFieldIds.has("total") &&
+      activeBuiltInFieldIds.has("exceptions") &&
+      nextRecord.total !== "" &&
+      nextRecord.exceptions !== "" &&
+      nextRecord.exceptions > nextRecord.total
+    ) {
       issues.push({
         imageName: fileName,
         route: nextRecord.route,
@@ -2234,7 +2734,11 @@ function applyRecordSanityChecks(fileName: string, records: PodRecord[]) {
   };
 }
 
-function deriveWaybillStatus(records: PodRecord[]) {
+function deriveWaybillStatus(records: PodRecord[], activeBuiltInFieldIds: ReadonlySet<string>) {
+  if (!activeBuiltInFieldIds.has("waybillStatus") || !activeBuiltInFieldIds.has("unscanned")) {
+    return records;
+  }
+
   return records.map((record) => {
     if (record.unscanned === "") {
       return record;
@@ -2280,7 +2784,14 @@ function applyCounterVerification(
   records: PodRecord[],
   verification: CounterVerificationResult,
   validLabels: Set<string>,
+  activeBuiltInFieldIds: ReadonlySet<string>,
 ) {
+  const totalActive = activeBuiltInFieldIds.has("total");
+  const unscannedActive = activeBuiltInFieldIds.has("unscanned");
+  if (!totalActive && !unscannedActive) {
+    return { records, issues: [] as ExtractionIssue[] };
+  }
+
   const issues: ExtractionIssue[] = [];
   const expectedCount = toNullableNumber(verification.expectedCount);
   const actualCount = toNullableNumber(verification.actualCount);
@@ -2314,7 +2825,7 @@ function applyCounterVerification(
         isUnsafeTotalSourceLabel(nextRecord.totalSourceLabel) ||
         (validLabels.size > 0 && !validLabels.has(sourceLabelNorm));
 
-      if (totalNeedsCorrection || labelNeedsCorrection) {
+      if (totalActive && (totalNeedsCorrection || labelNeedsCorrection)) {
         nextRecord = clearResolvedTotalReviewFlags({
           ...nextRecord,
           total: expectedCount,
@@ -2340,7 +2851,7 @@ function applyCounterVerification(
         }
       }
 
-      if (derivedUnscanned.value !== null) {
+      if (unscannedActive && derivedUnscanned.value !== null) {
         const previousUnscanned = nextRecord.unscanned;
         if (previousUnscanned === "" || previousUnscanned !== derivedUnscanned.value) {
           nextRecord = clearResolvedUnscannedReviewFlags({
@@ -2373,6 +2884,7 @@ function applyCounterVerification(
 
     // 固定裁剪区读不到应领件数时，若运单数量已由主模型/训练池裁剪给出且来源标签在训练池合法列表中，则保留，避免误清空
     if (
+      totalActive &&
       nextRecord.total !== "" &&
       !hasReliableExpectedCount &&
       !totalLabelTrusted
@@ -2396,6 +2908,7 @@ function applyCounterVerification(
     }
 
     if (
+      totalActive &&
       nextRecord.total !== "" &&
       expectedCount === null &&
       ((actualCount !== null && nextRecord.total === actualCount) ||
@@ -2450,47 +2963,19 @@ async function runConsistencyCheck(file: File, model: string, ctx: ExtractVision
   }
 
   const mappedAttempts = attempts.map((attempt, attemptIndex) =>
-    attempt.records.map((rawRecord, recordIndex) => mapRecord(file.name, rawRecord, recordIndex + attemptIndex * 100)),
+    attempt.records
+      .map((rawRecord, recordIndex) => mapRecord(file.name, rawRecord, recordIndex + attemptIndex * 100))
+      .map((record) =>
+        applyRecognitionRuleCodeToRecord(
+          stripInactiveBuiltInValues(record, ctx.activeBuiltInFieldIds),
+          ctx.recognitionRuleCode,
+          ctx.activeBuiltInFieldIds,
+        ),
+      ),
   );
 
-  const firstAttemptRecords = mappedAttempts[0] || [];
-  const issues: ExtractionIssue[] = [];
-
-  const finalRecords = firstAttemptRecords.map((record) => {
-    const sig = recordSignature(record);
-    
-    // Check if this exact record signature exists in all other attempts
-    let isConsistent = true;
-    for (let i = 1; i < attemptCount; i++) {
-      const attemptRecords = mappedAttempts[i] || [];
-      const hasMatch = attemptRecords.some(r => recordSignature(r) === sig);
-      if (!hasMatch) {
-        isConsistent = false;
-        break;
-      }
-    }
-
-    if (!isConsistent) {
-      issues.push({
-        imageName: file.name,
-        route: record.route,
-        level: "warning",
-        code: "consistency_mismatch",
-        message: "该条目在四次识别中存在不一致结果，请人工确认或再次识别。",
-      });
-      return {
-        ...record,
-        reviewRequired: true,
-        reviewReason: appendReviewReason(record.reviewReason, "四次识别结果不一致，需要人工复核。"),
-      };
-    }
-
-    return record;
-  });
-
   return {
-    records: finalRecords,
-    issues,
+    attemptRecords: mappedAttempts,
     imageType,
     usage: {
       prompt_tokens: totalPromptTokens,
@@ -2522,124 +3007,128 @@ export async function POST(request: Request) {
 
       const records: PodRecord[] = [];
       const issues: ExtractionIssue[] = [];
+      const validLabels = new Set(["应领件数", "应收件数", "运单数量"]);
 
       const visionCtx = await buildExtractVisionContext(formId);
       const examples = visionCtx.examples;
+      const activeBuiltInFieldIds = visionCtx.activeBuiltInFieldIds;
+      const routeStationBuiltInActive =
+        activeBuiltInFieldIds.has("route") || activeBuiltInFieldIds.has("stationTeam");
+      const taskCodeBuiltInActive = activeBuiltInFieldIds.has("taskCode");
+      const counterFieldsActive =
+        activeBuiltInFieldIds.has("total") || activeBuiltInFieldIds.has("unscanned");
+      const podSpecificBuiltInsActive =
+        routeStationBuiltInActive ||
+        taskCodeBuiltInActive ||
+        counterFieldsActive ||
+        activeBuiltInFieldIds.has("exceptions");
 
       for (const file of files) {
-        const recognitionResult = await callVisionModel(file, model, visionCtx);
-        let checkedRecords = recognitionResult.records.map((rawRecord, index) => mapRecord(file.name, rawRecord, index));
+        const consistencyResult = await runConsistencyCheck(file, model, visionCtx);
+        let workingRecords = consistencyResult.attemptRecords[0] || [];
+        let counterVerificationResult: CounterVerificationResult | null = null;
 
-        let totalPromptTokens = recognitionResult.usage?.prompt_tokens || 0;
-        let totalCompletionTokens = recognitionResult.usage?.completion_tokens || 0;
-        let totalTokens = recognitionResult.usage?.total_tokens || 0;
-
-        if (!checkedRecords.length) {
-          issues.push({
-            imageName: file.name,
-            message: "AI 没有返回任何记录，请人工复核。",
-            level: "error",
-            code: "empty_result",
-          });
-          continue;
+        if (consistencyResult.imageType === "POD" && podSpecificBuiltInsActive) {
+          const refined = await runLiveAggregationRefine(file, visionCtx, workingRecords, model);
+          workingRecords = refined.records.map((record) =>
+            applyRecognitionRuleCodeToRecord(
+              stripInactiveBuiltInValues(record, activeBuiltInFieldIds),
+              visionCtx.recognitionRuleCode,
+              activeBuiltInFieldIds,
+            ),
+          );
+          if (refined.usage) {
+            consistencyResult.usage = mergeRefineUsage(
+              {
+                prompt_tokens: consistencyResult.usage?.prompt_tokens || 0,
+                completion_tokens: consistencyResult.usage?.completion_tokens || 0,
+                total_tokens: consistencyResult.usage?.total_tokens || 0,
+              },
+              refined.usage,
+            );
+          }
         }
+
+        workingRecords = workingRecords.map((record) =>
+          routeStationBuiltInActive ? repairRouteVersusStationTeamRecord(record) : record,
+        );
+        const sourceCheckedRecords = markSourceMismatchForReview(workingRecords, validLabels, activeBuiltInFieldIds);
+
+        const sanityChecked = applyRecordSanityChecks(file.name, sourceCheckedRecords, activeBuiltInFieldIds);
+        let checkedRecords = sanityChecked.records;
+        let counterIssues: ExtractionIssue[] = sanityChecked.issues;
+
+        let totalPromptTokens = consistencyResult.usage?.prompt_tokens || 0;
+        let totalCompletionTokens = consistencyResult.usage?.completion_tokens || 0;
+        let totalTokens = consistencyResult.usage?.total_tokens || 0;
+
+        // Only run counter verification for POD images
+        if (consistencyResult.imageType === "POD" && counterFieldsActive) {
+          const counterVerification = await callCounterVerifier(file, model);
+          counterVerificationResult = counterVerification.result;
+          const counterChecked = applyCounterVerification(
+            file.name,
+            checkedRecords,
+            counterVerification.result,
+            validLabels,
+            activeBuiltInFieldIds,
+          );
+          checkedRecords = counterChecked.records;
+          counterIssues = [...counterIssues, ...counterChecked.issues];
+
+          if (counterVerification.usage) {
+            totalPromptTokens += counterVerification.usage?.prompt_tokens || 0;
+            totalCompletionTokens += counterVerification.usage?.completion_tokens || 0;
+            totalTokens += counterVerification.usage?.total_tokens || 0;
+          }
+        }
+
+        checkedRecords = checkedRecords.map((record) => ({
+          ...record,
+          imageType: consistencyResult.imageType,
+        }));
+        checkedRecords = deriveWaybillStatus(checkedRecords, activeBuiltInFieldIds);
 
         const recoveryResult = await recoverMissingFieldsFromVision(file, model, visionCtx, checkedRecords);
         checkedRecords = recoveryResult.records
-          .map(repairRouteVersusStationTeamRecord)
-          .map(sanitizeStationTeamRecord);
-        checkedRecords = propagateSharedImageFields(checkedRecords);
-        checkedRecords = checkedRecords.map(enforceTaskCodeIntegrity);
-        checkedRecords = deriveWaybillStatus(checkedRecords);
+          .map((record) => ({
+            ...record,
+            imageType: consistencyResult.imageType,
+          }))
+          .map((record) =>
+            applyRecognitionRuleCodeToRecord(record, visionCtx.recognitionRuleCode, activeBuiltInFieldIds),
+          )
+          .map((record) => (routeStationBuiltInActive ? repairRouteVersusStationTeamRecord(record) : record))
+          .map((record) => (routeStationBuiltInActive ? sanitizeStationTeamRecord(record) : record));
+        checkedRecords = propagateSharedImageFields(checkedRecords, activeBuiltInFieldIds);
+        checkedRecords = checkedRecords.map((record) => {
+          const nextRecord = taskCodeBuiltInActive
+            ? enforceTaskCodeIntegrity(record, visionCtx.recognitionValidationConfig)
+            : stripInactiveBuiltInValues(record, activeBuiltInFieldIds);
+          return applyRecognitionRuleCodeToRecord(
+            nextRecord,
+            visionCtx.recognitionRuleCode,
+            activeBuiltInFieldIds,
+          );
+        });
+        checkedRecords = deriveWaybillStatus(checkedRecords, activeBuiltInFieldIds);
+
+        const consistencyAnalysis = applyProcessedConsistencyAnalysis(
+          file.name,
+          checkedRecords,
+          consistencyResult.attemptRecords,
+          consistencyResult.imageType,
+          validLabels,
+          visionCtx.recognitionValidationConfig,
+          visionCtx.recognitionRuleCode,
+          activeBuiltInFieldIds,
+          counterVerificationResult,
+        );
+        checkedRecords = consistencyAnalysis.records;
 
         totalPromptTokens += recoveryResult.usage?.prompt_tokens || 0;
         totalCompletionTokens += recoveryResult.usage?.completion_tokens || 0;
         totalTokens += recoveryResult.usage?.total_tokens || 0;
-
-        if (user?.id) {
-          const admin = getSupabaseAdmin();
-          if (admin) {
-            admin.from("usage_logs").insert({
-              user_id: user.id,
-              action_type: "extract_table",
-              image_count: 1,
-              prompt_tokens: totalPromptTokens,
-              completion_tokens: totalCompletionTokens,
-              total_tokens: totalTokens,
-              model_used: model,
-            }).then(({ error }) => {
-              if (error) console.error("Failed to log usage:", error);
-            });
-          }
-        }
-
-        checkedRecords.forEach((record) => {
-          records.push(record);
-          issues.push(...validateRecord(record));
-        });
-      }
-
-      return NextResponse.json({
-        records,
-        issues,
-        modelUsed: model,
-        mode,
-        trainingExamplesLoaded: examples.length,
-      });
-      const validLabels = new Set(["应领件数", "应收件数", "运单数量"]);
-    for (const file of files) {
-      const consistencyResult = await runConsistencyCheck(file, model, visionCtx);
-      let workingRecords = consistencyResult.records;
-
-      if (consistencyResult.imageType === "POD") {
-        const refined = await runLiveAggregationRefine(file, visionCtx, workingRecords, model);
-        workingRecords = refined.records;
-        if (refined.collapsed) {
-          consistencyResult.issues = consistencyResult.issues.filter((issue) => !issue.route);
-        }
-        if (refined.usage) {
-          consistencyResult.usage = mergeRefineUsage(
-            {
-              prompt_tokens: consistencyResult.usage?.prompt_tokens || 0,
-              completion_tokens: consistencyResult.usage?.completion_tokens || 0,
-              total_tokens: consistencyResult.usage?.total_tokens || 0,
-            },
-            refined.usage,
-          );
-        }
-      }
-
-      workingRecords = workingRecords.map(repairRouteVersusStationTeamRecord);
-      const sourceCheckedRecords = markSourceMismatchForReview(workingRecords, validLabels);
-
-      const sanityChecked = applyRecordSanityChecks(file.name, sourceCheckedRecords);
-      let checkedRecords = sanityChecked.records;
-      let counterIssues: ExtractionIssue[] = sanityChecked.issues;
-
-      let totalPromptTokens = consistencyResult.usage?.prompt_tokens || 0;
-      let totalCompletionTokens = consistencyResult.usage?.completion_tokens || 0;
-      let totalTokens = consistencyResult.usage?.total_tokens || 0;
-
-      // Only run counter verification for POD images
-      if (consistencyResult.imageType === "POD") {
-        const counterVerification = await callCounterVerifier(file, model);
-        const counterChecked = applyCounterVerification(
-          file.name,
-          checkedRecords,
-          counterVerification.result,
-          validLabels,
-        );
-        checkedRecords = counterChecked.records;
-        counterIssues = [...counterIssues, ...counterChecked.issues];
-        
-        if (counterVerification.usage) {
-          totalPromptTokens += counterVerification.usage?.prompt_tokens || 0;
-          totalCompletionTokens += counterVerification.usage?.completion_tokens || 0;
-          totalTokens += counterVerification.usage?.total_tokens || 0;
-        }
-      }
-
-      checkedRecords = deriveWaybillStatus(checkedRecords);
 
       // Log usage to Supabase if user is logged in
       if (user?.id) {
@@ -2660,25 +3149,29 @@ export async function POST(request: Request) {
         }
       }
 
-      if (!checkedRecords.length) {
-        issues.push({
-          imageName: file.name,
-          message: "AI 没有返回任何记录，请人工复核。",
-          level: "error",
-          code: "empty_result",
-        });
-        issues.push(...consistencyResult.issues);
-        issues.push(...counterIssues);
-        continue;
-      }
+        if (!checkedRecords.length) {
+          issues.push({
+            imageName: file.name,
+            message: "AI 没有返回任何记录，请人工复核。",
+            level: "error",
+            code: "empty_result",
+          });
+          issues.push(...counterIssues);
+          continue;
+        }
 
-      checkedRecords.forEach((record) => {
-        records.push(record);
-        issues.push(...validateRecord(record));
-      });
-      issues.push(...consistencyResult.issues);
-      issues.push(...counterIssues);
-    }
+        checkedRecords.forEach((record) => {
+          records.push(record);
+          issues.push(
+            ...validateRecord(record, {
+              recognitionValidationConfig: visionCtx.recognitionValidationConfig,
+              activeBuiltInFieldIds,
+            }),
+          );
+        });
+        issues.push(...consistencyAnalysis.issues);
+        issues.push(...counterIssues);
+      }
 
     return NextResponse.json({
       records,

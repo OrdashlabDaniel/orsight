@@ -30,6 +30,11 @@ type ImagePreviewState = {
   src: string;
 };
 
+type AgentActionStatus = {
+  phase: "running" | "done" | "error";
+  message: string;
+};
+
 function formatTurnForChatApi(turn: AgentThreadTurn): string {
   let text = turn.content ?? "";
   if (turn.assets?.length) {
@@ -71,6 +76,7 @@ export function RecognitionAgentDock({
   const [isSending, setIsSending] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
   const [noticeMessage, setNoticeMessage] = useState("");
+  const [actionStatus, setActionStatus] = useState<AgentActionStatus | null>(null);
   const [draftHydrated, setDraftHydrated] = useState(false);
   const [imagePreview, setImagePreview] = useState<ImagePreviewState | null>(null);
 
@@ -143,36 +149,31 @@ export function RecognitionAgentDock({
         workingRules?: string;
       };
       if (!res.ok) {
-
+        throw new Error(data.error || "加载识别规则失败");
       }
       setAgentThread((current) =>
         current.length > 0 ? current : Array.isArray(data.agentThread) ? data.agentThread : [],
       );
       setWorkingRules(typeof data.workingRules === "string" ? data.workingRules : "");
     } catch (error) {
-
+      setErrorMessage(error instanceof Error ? error.message : "加载识别规则失败");
     } finally {
       setIsLoadingRules(false);
     }
   }
 
   async function saveRules(nextRules: string, nextThread: AgentThreadTurn[]) {
-    try {
-      const res = await fetch(withFormId("/api/training/rules"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          workingRules: nextRules,
-          agentThread: nextThread,
-        }),
-      });
-      const data = (await res.json()) as { error?: string };
-      if (!res.ok) {
-
-      }
-
-    } catch (error) {
-
+    const res = await fetch(withFormId("/api/training/rules"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        workingRules: nextRules,
+        agentThread: nextThread,
+      }),
+    });
+    const data = (await res.json()) as { error?: string };
+    if (!res.ok) {
+      throw new Error(data.error || "保存识别规则失败");
     }
   }
 
@@ -280,6 +281,7 @@ export function RecognitionAgentDock({
     setIsSending(true);
     setErrorMessage("");
     setNoticeMessage("");
+    setActionStatus({ phase: "running", message: "正在分析你的规则诉求，并定位当前填表可编辑的规则区…" });
 
     try {
       const userTurn: AgentThreadTurn = {
@@ -293,6 +295,7 @@ export function RecognitionAgentDock({
       };
 
       const nextThreadBase = [...agentThread, userTurn];
+      setActionStatus({ phase: "running", message: "正在生成当前填表的识别规则代码…" });
       const res = await fetch(withFormId("/api/training/guidance-chat"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -301,6 +304,7 @@ export function RecognitionAgentDock({
             role: turn.role,
             content: formatTurnForChatApi(turn),
           })),
+          thread: nextThreadBase,
           currentWorkingRules: workingRules,
         }),
       });
@@ -311,6 +315,7 @@ export function RecognitionAgentDock({
       };
       if (!res.ok) {
         setErrorMessage(data.error || "识别规则对话请求失败");
+        setActionStatus({ phase: "error", message: data.error || "当前填表规则代码生成失败" });
         return;
       }
 
@@ -328,9 +333,16 @@ export function RecognitionAgentDock({
       setWorkingRules(nextRules);
       setAgentInput("");
       setPendingAttachments([]);
+      setActionStatus({ phase: "running", message: "正在保存当前填表的识别规则代码…" });
       await saveRules(nextRules, nextThread);
+      setNoticeMessage("当前填表的识别规则已更新，后续识别会直接使用新规则。");
+      setActionStatus({ phase: "done", message: "当前填表规则代码已保存完成。" });
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "发送失败");
+      setActionStatus({
+        phase: "error",
+        message: error instanceof Error ? error.message : "识别规则修改失败",
+      });
     } finally {
       setIsSending(false);
     }
@@ -340,6 +352,7 @@ export function RecognitionAgentDock({
     setAgentThread([]);
     setAgentInput("");
     setPendingAttachments([]);
+    setActionStatus(null);
 
   }
 
@@ -389,8 +402,9 @@ export function RecognitionAgentDock({
             ) : null}
             {!isLoadingRules ? (
               <div className="mb-3 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-xs leading-6 text-slate-500">
-                识别管家统管当前这一份填表的识别效果：对话与「工作识别规则」仅保存在本填表内，与项目内其他填表互不干扰。填表模式与训练模式共用同一套规则。
-                仅讨论截图识别：字段含义、OCR 优先级、歧义处理等；软件架构、接口、权限等不会写入规则正文。
+                识别管家统管当前这一份填表的识别效果：对话与「工作识别规则 / 规则代码」仅保存在本填表内，与项目内其他填表互不干扰。填表模式与训练模式共用同一套规则。
+                它只能修改当前填表开放出来的识别规则区，不会改项目其他业务代码。
+                也可以直接说明“某类界面本来没有任务编码/错扫数量，留空不要报警”。
               </div>
             ) : null}
             {!isLoadingRules && agentThread.length === 0 ? (
@@ -439,6 +453,19 @@ export function RecognitionAgentDock({
           </div>
 
           <div className="border-t border-slate-200 bg-white p-4">
+            {actionStatus ? (
+              <div
+                className={`mb-2 rounded-xl px-3 py-2 text-xs ${
+                  actionStatus.phase === "done"
+                    ? "border border-emerald-200 bg-emerald-50 text-emerald-700"
+                    : actionStatus.phase === "error"
+                      ? "border border-rose-200 bg-rose-50 text-rose-700"
+                      : "border border-blue-200 bg-blue-50 text-blue-700"
+                }`}
+              >
+                {actionStatus.message}
+              </div>
+            ) : null}
             {errorMessage ? (
               <div className="mb-2 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">{errorMessage}</div>
             ) : null}

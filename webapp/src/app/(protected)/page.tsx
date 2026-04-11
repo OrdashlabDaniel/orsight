@@ -44,6 +44,12 @@ type UploadItem = {
   previewUrl: string;
 };
 
+type ConfirmedCorrectRecord = {
+  recordId: string;
+  sourceImageNames: string[];
+  route: string;
+};
+
 type TrainingStatusItem = {
   imageName: string;
   labeled: boolean;
@@ -57,7 +63,7 @@ type TrainingStatusItem = {
       taskCode?: string;
       total: number;
       unscanned: number;
-      exceptions: number;
+      exceptions: number | "";
       stationTeam?: string;
       customFieldValues?: Record<string, string | number | "">;
     };
@@ -163,6 +169,45 @@ function formatDateForFilename(rawDate: string | undefined) {
   return `${normalized.replace(/[\\/:*?"<>|]/g, "-")}_OrSight数据`;
 }
 
+const ISSUE_CODE_FIELD_REQUIREMENTS: Record<string, string[]> = {
+  missing_task_code: ["taskCode"],
+  invalid_task_code: ["taskCode"],
+  total_source_missing: ["total"],
+  total_filled_from_expected: ["total"],
+  total_corrected_from_expected: ["total"],
+  expected_count_unreadable: ["total"],
+  total_matches_wrong_counter: ["total"],
+  unscanned_filled_from_counters: ["unscanned"],
+  unscanned_corrected_from_counters: ["unscanned"],
+  unscanned_exceeds_total: ["total", "unscanned"],
+  exceptions_exceeds_total: ["total", "exceptions"],
+};
+
+const ISSUE_MESSAGE_FIELD_REQUIREMENTS: Array<{ fields: string[]; patterns: string[] }> = [
+  { fields: ["route"], patterns: ["缺少抽查路线", "路线格式异常"] },
+  { fields: ["route", "stationTeam"], patterns: ["抽查路线与站点车队相同"] },
+  { fields: ["stationTeam"], patterns: ["站点车队字段格式异常"] },
+  { fields: ["driver"], patterns: ["缺少司机姓名"] },
+  { fields: ["taskCode"], patterns: ["任务编码"] },
+  { fields: ["total"], patterns: ["缺少运单数量", "运单数量来源", "运单数量不能自动确认", "应领件数区域"] },
+  { fields: ["unscanned"], patterns: ["缺少未收数量"] },
+  { fields: ["exceptions"], patterns: ["错扫数量"] },
+];
+
+function issueMatchesActiveBuiltInFields(issue: ExtractionIssue, activeBuiltInFieldIds: ReadonlySet<string>) {
+  const requiredFields =
+    (issue.code && ISSUE_CODE_FIELD_REQUIREMENTS[issue.code]) ||
+    ISSUE_MESSAGE_FIELD_REQUIREMENTS.find((entry) =>
+      entry.patterns.some((pattern) => issue.message.includes(pattern)),
+    )?.fields;
+
+  if (!requiredFields || requiredFields.length === 0) {
+    return true;
+  }
+
+  return requiredFields.every((fieldId) => activeBuiltInFieldIds.has(fieldId));
+}
+
 function HomeContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -184,6 +229,7 @@ function HomeContent() {
   const [selectedUploadId, setSelectedUploadId] = useState<string | null>(null);
   const [records, setRecords] = useState<PodRecord[]>([]);
   const [issues, setIssues] = useState<ExtractionIssue[]>([]);
+  const [confirmedCorrectRecords, setConfirmedCorrectRecords] = useState<ConfirmedCorrectRecord[]>([]);
   const [isExtracting, setIsExtracting] = useState(false);
   const [isRetryingReviewAll, setIsRetryingReviewAll] = useState(false);
   const [retryingKeys, setRetryingKeys] = useState<string[]>([]);
@@ -246,6 +292,7 @@ function HomeContent() {
   useEffect(() => {
     setRecords([]);
     setIssues([]);
+    setConfirmedCorrectRecords([]);
     setRouteFilter("");
     setSelectedUploadId(null);
     setUploads([]);
@@ -254,6 +301,11 @@ function HomeContent() {
     closeRecordPopup();
     closeViewerPopup();
   }, [currentFormId]);
+
+  useEffect(() => {
+    const existingIds = new Set(records.map((record) => record.id));
+    setConfirmedCorrectRecords((current) => current.filter((item) => existingIds.has(item.recordId)));
+  }, [records]);
 
   useEffect(() => {
     if (!viewingRecord) {
@@ -369,7 +421,23 @@ function HomeContent() {
     [selectedUploadId, uploads],
   );
   const activeTableFields = useMemo(() => getActiveTableFields(tableFields), [tableFields]);
+  const activeBuiltInFieldIds = useMemo(
+    () => new Set(activeTableFields.filter((field) => field.builtIn).map((field) => field.id)),
+    [activeTableFields],
+  );
+  const routeFieldActive = useMemo(
+    () => activeBuiltInFieldIds.has("route"),
+    [activeBuiltInFieldIds],
+  );
   const tableHeaders = useMemo(() => activeTableFields.map((field) => field.label), [activeTableFields]);
+
+  useEffect(() => {
+    if (!routeFieldActive) {
+      setRouteFilter("");
+      setIsRouteDropdownOpen(false);
+    }
+  }, [routeFieldActive]);
+
   const organizedRecordsResult = useMemo(() => organizeRecords(records), [records]);
   
   const allAvailableRoutes = useMemo(() => {
@@ -405,6 +473,9 @@ function HomeContent() {
   }, [organizedRecordsResult, routeFilter]);
 
   const groupedRecords = useMemo(() => {
+    if (!routeFieldActive) {
+      return [["__all__", filteredRecordsResult.records] as [string, PodRecord[]]];
+    }
     const groups = new Map<string, PodRecord[]>();
     for (const record of filteredRecordsResult.records) {
       const routeKey = record.route || "未分组路线";
@@ -413,36 +484,65 @@ function HomeContent() {
       groups.set(routeKey, existing);
     }
     return Array.from(groups.entries());
-  }, [filteredRecordsResult.records]);
+  }, [filteredRecordsResult.records, routeFieldActive]);
   const activePopupRecordId = viewingRecord?.id || annotatingRecord?.id || null;
-  const reviewRecords = useMemo(
-    () =>
-      organizedRecordsResult.records.filter((record) => {
-        if (record.reviewRequired) {
-          return true;
-        }
-        const sourceImageNames = record.imageName
-          .split(" | ")
-          .map((value) => value.trim())
-          .filter(Boolean);
-        return issues.some(
-          (issue) =>
-            issue.level === "error" &&
-            sourceImageNames.includes(issue.imageName) &&
-            (!issue.route || !record.route || issue.route === record.route),
-        );
-      }),
-    [organizedRecordsResult.records, issues],
-  );
-
-  const totalWarnings = issues.filter((issue) => issue.level === "warning").length;
-
   function getSourceImageNames(record: PodRecord) {
     return record.imageName
       .split(" | ")
       .map((value) => value.trim())
       .filter(Boolean);
   }
+
+  function issueMatchesRecord(issue: ExtractionIssue, record: PodRecord) {
+    const sourceImageNames = getSourceImageNames(record);
+    if (!sourceImageNames.includes(issue.imageName)) {
+      return false;
+    }
+    if (record.route) {
+      return issue.route === record.route;
+    }
+    return !issue.route;
+  }
+
+  function issueMatchesConfirmedRecord(issue: ExtractionIssue, confirmed: ConfirmedCorrectRecord) {
+    if (!confirmed.sourceImageNames.includes(issue.imageName)) {
+      return false;
+    }
+    if (confirmed.route) {
+      return issue.route === confirmed.route;
+    }
+    return !issue.route;
+  }
+
+  function isRecordConfirmedCorrect(record: PodRecord) {
+    return confirmedCorrectRecords.some((item) => item.recordId === record.id);
+  }
+
+  const visibleIssues = useMemo(
+    () =>
+      issues.filter(
+        (issue) =>
+          issueMatchesActiveBuiltInFields(issue, activeBuiltInFieldIds) &&
+          !confirmedCorrectRecords.some((confirmed) => issueMatchesConfirmedRecord(issue, confirmed)),
+      ),
+    [issues, confirmedCorrectRecords, activeBuiltInFieldIds],
+  );
+
+  const reviewRecords = useMemo(
+    () =>
+      organizedRecordsResult.records.filter((record) => {
+        if (isRecordConfirmedCorrect(record)) {
+          return false;
+        }
+        if (record.reviewRequired) {
+          return true;
+        }
+        return visibleIssues.some((issue) => issue.level === "error" && issueMatchesRecord(issue, record));
+      }),
+    [organizedRecordsResult.records, visibleIssues, confirmedCorrectRecords],
+  );
+
+  const totalWarnings = visibleIssues.filter((issue) => issue.level === "warning").length;
 
   /** 业务键相同的多张图被合并为一条时，用于高亮该行（兼容仅有 imageName 拼接的旧数据） */
   function isCrossImageMergedRow(record: PodRecord) {
@@ -461,16 +561,25 @@ function HomeContent() {
   }
 
   function getRecordIssues(record: PodRecord) {
-    const sourceImageNames = getSourceImageNames(record);
-    return issues.filter(
-      (issue) =>
-        sourceImageNames.includes(issue.imageName) &&
-        (!issue.route || !record.route || issue.route === record.route),
-    );
+    if (isRecordConfirmedCorrect(record)) {
+      return [];
+    }
+    return visibleIssues.filter((issue) => issueMatchesRecord(issue, record));
   }
 
   function hasConsistencyMismatch(record: PodRecord) {
     return getRecordIssues(record).some((issue) => issue.code === "consistency_mismatch");
+  }
+
+  function getConsistencyRatio(record: PodRecord) {
+    if (
+      typeof record.consistencyMatchedAttempts === "number" &&
+      typeof record.consistencyTotalAttempts === "number" &&
+      record.consistencyTotalAttempts > 0
+    ) {
+      return `${record.consistencyMatchedAttempts}/${record.consistencyTotalAttempts}`;
+    }
+    return null;
   }
 
   function hasTotalSourceMismatch(record: PodRecord) {
@@ -485,14 +594,22 @@ function HomeContent() {
   }
 
   function needsManualAnnotation(record: PodRecord) {
+    if (isRecordConfirmedCorrect(record)) {
+      return false;
+    }
     return record.reviewRequired || getRecordIssues(record).length > 0;
   }
 
-  /** 与「待复核」徽章对齐：服务端校验错误也应提示人工复核 */
+  /** 与「待复核」徽章对齐：服务端校验错误也应提示人工复核；缺任务编码等为警告时也提示该行 */
   function recordNeedsReviewBadge(record: PodRecord) {
+    if (isRecordConfirmedCorrect(record)) {
+      return false;
+    }
     return (
       record.reviewRequired ||
-      getRecordIssues(record).some((issue) => issue.level === "error")
+      getRecordIssues(record).some(
+        (issue) => issue.level === "error" || issue.code === "missing_task_code",
+      )
     );
   }
 
@@ -702,6 +819,7 @@ function HomeContent() {
     setSelectedUploadId(null);
     setRecords([]);
     setIssues([]);
+    setConfirmedCorrectRecords([]);
     setErrorMessage("");
     setNoticeMessage("已清空上传图片和表格数据。");
   }
@@ -877,6 +995,7 @@ function HomeContent() {
 
       setRecords(payload.records || []);
       setIssues(payload.issues || []);
+      setConfirmedCorrectRecords([]);
       setTrainingExamplesLoaded(payload.trainingExamplesLoaded || 0);
       const organized = organizeRecords(payload.records || []);
       const dedupeMessage =
@@ -925,6 +1044,9 @@ function HomeContent() {
 
       setRecords(nextRecords);
       setIssues(nextIssues);
+      setConfirmedCorrectRecords((current) =>
+        current.filter((item) => !item.sourceImageNames.some((imageName) => sourceImageNames.includes(imageName))),
+      );
       setTrainingExamplesLoaded(payload.trainingExamplesLoaded || 0);
 
       const organized = organizeRecords(nextRecords);
@@ -933,7 +1055,7 @@ function HomeContent() {
           ? `，已合并 ${organized.duplicateCount} 条跨图重复（同一任务在不同界面状态或截图中的重复记录已自动归并）`
           : "";
       setNoticeMessage(
-        `已使用 ${payload.modelUsed || reviewModelName} 重新识别 ${sourceImageNames.length} 张图片${dedupeMessage}。`,
+        `已使用 ${payload.modelUsed || reviewModelName} 重新识别 ${sourceImageNames.length} 张图片（含四次一致性校验；四次一致的已清除待复核标记）${dedupeMessage}。`,
       );
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "再次识别失败。");
@@ -983,6 +1105,9 @@ function HomeContent() {
 
       setRecords(nextRecords);
       setIssues(nextIssues);
+      setConfirmedCorrectRecords((current) =>
+        current.filter((item) => !item.sourceImageNames.some((imageName) => sourceImageNames.includes(imageName))),
+      );
       setTrainingExamplesLoaded(payload.trainingExamplesLoaded || 0);
 
       const organized = organizeRecords(nextRecords);
@@ -991,7 +1116,7 @@ function HomeContent() {
           ? `，已合并 ${organized.duplicateCount} 条跨图重复（同一任务在不同界面状态或截图中的重复记录已自动归并）`
           : "";
       setNoticeMessage(
-        `已使用 ${payload.modelUsed || reviewModelName} 批量再次识别 ${matchedUploads.length} 张待复核图片${dedupeMessage}。`,
+        `已使用 ${payload.modelUsed || reviewModelName} 对 ${matchedUploads.length} 张待复核图各跑四次一致性识别；四次结果一致的条目已自动清除待复核标记，仍不一致的请人工处理${dedupeMessage}。`,
       );
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "批量再次识别失败。");
@@ -1288,12 +1413,32 @@ function HomeContent() {
           ),
       ),
     );
+    setConfirmedCorrectRecords((current) => current.filter((item) => !sourceRecordIds.has(item.recordId)));
 
     if (annotatingRecord?.id === record.id) {
       closeRecordPopup();
     }
 
     setNoticeMessage(`已删除条目：${record.route || "未命名路线"} / ${record.driver || "未命名司机"}`);
+  }
+
+  function toggleRecordConfirmedCorrect(record: PodRecord) {
+    const alreadyConfirmed = isRecordConfirmedCorrect(record);
+    if (alreadyConfirmed) {
+      setConfirmedCorrectRecords((current) => current.filter((item) => item.recordId !== record.id));
+      setNoticeMessage(`已取消人工确认：${record.route || "未命名路线"} / ${record.driver || "未命名司机"}`);
+      return;
+    }
+
+    setConfirmedCorrectRecords((current) => [
+      ...current.filter((item) => item.recordId !== record.id),
+      {
+        recordId: record.id,
+        sourceImageNames: getSourceImageNames(record),
+        route: record.route,
+      },
+    ]);
+    setNoticeMessage(`已标记为正确：${record.route || "未命名路线"} / ${record.driver || "未命名司机"}`);
   }
 
   function applyAnnotationSeedToRecord(recordId: string, seed: AnnotationWorkbenchSeed) {
@@ -1716,62 +1861,64 @@ function HomeContent() {
                 </p>
               </div>
               <div className="flex flex-wrap items-center gap-4">
-                <div className="relative flex items-center">
-                  <input
-                    ref={filterInputRef}
-                    type="text"
-                    placeholder="输入或选择路线..."
-                    value={routeFilter}
-                    onChange={(e) => {
-                      setRouteFilter(e.target.value);
-                      setIsRouteDropdownOpen(true);
-                    }}
-                    onFocus={() => setIsRouteDropdownOpen(true)}
-                    className="w-56 rounded-xl border border-slate-300 bg-slate-50 px-3 py-2 pr-8 text-sm outline-none focus:border-blue-500 focus:bg-white focus:ring-1 focus:ring-blue-500"
-                  />
-                  {routeFilter ? (
-                    <button
-                      onClick={() => {
-                        setRouteFilter("");
-                        setIsRouteDropdownOpen(false);
+                {routeFieldActive ? (
+                  <div className="relative flex items-center">
+                    <input
+                      ref={filterInputRef}
+                      type="text"
+                      placeholder="输入或选择路线..."
+                      value={routeFilter}
+                      onChange={(e) => {
+                        setRouteFilter(e.target.value);
+                        setIsRouteDropdownOpen(true);
                       }}
-                      className="absolute right-2 text-slate-400 hover:text-slate-600"
-                      title="清除搜索"
-                    >
-                      ✕
-                    </button>
-                  ) : (
-                    <svg className="absolute right-2.5 h-4 w-4 text-slate-400 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7" />
-                    </svg>
-                  )}
-                  
-                  {isRouteDropdownOpen && allAvailableRoutes.length > 0 && (
-                    <div 
-                      ref={filterDropdownRef}
-                      className="absolute left-0 top-full z-50 mt-1 max-h-60 w-full overflow-auto rounded-xl border border-slate-200 bg-white py-1 shadow-lg"
-                    >
-                      {filteredRoutes.length > 0 ? (
-                        filteredRoutes.map((route) => (
-                          <button
-                            key={route}
-                            className="w-full px-3 py-2 text-left text-sm hover:bg-slate-50 focus:bg-slate-50 outline-none"
-                            onClick={() => {
-                              setRouteFilter(route);
-                              setIsRouteDropdownOpen(false);
-                            }}
-                          >
-                            {route}
-                          </button>
-                        ))
-                      ) : (
-                        <div className="px-3 py-2 text-sm text-slate-500">
-                          没有匹配的路线
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </div>
+                      onFocus={() => setIsRouteDropdownOpen(true)}
+                      className="w-56 rounded-xl border border-slate-300 bg-slate-50 px-3 py-2 pr-8 text-sm outline-none focus:border-blue-500 focus:bg-white focus:ring-1 focus:ring-blue-500"
+                    />
+                    {routeFilter ? (
+                      <button
+                        onClick={() => {
+                          setRouteFilter("");
+                          setIsRouteDropdownOpen(false);
+                        }}
+                        className="absolute right-2 text-slate-400 hover:text-slate-600"
+                        title="清除搜索"
+                      >
+                        ✕
+                      </button>
+                    ) : (
+                      <svg className="absolute right-2.5 h-4 w-4 text-slate-400 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7" />
+                      </svg>
+                    )}
+
+                    {isRouteDropdownOpen && allAvailableRoutes.length > 0 && (
+                      <div
+                        ref={filterDropdownRef}
+                        className="absolute left-0 top-full z-50 mt-1 max-h-60 w-full overflow-auto rounded-xl border border-slate-200 bg-white py-1 shadow-lg"
+                      >
+                        {filteredRoutes.length > 0 ? (
+                          filteredRoutes.map((route) => (
+                            <button
+                              key={route}
+                              className="w-full px-3 py-2 text-left text-sm hover:bg-slate-50 focus:bg-slate-50 outline-none"
+                              onClick={() => {
+                                setRouteFilter(route);
+                                setIsRouteDropdownOpen(false);
+                              }}
+                            >
+                              {route}
+                            </button>
+                          ))
+                        ) : (
+                          <div className="px-3 py-2 text-sm text-slate-500">
+                            没有匹配的路线
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                ) : null}
                 <div className="flex flex-wrap gap-2">
                   <button
                     className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-medium hover:bg-slate-50"
@@ -1785,8 +1932,8 @@ function HomeContent() {
                     disabled={!reviewRecords.length || isExtracting || isRetryingReviewAll}
                   >
                     {isRetryingReviewAll
-                      ? `待复核批量重识别中...`
-                      : `一键重识别待复核（${reviewRecords.length}）`}
+                      ? `待复核批量复审中…`
+                      : `一键复审待复核（${reviewRecords.length}）`}
                   </button>
                   <button
                     className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-medium hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
@@ -1806,11 +1953,11 @@ function HomeContent() {
               </div>
             </div>
 
-            {issues.length ? (
+            {visibleIssues.length ? (
               <div className="border-b border-slate-200 bg-slate-50 px-5 py-4">
                 <div className="mb-2 text-sm font-semibold">复核提醒</div>
                 <div className="max-h-36 space-y-2 overflow-auto text-sm">
-                  {issues.map((issue, index) => (
+                  {visibleIssues.map((issue, index) => (
                     <div
                       key={`${issue.imageName}-${issue.route || "none"}-${index}`}
                       className={`rounded-xl px-3 py-2 ${issue.level === "error" ? "bg-rose-50 text-rose-700" : "bg-amber-50 text-amber-700"}`}
@@ -1840,11 +1987,13 @@ function HomeContent() {
                   {filteredRecordsResult.records.length ? (
                     groupedRecords.map(([route, routeRecords]) => (
                       <Fragment key={route}>
-                        <tr className="bg-slate-200">
-                          <td colSpan={activeTableFields.length + 1} className="border-b border-slate-300 px-3 py-2 text-left font-semibold text-slate-800">
-                            路线分组：{route} · {routeRecords.length} 条
-                          </td>
-                        </tr>
+                        {routeFieldActive ? (
+                          <tr className="bg-slate-200">
+                            <td colSpan={activeTableFields.length + 1} className="border-b border-slate-300 px-3 py-2 text-left font-semibold text-slate-800">
+                              路线分组：{route} · {routeRecords.length} 条
+                            </td>
+                          </tr>
+                        ) : null}
                         {routeRecords.map((record) => (
                           <tr
                             key={record.id}
@@ -1876,8 +2025,19 @@ function HomeContent() {
                               {recordNeedsReviewBadge(record) ? (
                                 <div className="mt-1 inline-flex rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-700">待复核</div>
                               ) : null}
-                              {hasConsistencyMismatch(record) ? (
-                                <div className="mt-1 inline-flex rounded-full bg-rose-100 px-2 py-0.5 text-xs text-rose-700">四次校验不一致</div>
+                              {isRecordConfirmedCorrect(record) ? (
+                                <div className="mt-1 inline-flex rounded-full bg-emerald-100 px-2 py-0.5 text-xs text-emerald-700">已确认正确</div>
+                              ) : null}
+                              {getConsistencyRatio(record) ? (
+                                <div
+                                  className={`mt-1 inline-flex rounded-full px-2 py-0.5 text-xs ${
+                                    hasConsistencyMismatch(record)
+                                      ? "bg-rose-100 text-rose-700"
+                                      : "bg-emerald-100 text-emerald-700"
+                                  }`}
+                                >
+                                  一致性 {getConsistencyRatio(record)}
+                                </div>
                               ) : null}
                               {hasTotalSourceMismatch(record) ? (
                                 <div className="mt-1 inline-flex rounded-full bg-rose-100 px-2 py-0.5 text-xs text-rose-700">运单量来源异常</div>
@@ -1899,6 +2059,16 @@ function HomeContent() {
                                   onClick={(event) => openRecordImage(record, event.currentTarget)}
                                 >
                                   查看图片
+                                </button>
+                                <button
+                                  className={`rounded-lg px-3 py-1.5 text-xs font-medium ${
+                                    isRecordConfirmedCorrect(record)
+                                      ? "border border-emerald-300 bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
+                                      : "border border-emerald-300 bg-white text-emerald-700 hover:bg-emerald-50"
+                                  }`}
+                                  onClick={() => toggleRecordConfirmedCorrect(record)}
+                                >
+                                  {isRecordConfirmedCorrect(record) ? "取消确认" : "标记正确"}
                                 </button>
                                 {needsManualAnnotation(record) ? (
                                   <button

@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 
 import { getAuthUserOrSkip } from "@/lib/auth-server";
 import { getFormIdFromFormData } from "@/lib/form-request";
-import { saveTrainingImageDataUrl } from "@/lib/training";
+import { saveAgentContextImageDataUrl } from "@/lib/training";
 
 function extensionFromMime(mime: string) {
   if (mime.includes("png")) return "png";
@@ -40,7 +40,7 @@ export async function POST(request: Request) {
     const ext = extensionFromMime(mime);
     const imageName = `ctx-${Date.now()}-${Math.random().toString(36).slice(2, 10)}.${ext}`;
 
-    await saveTrainingImageDataUrl(imageName, dataUrl, formId);
+    await saveAgentContextImageDataUrl(imageName, dataUrl, formId);
 
     return NextResponse.json({
       ok: true,

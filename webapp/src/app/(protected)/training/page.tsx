@@ -51,7 +51,7 @@ type TrainingStatusItem = {
       total: number;
       totalSourceLabel?: string;
       unscanned: number;
-      exceptions: number;
+      exceptions: number | "";
       waybillStatus?: string;
       stationTeam?: string;
       customFieldValues?: Record<string, string | number | "">;

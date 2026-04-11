@@ -1107,7 +1107,10 @@ export function TrainingAnnotationWorkbench({
             total: Number(finalSeed.total) || 0,
             totalSourceLabel: finalSeed.totalSourceLabel || "",
             unscanned: Number(finalSeed.unscanned) || 0,
-            exceptions: Number(finalSeed.exceptions) || 0,
+            exceptions:
+              finalSeed.exceptions === "" || finalSeed.exceptions === null || finalSeed.exceptions === undefined
+                ? ""
+                : Number(finalSeed.exceptions),
             waybillStatus: finalSeed.waybillStatus || "",
             stationTeam: finalSeed.stationTeam || "",
             customFieldValues: finalSeed.customFieldValues || {},

@@ -17,7 +17,12 @@ import { loadTableFields } from "@/lib/table-fields-store";
 
 const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || "https://api.openai.com/v1";
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const PREVIEW_MODEL = process.env.OPENAI_PREVIEW_MODEL || process.env.OPENAI_PRIMARY_MODEL || "gpt-5-mini";
+/** 标注工作台试填：默认对齐填表「复核」所用高阶模型，便于框选区域 OCR 更稳 */
+const PREVIEW_MODEL =
+  process.env.OPENAI_PREVIEW_MODEL ||
+  process.env.OPENAI_REVIEW_MODEL ||
+  process.env.OPENAI_PRIMARY_MODEL ||
+  "gpt-5";
 const OPENAI_REASONING_EFFORT = process.env.OPENAI_REASONING_EFFORT || "minimal";
 
 const DEFAULT_FIELD_LABELS = getFieldLabelMap(DEFAULT_TABLE_FIELDS);

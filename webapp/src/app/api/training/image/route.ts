@@ -3,7 +3,7 @@ import sharp from "sharp";
 
 import { getAuthUserOrSkip } from "@/lib/auth-server";
 import { getFormIdFromRequest } from "@/lib/form-request";
-import { deleteTrainingPoolImage, getTrainingImageBinary, getTrainingImageDataUrl } from "@/lib/training";
+import { deleteTrainingPoolImage, getManagedImageBinary, getManagedImageDataUrl } from "@/lib/training";
 
 export async function GET(request: Request) {
   const { user, skipAuth } = await getAuthUserOrSkip();
@@ -22,7 +22,7 @@ export async function GET(request: Request) {
   }
 
   if (raw) {
-    const imageBinary = await getTrainingImageBinary(imageName, formId);
+    const imageBinary = await getManagedImageBinary(imageName, formId);
     if (!imageBinary) {
       return NextResponse.json({ error: "Training image not found." }, { status: 404 });
     }
@@ -50,7 +50,7 @@ export async function GET(request: Request) {
     });
   }
 
-  const dataUrl = await getTrainingImageDataUrl(imageName, formId);
+  const dataUrl = await getManagedImageDataUrl(imageName, formId);
   if (!dataUrl) {
     return NextResponse.json({ error: "Training image not found." }, { status: 404 });
   }

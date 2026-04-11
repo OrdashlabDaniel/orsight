@@ -58,7 +58,7 @@ export type TrainingExample = {
     total: number;
     totalSourceLabel?: string;
     unscanned: number;
-    exceptions: number;
+    exceptions: number | "";
     waybillStatus?: string;
     stationTeam?: string;
     customFieldValues?: Record<string, string | number | "">;
@@ -92,6 +92,35 @@ export type GlobalRules = {
   workingRules?: string;
 };
 
+export type RecognitionOptionalFieldRule = {
+  fieldId: string;
+  imageTypes?: Array<"POD" | "WEB_TABLE" | "OTHER">;
+  /** 默认 true：仅当模型未主动标记 reviewRequired 时才允许把“缺失”视为正常 */
+  requireModelConfidence?: boolean;
+  note?: string;
+};
+
+export type RecognitionValidationConfig = {
+  optionalFields: RecognitionOptionalFieldRule[];
+};
+
+export type RecognitionFieldOutputFormat =
+  | "as_visible"
+  | "YYYY.MM.DD"
+  | "YYYY-MM-DD"
+  | "MM/DD/YYYY";
+
+export type RecognitionFieldRuleCode = {
+  fieldId: string;
+  outputFormat?: RecognitionFieldOutputFormat;
+  exampleValue?: string;
+  instruction?: string;
+};
+
+export type RecognitionRuleCode = {
+  fieldDirectives: RecognitionFieldRuleCode[];
+};
+
 export type TrainingImageBinary = {
   buffer: Buffer;
   mimeType: string;
@@ -103,7 +132,18 @@ type TrainingImageRequestCache = {
 };
 
 const GLOBAL_RULES_KEY = "__global_rules__";
-
+const AGENT_CONTEXT_IMAGE_ROOT = "agent-context";
+export const RECOGNITION_VALIDATION_CONFIG_BEGIN = "【字段缺省策略(JSON_BEGIN)】";
+export const RECOGNITION_VALIDATION_CONFIG_END = "【字段缺省策略(JSON_END)】";
+const RECOGNITION_VALIDATION_IMAGE_TYPES = new Set(["POD", "WEB_TABLE", "OTHER"]);
+export const RECOGNITION_RULE_CODE_BEGIN = "【识别规则代码(JSON_BEGIN)】";
+export const RECOGNITION_RULE_CODE_END = "【识别规则代码(JSON_END)】";
+const RECOGNITION_FIELD_OUTPUT_FORMATS = new Set<RecognitionFieldOutputFormat>([
+  "as_visible",
+  "YYYY.MM.DD",
+  "YYYY-MM-DD",
+  "MM/DD/YYYY",
+]);
 
 const trainingImageRequestCacheStorage = new AsyncLocalStorage<TrainingImageRequestCache>();
 
@@ -113,6 +153,18 @@ function getTrainingImageRequestCache() {
 
 function trainingImageCacheKey(formId: string, imageName: string) {
   return `${normalizeFormId(formId)}::${imageName}`;
+}
+
+function agentContextImageCacheKey(formId: string, imageName: string) {
+  return `ctx::${normalizeFormId(formId)}::${imageName}`;
+}
+
+export function isAgentContextImageName(imageName: string | undefined | null) {
+  return typeof imageName === "string" && /^ctx-/i.test(imageName.trim());
+}
+
+function getAgentContextImageStoragePath(formId: string, imageName: string) {
+  return `${AGENT_CONTEXT_IMAGE_ROOT}/${normalizeFormId(formId)}/${imageName}`;
 }
 
 function memoizeTrainingImageLoad<T>(
@@ -146,6 +198,227 @@ export async function withTrainingImageRequestCache<T>(loader: () => Promise<T>)
     },
     loader,
   );
+}
+
+function normalizeRecognitionValidationConfig(raw: unknown): RecognitionValidationConfig {
+  if (!raw || typeof raw !== "object") {
+    return { optionalFields: [] };
+  }
+
+  const source = raw as Record<string, unknown>;
+  const optionalFields: RecognitionOptionalFieldRule[] = Array.isArray(source.optionalFields)
+    ? source.optionalFields.reduce<RecognitionOptionalFieldRule[]>((acc, item) => {
+        if (!item || typeof item !== "object") return acc;
+        const rule = item as Record<string, unknown>;
+        const fieldId = typeof rule.fieldId === "string" ? rule.fieldId.trim() : "";
+        if (!fieldId) return acc;
+
+        const imageTypes = Array.isArray(rule.imageTypes)
+          ? rule.imageTypes
+              .map((value) => (typeof value === "string" ? value.trim().toUpperCase() : ""))
+              .filter((value): value is "POD" | "WEB_TABLE" | "OTHER" => RECOGNITION_VALIDATION_IMAGE_TYPES.has(value))
+          : undefined;
+        const note = typeof rule.note === "string" ? rule.note.trim().slice(0, 500) : undefined;
+
+        acc.push({
+          fieldId,
+          ...(imageTypes && imageTypes.length > 0 ? { imageTypes } : {}),
+          requireModelConfidence: rule.requireModelConfidence !== false,
+          ...(note ? { note } : {}),
+        });
+        return acc;
+      }, [])
+    : [];
+
+  return { optionalFields };
+}
+
+export function stripRecognitionValidationConfigBlock(workingRules: string | undefined | null): string {
+  const text = typeof workingRules === "string" ? workingRules : "";
+  const start = text.indexOf(RECOGNITION_VALIDATION_CONFIG_BEGIN);
+  if (start < 0) {
+    return text.trim();
+  }
+
+  const end = text.indexOf(RECOGNITION_VALIDATION_CONFIG_END, start);
+  const afterEnd = end < 0 ? text.length : end + RECOGNITION_VALIDATION_CONFIG_END.length;
+  const before = text.slice(0, start).trimEnd();
+  const after = text.slice(afterEnd).trimStart();
+
+  if (before && after) return `${before}\n\n${after}`;
+  return before || after;
+}
+
+export function extractRecognitionValidationConfigFromWorkingRules(
+  workingRules: string | undefined | null,
+): RecognitionValidationConfig {
+  const text = typeof workingRules === "string" ? workingRules : "";
+  const start = text.indexOf(RECOGNITION_VALIDATION_CONFIG_BEGIN);
+  if (start < 0) {
+    return { optionalFields: [] };
+  }
+
+  const jsonStart = start + RECOGNITION_VALIDATION_CONFIG_BEGIN.length;
+  const end = text.indexOf(RECOGNITION_VALIDATION_CONFIG_END, jsonStart);
+  if (end < 0) {
+    return { optionalFields: [] };
+  }
+
+  const rawJson = text.slice(jsonStart, end).trim();
+  if (!rawJson) {
+    return { optionalFields: [] };
+  }
+
+  try {
+    return normalizeRecognitionValidationConfig(JSON.parse(rawJson));
+  } catch {
+    return { optionalFields: [] };
+  }
+}
+
+export function serializeRecognitionValidationConfig(
+  config: RecognitionValidationConfig | undefined | null,
+): string {
+  return JSON.stringify(normalizeRecognitionValidationConfig(config), null, 2);
+}
+
+export function upsertRecognitionValidationConfigBlock(
+  workingRules: string | undefined | null,
+  config: RecognitionValidationConfig | undefined | null,
+): string {
+  const base = stripRecognitionValidationConfigBlock(workingRules);
+  const json = serializeRecognitionValidationConfig(config);
+  const block = `${RECOGNITION_VALIDATION_CONFIG_BEGIN}\n${json}\n${RECOGNITION_VALIDATION_CONFIG_END}`;
+  return base ? `${base}\n\n${block}` : block;
+}
+
+export function normalizeRecognitionRuleCode(raw: unknown): RecognitionRuleCode {
+  if (!raw || typeof raw !== "object") {
+    return { fieldDirectives: [] };
+  }
+
+  const source = raw as Record<string, unknown>;
+  const fieldDirectives: RecognitionFieldRuleCode[] = Array.isArray(source.fieldDirectives)
+    ? source.fieldDirectives.reduce<RecognitionFieldRuleCode[]>((acc, item) => {
+        if (!item || typeof item !== "object") return acc;
+        const directive = item as Record<string, unknown>;
+        const fieldId = typeof directive.fieldId === "string" ? directive.fieldId.trim() : "";
+        if (!fieldId) return acc;
+
+        const outputFormat =
+          typeof directive.outputFormat === "string" &&
+          RECOGNITION_FIELD_OUTPUT_FORMATS.has(directive.outputFormat as RecognitionFieldOutputFormat)
+            ? (directive.outputFormat as RecognitionFieldOutputFormat)
+            : undefined;
+        const exampleValue =
+          typeof directive.exampleValue === "string" ? directive.exampleValue.trim().slice(0, 80) : undefined;
+        const instruction =
+          typeof directive.instruction === "string" ? directive.instruction.trim().slice(0, 500) : undefined;
+
+        if (!outputFormat && !exampleValue && !instruction) {
+          return acc;
+        }
+
+        acc.push({
+          fieldId,
+          ...(outputFormat ? { outputFormat } : {}),
+          ...(exampleValue ? { exampleValue } : {}),
+          ...(instruction ? { instruction } : {}),
+        });
+        return acc;
+      }, [])
+    : [];
+
+  return { fieldDirectives };
+}
+
+export function stripRecognitionRuleCodeBlock(workingRules: string | undefined | null): string {
+  const text = typeof workingRules === "string" ? workingRules : "";
+  const start = text.indexOf(RECOGNITION_RULE_CODE_BEGIN);
+  if (start < 0) {
+    return text.trim();
+  }
+
+  const end = text.indexOf(RECOGNITION_RULE_CODE_END, start);
+  const afterEnd = end < 0 ? text.length : end + RECOGNITION_RULE_CODE_END.length;
+  const before = text.slice(0, start).trimEnd();
+  const after = text.slice(afterEnd).trimStart();
+
+  if (before && after) return `${before}\n\n${after}`;
+  return before || after;
+}
+
+export function extractRecognitionRuleCodeFromWorkingRules(
+  workingRules: string | undefined | null,
+): RecognitionRuleCode {
+  const text = typeof workingRules === "string" ? workingRules : "";
+  const start = text.indexOf(RECOGNITION_RULE_CODE_BEGIN);
+  if (start < 0) {
+    return { fieldDirectives: [] };
+  }
+
+  const jsonStart = start + RECOGNITION_RULE_CODE_BEGIN.length;
+  const end = text.indexOf(RECOGNITION_RULE_CODE_END, jsonStart);
+  if (end < 0) {
+    return { fieldDirectives: [] };
+  }
+
+  const rawJson = text.slice(jsonStart, end).trim();
+  if (!rawJson) {
+    return { fieldDirectives: [] };
+  }
+
+  try {
+    return normalizeRecognitionRuleCode(JSON.parse(rawJson));
+  } catch {
+    return { fieldDirectives: [] };
+  }
+}
+
+export function serializeRecognitionRuleCode(code: RecognitionRuleCode | undefined | null): string {
+  return JSON.stringify(normalizeRecognitionRuleCode(code), null, 2);
+}
+
+export function upsertRecognitionRuleCodeBlock(
+  workingRules: string | undefined | null,
+  code: RecognitionRuleCode | undefined | null,
+): string {
+  const base = stripRecognitionRuleCodeBlock(workingRules);
+  const json = serializeRecognitionRuleCode(code);
+  const block = `${RECOGNITION_RULE_CODE_BEGIN}\n${json}\n${RECOGNITION_RULE_CODE_END}`;
+  return base ? `${base}\n\n${block}` : block;
+}
+
+export function buildRecognitionRuleCodePromptSection(
+  code: RecognitionRuleCode | undefined | null,
+): string {
+  const normalized = normalizeRecognitionRuleCode(code);
+  if (normalized.fieldDirectives.length === 0) {
+    return "";
+  }
+
+  const lines = [
+    "",
+    "【当前表单可执行规则代码】",
+    "以下结构化规则只对当前填表生效，并会被系统直接读取；模型必须遵守：",
+  ];
+
+  for (const directive of normalized.fieldDirectives) {
+    const parts = [`字段 ${directive.fieldId}`];
+    if (directive.outputFormat) {
+      parts.push(`输出格式 ${directive.outputFormat}`);
+    }
+    if (directive.exampleValue) {
+      parts.push(`示例 ${directive.exampleValue}`);
+    }
+    if (directive.instruction) {
+      parts.push(directive.instruction);
+    }
+    lines.push(`- ${parts.join("；")}`);
+  }
+
+  lines.push("- 不要忽略这些规则，也不要把它们套用到其他未指定字段。");
+  return lines.join("\n");
 }
 
 function emptyGlobalRules(): GlobalRules {
@@ -286,7 +559,8 @@ export async function loadTrainingExamples(formId = DEFAULT_FORM_ID): Promise<Tr
         }
         return typeof row.image_name === "string" && !isReservedTrainingStorageKey(row.image_name);
       })
-      .map((row) => row.data as TrainingExample);
+      .map((row) => row.data as TrainingExample)
+      .filter((example) => example?.imageName && !isAgentContextImageName(example.imageName));
   } catch (error) {
     console.error("Exception loading examples:", error);
     return loadLocalTrainingExamples(normalizedFormId);
@@ -298,6 +572,9 @@ export async function saveTrainingExamples(examples: TrainingExample[], formId =
 }
 
 export async function upsertTrainingExample(example: TrainingExample, formId = DEFAULT_FORM_ID) {
+  if (isAgentContextImageName(example.imageName)) {
+    throw new Error("识别管家上下文图片不能保存到训练池。");
+  }
   const normalizedFormId = normalizeFormId(formId);
   const storageKey = getFormExampleStorageKey(normalizedFormId, example.imageName);
   const admin = getSupabaseAdmin();
@@ -345,6 +622,7 @@ export async function listTrainingImages(formId = DEFAULT_FORM_ID) {
 
   return data
     .filter((file) => /\.(png|jpg|jpeg|webp|pdf)$/i.test(file.name))
+    .filter((file) => !isAgentContextImageName(file.name))
     .map((file) => ({
       imageName: file.name,
       absolutePath:
@@ -401,6 +679,171 @@ export async function saveTrainingImageDataUrl(imageName: string, dataUrl: strin
   if (error) {
     throw new Error(`Failed to upload image to Supabase: ${error.message}`);
   }
+}
+
+function saveLocalAgentContextImageDataUrl(imageName: string, dataUrl: string, formId = DEFAULT_FORM_ID) {
+  const dirPath =
+    resolveAgentContextImageDir(formId) || agentContextImageCandidatePaths(formId)[1];
+  fs.mkdirSync(dirPath, { recursive: true });
+
+  const matched = dataUrl.match(/^data:(.+);base64,(.+)$/);
+  if (!matched) {
+    throw new Error("Invalid image data URL.");
+  }
+
+  const buffer = Buffer.from(matched[2], "base64");
+  fs.writeFileSync(path.join(dirPath, imageName), buffer);
+}
+
+function getLocalAgentContextImageBinaryInternal(
+  imageName: string,
+  formId = DEFAULT_FORM_ID,
+): TrainingImageBinary | null {
+  const dirPath = resolveAgentContextImageDir(formId);
+  if (!dirPath) {
+    return null;
+  }
+
+  const filePath = path.join(dirPath, imageName);
+  if (!fs.existsSync(filePath)) {
+    return null;
+  }
+
+  const buffer = fs.readFileSync(filePath);
+  return {
+    buffer,
+    mimeType: detectMimeTypeFromBuffer(buffer, filePath),
+  };
+}
+
+export async function saveAgentContextImageDataUrl(
+  imageName: string,
+  dataUrl: string,
+  formId = DEFAULT_FORM_ID,
+) {
+  const normalizedFormId = normalizeFormId(formId);
+  const storagePath = getAgentContextImageStoragePath(normalizedFormId, imageName);
+  const admin = getSupabaseAdmin();
+  if (!isSupabaseConfigured() || !admin) {
+    saveLocalAgentContextImageDataUrl(imageName, dataUrl, normalizedFormId);
+    return;
+  }
+
+  const matched = dataUrl.match(/^data:(.+);base64,(.+)$/);
+  if (!matched) {
+    throw new Error("Invalid image data URL.");
+  }
+
+  const mimeType = matched[1];
+  const base64 = matched[2];
+  const buffer = Buffer.from(base64, "base64");
+
+  const { error } = await admin.storage
+    .from("training-images")
+    .upload(storagePath, buffer, {
+      contentType: mimeType,
+      upsert: true,
+    });
+
+  if (error) {
+    throw new Error(`Failed to upload context image to Supabase: ${error.message}`);
+  }
+}
+
+export async function getAgentContextImageBinary(
+  imageName: string,
+  formId = DEFAULT_FORM_ID,
+): Promise<TrainingImageBinary | null> {
+  const normalizedFormId = normalizeFormId(formId);
+  const requestCache = getTrainingImageRequestCache();
+  const cacheKey = agentContextImageCacheKey(normalizedFormId, imageName);
+
+  const loadBinary = async (): Promise<TrainingImageBinary | null> => {
+    const admin = getSupabaseAdmin();
+    if (!isSupabaseConfigured() || !admin) {
+      const localBinary = getLocalAgentContextImageBinaryInternal(imageName, normalizedFormId);
+      if (localBinary) {
+        return localBinary;
+      }
+      return isAgentContextImageName(imageName)
+        ? getLocalTrainingImageBinary(imageName, normalizedFormId)
+        : null;
+    }
+
+    const storagePath = getAgentContextImageStoragePath(normalizedFormId, imageName);
+    const { data, error } = await admin.storage.from("training-images").download(storagePath);
+    if (!error && data) {
+      const buffer = Buffer.from(await data.arrayBuffer());
+      return {
+        buffer,
+        mimeType: detectMimeTypeFromBuffer(buffer, imageName, data.type),
+      };
+    }
+
+    if (!isAgentContextImageName(imageName)) {
+      return null;
+    }
+
+    const legacyStoragePath = getFormImageStoragePath(normalizedFormId, imageName);
+    const { data: legacyData, error: legacyError } = await admin.storage.from("training-images").download(legacyStoragePath);
+    if (legacyError || !legacyData) {
+      return null;
+    }
+
+    const legacyBuffer = Buffer.from(await legacyData.arrayBuffer());
+    return {
+      buffer: legacyBuffer,
+      mimeType: detectMimeTypeFromBuffer(legacyBuffer, imageName, legacyData.type),
+    };
+  };
+
+  if (requestCache) {
+    return memoizeTrainingImageLoad(requestCache.binaryByKey, cacheKey, loadBinary);
+  }
+
+  return loadBinary();
+}
+
+export async function getAgentContextImageDataUrl(
+  imageName: string,
+  formId = DEFAULT_FORM_ID,
+): Promise<string | null> {
+  const requestCache = getTrainingImageRequestCache();
+  const cacheKey = agentContextImageCacheKey(formId, imageName);
+
+  if (requestCache) {
+    return memoizeTrainingImageLoad(requestCache.dataUrlByKey, cacheKey, async () => {
+      const binary = await getAgentContextImageBinary(imageName, formId);
+      if (!binary) {
+        return null;
+      }
+      return `data:${binary.mimeType};base64,${binary.buffer.toString("base64")}`;
+    });
+  }
+
+  const binary = await getAgentContextImageBinary(imageName, formId);
+  if (!binary) {
+    return null;
+  }
+  return `data:${binary.mimeType};base64,${binary.buffer.toString("base64")}`;
+}
+
+export async function getManagedImageBinary(
+  imageName: string,
+  formId = DEFAULT_FORM_ID,
+): Promise<TrainingImageBinary | null> {
+  return isAgentContextImageName(imageName)
+    ? getAgentContextImageBinary(imageName, formId)
+    : getTrainingImageBinary(imageName, formId);
+}
+
+export async function getManagedImageDataUrl(
+  imageName: string,
+  formId = DEFAULT_FORM_ID,
+): Promise<string | null> {
+  return isAgentContextImageName(imageName)
+    ? getAgentContextImageDataUrl(imageName, formId)
+    : getTrainingImageDataUrl(imageName, formId);
 }
 
 function removeImageAssetsFromAgentThread(thread: AgentThreadTurn[] | undefined, imageName: string) {
@@ -571,6 +1014,14 @@ function trainingImageCandidatePaths(formId = DEFAULT_FORM_ID) {
   ];
 }
 
+function agentContextImageCandidatePaths(formId = DEFAULT_FORM_ID) {
+  const normalizedFormId = normalizeFormId(formId);
+  return [
+    path.join(process.cwd(), "image", AGENT_CONTEXT_IMAGE_ROOT, normalizedFormId),
+    path.resolve(process.cwd(), "..", "image", AGENT_CONTEXT_IMAGE_ROOT, normalizedFormId),
+  ];
+}
+
 function resolveExamplesPath(formId = DEFAULT_FORM_ID): string {
   const existing = examplesCandidatePaths(formId).find((filePath) => fs.existsSync(filePath));
   return existing || examplesCandidatePaths(formId)[1];
@@ -578,6 +1029,10 @@ function resolveExamplesPath(formId = DEFAULT_FORM_ID): string {
 
 function resolveTrainingImageDir(formId = DEFAULT_FORM_ID): string | null {
   return trainingImageCandidatePaths(formId).find((dirPath) => fs.existsSync(dirPath)) || null;
+}
+
+function resolveAgentContextImageDir(formId = DEFAULT_FORM_ID): string | null {
+  return agentContextImageCandidatePaths(formId).find((dirPath) => fs.existsSync(dirPath)) || null;
 }
 
 function loadLocalTrainingExamples(formId = DEFAULT_FORM_ID): TrainingExample[] {
@@ -591,7 +1046,10 @@ function loadLocalTrainingExamples(formId = DEFAULT_FORM_ID): TrainingExample[] 
         examples?: TrainingExample[];
       };
       return Array.isArray(payload.examples)
-        ? payload.examples.filter((example) => example.imageName !== GLOBAL_RULES_KEY)
+        ? payload.examples.filter(
+            (example) =>
+              example.imageName !== GLOBAL_RULES_KEY && !isAgentContextImageName(example.imageName),
+          )
         : [];
     } catch {
       return [];
@@ -617,6 +1075,7 @@ function listLocalTrainingImages(formId = DEFAULT_FORM_ID) {
   return fs
     .readdirSync(dirPath)
     .filter((fileName) => /\.(png|jpg|jpeg|webp|pdf)$/i.test(fileName))
+    .filter((fileName) => !isAgentContextImageName(fileName))
     .sort()
     .map((fileName) => ({
       imageName: fileName,
@@ -777,6 +1236,25 @@ function getTrainingTableFieldValues(
     }
   }
   return out;
+}
+
+function hasTrainingFieldEvidence(example: TrainingExample, fieldId: string): boolean {
+  if (example.boxes?.some((box) => box.field === fieldId)) {
+    return true;
+  }
+  const series = example.tableOutput?.fieldValues?.[fieldId];
+  return Array.isArray(series) && series.some((value) => value !== "" && value !== undefined && value !== null);
+}
+
+function getPromptSafeBuiltInValue(
+  example: TrainingExample,
+  fieldId: "exceptions",
+): number | "" {
+  const value = example.output[fieldId];
+  if (fieldId === "exceptions" && value === 0 && !hasTrainingFieldEvidence(example, fieldId)) {
+    return "";
+  }
+  return value;
 }
 
 function buildTableModeExampleSummary(
@@ -1035,7 +1513,9 @@ export async function buildVisualReferencePack(
           ? `totalSourceLabel=${example.output.totalSourceLabel}`
           : "",
         !activeFieldIds || activeFieldIds.has("unscanned") ? `unscanned=${example.output.unscanned}` : "",
-        !activeFieldIds || activeFieldIds.has("exceptions") ? `exceptions=${example.output.exceptions}` : "",
+        (!activeFieldIds || activeFieldIds.has("exceptions")) && getPromptSafeBuiltInValue(example, "exceptions") !== ""
+          ? `exceptions=${getPromptSafeBuiltInValue(example, "exceptions")}`
+          : "",
         (!activeFieldIds || activeFieldIds.has("waybillStatus")) && example.output.waybillStatus
           ? `waybillStatus=${example.output.waybillStatus}`
           : "",
@@ -1243,9 +1723,13 @@ export async function buildAgentThreadReferenceImages(
 
   const seen = new Set<string>();
   const order: string[] = [];
-  for (const turn of thread) {
+  for (let turnIndex = thread.length - 1; turnIndex >= 0; turnIndex -= 1) {
+    const turn = thread[turnIndex];
+    if (!turn) continue;
     if (turn.role !== "user" || !turn.assets?.length) continue;
-    for (const a of turn.assets) {
+    for (let assetIndex = turn.assets.length - 1; assetIndex >= 0; assetIndex -= 1) {
+      const a = turn.assets[assetIndex];
+      if (!a) continue;
       if (a.kind !== "image") continue;
       if (seen.has(a.imageName)) continue;
       seen.add(a.imageName);
@@ -1257,7 +1741,7 @@ export async function buildAgentThreadReferenceImages(
 
   const refs: Array<{ imageName: string; caption: string; dataUrl: string }> = [];
   for (const imageName of order) {
-    const dataUrl = await getTrainingImageDataUrl(imageName, formId);
+    const dataUrl = await getManagedImageDataUrl(imageName, formId);
     if (!dataUrl) continue;
     refs.push({
       imageName,
@@ -1336,7 +1820,9 @@ export function buildTrainingPromptSection(
         `total=${example.output.total}`,
         example.output.totalSourceLabel ? `totalSourceLabel=${example.output.totalSourceLabel}` : "",
         `unscanned=${example.output.unscanned}`,
-        `exceptions=${example.output.exceptions}`,
+        getPromptSafeBuiltInValue(example, "exceptions") !== ""
+          ? `exceptions=${getPromptSafeBuiltInValue(example, "exceptions")}`
+          : "",
         example.output.waybillStatus ? `waybillStatus=${example.output.waybillStatus}` : "",
         example.output.stationTeam ? `stationTeam=${example.output.stationTeam}` : "",
       ]

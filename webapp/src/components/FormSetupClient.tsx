@@ -58,7 +58,7 @@ type TrainingStatusItem = {
       total: number;
       totalSourceLabel?: string;
       unscanned: number;
-      exceptions: number;
+      exceptions: number | "";
       waybillStatus?: string;
       stationTeam?: string;
       customFieldValues?: Record<string, string | number | "">;
@@ -382,6 +382,14 @@ export function FormSetupClient({ initialForm }: { initialForm: FormDefinition }
         if (!next[imageName]) {
           next[imageName] = buildTrainingImageRawUrl(formId, imageName);
         }
+      }
+      const currentKeys = Object.keys(current);
+      const nextKeys = Object.keys(next);
+      const unchanged =
+        currentKeys.length === nextKeys.length &&
+        currentKeys.every((key) => next[key] === current[key]);
+      if (unchanged) {
+        return current;
       }
       return next;
     });

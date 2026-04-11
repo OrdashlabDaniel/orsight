@@ -15,9 +15,12 @@ import {
 } from "@/lib/forms";
 import { loadTableFields, saveTableFields } from "@/lib/table-fields-store";
 import {
+  getManagedImageDataUrl,
   getTrainingImageDataUrl,
+  isAgentContextImageName,
   loadGlobalRules,
   loadTrainingExamples,
+  saveAgentContextImageDataUrl,
   saveGlobalRules,
   saveTrainingImageDataUrl,
   upsertTrainingExample,
@@ -255,11 +258,15 @@ export async function cloneFormSpace(sourceFormId: string, targetFormId: string)
       if (asset.kind !== "image" || copiedImages.has(asset.imageName)) {
         continue;
       }
-      const dataUrl = await getTrainingImageDataUrl(asset.imageName, sourceFormId);
+      const dataUrl = await getManagedImageDataUrl(asset.imageName, sourceFormId);
       if (!dataUrl) {
         continue;
       }
-      await saveTrainingImageDataUrl(asset.imageName, dataUrl, targetFormId);
+      if (isAgentContextImageName(asset.imageName)) {
+        await saveAgentContextImageDataUrl(asset.imageName, dataUrl, targetFormId);
+      } else {
+        await saveTrainingImageDataUrl(asset.imageName, dataUrl, targetFormId);
+      }
       copiedImages.add(asset.imageName);
     }
   }
