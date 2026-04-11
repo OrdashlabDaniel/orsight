@@ -2249,7 +2249,7 @@ function HomeContent() {
                     onClick={downloadExcel}
                     disabled={!filteredRecordsResult.records.length}
                   >
-                    Excel
+                    {t("home.downloadExcel")}
                   </button>
                 </div>
               </div>
