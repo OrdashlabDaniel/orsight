@@ -21,15 +21,17 @@
   box-sizing: border-box;
 }
 
+/* Noto stack: Latin first, then SC for CJK. Variables must be on <html> — Tailwind
+   preflight sets font-family on html using --font-sans; vars on <body> do not apply there. */
 html {
   scroll-behavior: smooth;
+  font-family: var(--font-noto-sans), var(--font-noto-sans-sc), "Noto Sans",
+    "Noto Sans SC", sans-serif;
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: var(--font-noto-sans), var(--font-noto-sans-sc), system-ui,
-    sans-serif;
 }
 
 button {

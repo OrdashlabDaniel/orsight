@@ -1,0 +1,11 @@
+---
+description: Orsight web apps must use Noto Sans / Noto Sans SC as UI fonts
+alwaysApply: true
+---
+
+# Typography (`webapp` and `admin-webapp`)
+
+- **Primary UI fonts**: `Noto Sans` (Latin) and `Noto Sans SC` (Chinese) via `next/font/google` in each app’s root `src/app/layout.tsx` (`Noto_Sans`, `Noto_Sans_SC`; monospace: `Noto_Sans_Mono`).
+- **Put font `variable` classes on `<html>`**, not only `<body>`. Tailwind v4 preflight sets `font-family` on `html` from `--font-sans` → `var(--font-noto-sans)`; variables on `body` are invisible to `html`, so the app falls back to `ui-sans-serif` / system UI.
+- Keep `globals.css` `@theme` `--font-sans` / `--font-mono` in sync, plus explicit `html { font-family: var(--font-noto-sans), var(--font-noto-sans-sc), … }` as in the repo.
+- Do not replace the primary UI stack with Geist or another family unless product explicitly requests it.

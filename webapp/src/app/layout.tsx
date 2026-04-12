@@ -34,10 +34,11 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="zh-CN">
-      <body
-        className={`${notoSans.variable} ${notoSansSC.variable} ${notoSansMono.variable} antialiased`}
-      >
+    <html
+      lang="zh-CN"
+      className={`${notoSans.variable} ${notoSansSC.variable} ${notoSansMono.variable}`}
+    >
+      <body className="antialiased">
         <AppProviders>{children}</AppProviders>
       </body>
     </html>

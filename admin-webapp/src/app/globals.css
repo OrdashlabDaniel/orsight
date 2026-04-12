@@ -19,9 +19,12 @@
   }
 }
 
+html {
+  font-family: var(--font-noto-sans), var(--font-noto-sans-sc), "Noto Sans",
+    "Noto Sans SC", sans-serif;
+}
+
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: var(--font-noto-sans), var(--font-noto-sans-sc), system-ui,
-    sans-serif;
 }
