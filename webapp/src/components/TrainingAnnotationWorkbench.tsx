@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useLocale } from "@/i18n/LocaleProvider";
+import { getLocalizedTableFieldLabel } from "@/lib/table-field-display";
 import { DEFAULT_TABLE_FIELDS, isBuiltInFieldId, type TableFieldDefinition } from "@/lib/table-fields";
 import { ensureImageDataUrlFromSource } from "@/lib/client-visual-upload";
 
@@ -297,6 +298,11 @@ export type TrainingAnnotationWorkbenchProps = {
   initialNotes?: string;
   initialField?: AnnotationField;
   onClose: () => void;
+  onApply?: (result: {
+    finalSeed: AnnotationWorkbenchSeed;
+    annotationMode: AnnotationMode;
+    tableFieldValues?: TableAnnotationFieldValues;
+  }) => void | Promise<void>;
   onSaved?: (result: {
     totalExamples?: number;
     finalSeed: AnnotationWorkbenchSeed;
@@ -321,11 +327,12 @@ export function TrainingAnnotationWorkbench({
   initialNotes,
   initialField,
   onClose,
+  onApply,
   onSaved,
   onNotice,
   onError,
 }: TrainingAnnotationWorkbenchProps) {
-  const { t } = useLocale();
+  const { locale, t } = useLocale();
   const activeFieldDefinitions = useMemo(
     () => (fieldDefinitions?.length ? fieldDefinitions : DEFAULT_TABLE_FIELDS).filter((field) => field.active),
     [fieldDefinitions],
@@ -350,6 +357,7 @@ export function TrainingAnnotationWorkbench({
   const [annotationNotes, setAnnotationNotes] = useState(initialNotes ?? t("annotation.defaultNotes"));
   const [drawingState, setDrawingState] = useState<DrawingState | null>(null);
   const [isSavingTraining, setIsSavingTraining] = useState(false);
+  const [isApplyingToMain, setIsApplyingToMain] = useState(false);
   const [isPreviewFillLoading, setIsPreviewFillLoading] = useState(false);
   const [annotationZoom, setAnnotationZoom] = useState(100);
   const [annotationInteractionMode, setAnnotationInteractionMode] = useState<"draw" | "pan">("draw");
@@ -358,6 +366,43 @@ export function TrainingAnnotationWorkbench({
   const [imageViewportSize, setImageViewportSize] = useState({ width: 0, height: 0 });
   const [undoStack, setUndoStack] = useState<WorkbenchAnnotationBox[][]>([]);
   const [layoutTick, setLayoutTick] = useState(0);
+  const [leftPanelWidth, setLeftPanelWidth] = useState(65);
+  /** Narrow layout: fraction of workbench height for the image pane (stacked column). */
+  const [stackedImageHeightPct, setStackedImageHeightPct] = useState(48);
+  type WorkbenchResizeKind = null | "panels";
+  const [workbenchResizeKind, setWorkbenchResizeKind] = useState<WorkbenchResizeKind>(null);
+
+  const workbenchMainRef = useRef<HTMLDivElement | null>(null);
+  const hasCenteredViewportRef = useRef(false);
+
+  useEffect(() => {
+    if (!workbenchResizeKind) return;
+    const isWideSplit = () => window.matchMedia("(min-width: 1024px)").matches;
+
+    const handleMouseMove = (e: MouseEvent) => {
+      const container = workbenchMainRef.current;
+      if (!container) return;
+      const rect = container.getBoundingClientRect();
+      if (isWideSplit()) {
+        let pct = ((e.clientX - rect.left) / rect.width) * 100;
+        pct = Math.max(28, Math.min(82, pct));
+        setLeftPanelWidth(pct);
+      } else {
+        let pct = ((e.clientY - rect.top) / rect.height) * 100;
+        pct = Math.max(22, Math.min(78, pct));
+        setStackedImageHeightPct(pct);
+      }
+    };
+
+    const handleMouseUp = () => setWorkbenchResizeKind(null);
+    document.addEventListener("mousemove", handleMouseMove);
+    document.addEventListener("mouseup", handleMouseUp);
+    return () => {
+      document.removeEventListener("mousemove", handleMouseMove);
+      document.removeEventListener("mouseup", handleMouseUp);
+    };
+  }, [workbenchResizeKind]);
+
   const bumpLayout = useCallback(() => setLayoutTick((t) => t + 1), []);
   const visibleAnnotationBoxes = useMemo(
     () => annotationBoxes.filter((box) => activeFieldIdSet.has(box.field)),
@@ -381,6 +426,22 @@ export function TrainingAnnotationWorkbench({
       height: Math.max(1, Math.round(imageNaturalSize.height * scale)),
     };
   }, [annotationZoom, imageNaturalSize, imageViewportSize]);
+  const imagePanSurface = useMemo(() => {
+    const viewportWidth = Math.max(1, imageViewportSize.width);
+    const viewportHeight = Math.max(1, imageViewportSize.height);
+    const canvasWidth = renderedImageSize?.width ?? viewportWidth;
+    const canvasHeight = renderedImageSize?.height ?? viewportHeight;
+    const padX = Math.max(120, Math.round(viewportWidth * 0.6));
+    const padY = Math.max(120, Math.round(viewportHeight * 0.6));
+    return {
+      canvasWidth,
+      canvasHeight,
+      left: padX,
+      top: padY,
+      width: canvasWidth + padX * 2,
+      height: canvasHeight + padY * 2,
+    };
+  }, [imageViewportSize.height, imageViewportSize.width, renderedImageSize]);
   const tableModeSeed = useMemo(
     () => buildSeedFromTableFieldValues(parsedTableFieldValues, activeFieldDefinitions),
     [parsedTableFieldValues, activeFieldDefinitions],
@@ -566,6 +627,7 @@ export function TrainingAnnotationWorkbench({
   useEffect(() => {
     if (!open) {
       seedJsonRef.current = "";
+      hasCenteredViewportRef.current = false;
       return;
     }
     const next = JSON.stringify({
@@ -593,6 +655,7 @@ export function TrainingAnnotationWorkbench({
     setIsPanningViewport(false);
     viewportPanStateRef.current = null;
     setDrawingState(null);
+    hasCenteredViewportRef.current = false;
   }, [
     open,
     initialSeed,
@@ -605,6 +668,40 @@ export function TrainingAnnotationWorkbench({
     activeFieldDefinitions,
     activeFieldIdSet,
     t,
+  ]);
+
+  useEffect(() => {
+    if (
+      !open ||
+      hasCenteredViewportRef.current ||
+      !resolvedImageSrc ||
+      !renderedImageSize ||
+      !imageViewportSize.width ||
+      !imageViewportSize.height
+    ) {
+      return;
+    }
+    const viewport = annotationViewportRef.current;
+    if (!viewport) {
+      return;
+    }
+    viewport.scrollLeft = Math.max(
+      0,
+      imagePanSurface.left + renderedImageSize.width / 2 - viewport.clientWidth / 2,
+    );
+    viewport.scrollTop = Math.max(
+      0,
+      imagePanSurface.top + renderedImageSize.height / 2 - viewport.clientHeight / 2,
+    );
+    hasCenteredViewportRef.current = true;
+  }, [
+    imagePanSurface.left,
+    imagePanSurface.top,
+    imageViewportSize.height,
+    imageViewportSize.width,
+    open,
+    renderedImageSize,
+    resolvedImageSrc,
   ]);
 
   useEffect(() => {
@@ -1167,6 +1264,38 @@ export function TrainingAnnotationWorkbench({
     }
   }
 
+  async function applyAnnotationToMainTable() {
+    if (!onApply) {
+      return;
+    }
+    if (!open || !imageName || !resolvedImageSrc) {
+      onError?.(t("annotation.saveNothing"));
+      return;
+    }
+    if (!visibleAnnotationBoxes.length) {
+      onError?.(t("annotation.saveNeedBox"));
+      return;
+    }
+
+    setIsApplyingToMain(true);
+    try {
+      const tableFieldValues = annotationMode === "table" ? parsedTableFieldValues : undefined;
+      const finalSeed = annotationMode === "table" ? tableModeSeed : manualToFinalSeed(manualRecord);
+      await Promise.resolve(
+        onApply({
+          finalSeed,
+          annotationMode,
+          tableFieldValues,
+        }),
+      );
+      handleClose();
+    } catch (error) {
+      onError?.(error instanceof Error ? error.message : t("annotation.errApplyMain"));
+    } finally {
+      setIsApplyingToMain(false);
+    }
+  }
+
   if (!open) {
     return null;
   }
@@ -1215,9 +1344,23 @@ export function TrainingAnnotationWorkbench({
         </div>
         </div>
 
-        <div className="grid min-h-0 flex-1 gap-4 overflow-y-auto pr-1 lg:grid-cols-[minmax(0,1.9fr)_minmax(360px,430px)] xl:grid-cols-[minmax(0,2.2fr)_minmax(360px,420px)]">
-          <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
-            <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+        <div
+          ref={workbenchMainRef}
+          id="annotation-workbench-main"
+          className={`flex min-h-0 flex-1 flex-col gap-0 overflow-hidden pr-0 lg:flex-row lg:gap-4 lg:pr-1 ${
+            workbenchResizeKind ? "select-none" : ""
+          }`}
+        >
+          <div
+            className="flex min-h-0 min-w-0 flex-col rounded-2xl border border-slate-200 bg-slate-50 p-3 max-lg:basis-[var(--stack-image-pct)] max-lg:flex-none max-lg:min-h-[200px] lg:w-[var(--left-panel-width)] lg:max-w-none lg:shrink-0"
+            style={
+              {
+                "--left-panel-width": `${leftPanelWidth}%`,
+                "--stack-image-pct": `${stackedImageHeightPct}%`,
+              } as React.CSSProperties
+            }
+          >
+            <div className="mb-3 flex shrink-0 flex-wrap items-center justify-between gap-3">
               <div>
                 <div className="text-sm font-medium text-slate-700">{t("annotation.imageLabel", { name: imageName })}</div>
                 <div className="mt-1 text-xs text-slate-500">{t("annotation.saveHint1")}</div>
@@ -1283,8 +1426,17 @@ export function TrainingAnnotationWorkbench({
                 </button>
               </div>
             </div>
-            <div ref={annotationViewportRef} className="min-h-[min(72vh,860px)] max-h-[82vh] overflow-auto rounded-xl bg-black/5 p-3">
-              <div className={`min-h-full min-w-full ${annotationZoom <= 100 ? "flex items-center justify-center" : "block"}`}>
+            <div
+              ref={annotationViewportRef}
+              className="min-h-0 min-w-0 flex-1 overflow-x-auto overflow-y-auto rounded-xl bg-black/5 p-3"
+            >
+              <div
+                className="relative"
+                style={{
+                  width: `${imagePanSurface.width}px`,
+                  height: `${imagePanSurface.height}px`,
+                }}
+              >
               <div
                 ref={annotationCanvasRef}
                 className={`relative select-none [touch-action:none] ${
@@ -1294,11 +1446,13 @@ export function TrainingAnnotationWorkbench({
                       : "cursor-grab"
                     : "cursor-crosshair"
                 }`}
-                style={
-                  renderedImageSize
-                    ? { width: `${renderedImageSize.width}px`, height: `${renderedImageSize.height}px` }
-                    : { width: "100%" }
-                }
+                style={{
+                  position: "absolute",
+                  left: `${imagePanSurface.left}px`,
+                  top: `${imagePanSurface.top}px`,
+                  width: `${imagePanSurface.canvasWidth}px`,
+                  height: `${imagePanSurface.canvasHeight}px`,
+                }}
                 data-layout-tick={layoutTick}
                 onMouseDown={beginDrawing}
                 onMouseMove={updateDrawing}
@@ -1372,9 +1526,19 @@ export function TrainingAnnotationWorkbench({
             </div>
           </div>
 
-          <div className="flex min-h-0 flex-col gap-4">
-            <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-              <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+          <div
+            role="separator"
+            className="flex shrink-0 cursor-row-resize items-center justify-center rounded-md bg-slate-200/60 py-1 hover:bg-slate-300/70 lg:w-2 lg:cursor-col-resize lg:bg-transparent lg:py-0 lg:hover:bg-slate-100"
+            onMouseDown={(e) => {
+              e.preventDefault();
+              setWorkbenchResizeKind("panels");
+            }}
+          >
+            <div className="h-1 w-12 rounded-full bg-slate-400 lg:h-10 lg:w-1" />
+          </div>
+
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-4 overflow-x-auto overflow-y-auto rounded-2xl border border-slate-200 bg-slate-50 p-4 max-lg:min-h-0">
+            <div className="mb-3 flex shrink-0 flex-wrap items-center justify-between gap-3">
                 <div>
                   <div className="text-sm font-medium text-slate-700">{t("annotation.fillValues")}</div>
                   <div className="mt-1 text-xs text-slate-500">
@@ -1410,63 +1574,14 @@ export function TrainingAnnotationWorkbench({
                 </div>
               </div>
 
-              {annotationMode === "table" ? (
-                <div className="space-y-3">
-                  {activeFieldDefinitions.map((field) => (
-                    <div key={field.id}>
-                      <div className="mb-1 flex items-center justify-between gap-2 text-xs text-slate-500">
-                        <label>{field.label}</label>
-                        <span>
-                          {t("annotation.rowsCount", {
-                            n: (parsedTableFieldValues?.[field.id]?.length ?? 0) || 0,
-                          })}
-                        </span>
-                      </div>
-                      <textarea
-                        className="min-h-[88px] w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-blue-500"
-                        value={tableFieldTexts[field.id] ?? ""}
-                        onChange={(e) => setAnnotationFieldValue(field, e.target.value)}
-                        placeholder={t("annotation.phTableLines", { label: field.label })}
-                      />
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <div className="space-y-3">
-                  {activeFieldDefinitions.map((field) => (
-                    <div key={field.id}>
-                      <label className="mb-1 block text-xs text-slate-500">{field.label}</label>
-                      <input
-                        type={field.type === "number" ? "number" : "text"}
-                        className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-blue-500"
-                        value={getAnnotationFieldValue(field.id)}
-                        onChange={(e) => setAnnotationFieldValue(field, e.target.value)}
-                        placeholder={t("annotation.phField", { label: field.label })}
-                      />
-                      {field.id === "total" && (
-                        <input
-                          type="text"
-                          className="mt-2 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-blue-500"
-                          value={manualRecord.totalSourceLabel || ""}
-                          onChange={(e) => setManualRecord({ ...manualRecord, totalSourceLabel: e.target.value })}
-                          placeholder={t("annotation.phTotalSource")}
-                        />
-                      )}
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-            <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-              <div className="mb-3 text-sm font-medium text-slate-700">{t("annotation.pickField")}</div>
               <div className="space-y-3">
                 {activeFieldDefinitions.map((field) => {
                   const boxesFor = visibleAnnotationBoxes.filter((box) => box.field === field.id);
                   const count = boxesFor.length;
                   const hasBox = count > 0;
                   return (
-                    <div key={field.id} className="rounded-lg border border-slate-100 bg-white/60 px-2 py-2">
-                      <div className="flex flex-wrap items-center gap-2 text-sm">
+                    <div key={field.id} className="rounded-lg border border-slate-100 bg-white/60 p-3">
+                      <div className="mb-2 flex flex-wrap items-center gap-2 text-sm">
                         <label className="flex min-w-0 flex-1 cursor-pointer items-center gap-2">
                           <input
                             type="radio"
@@ -1475,7 +1590,9 @@ export function TrainingAnnotationWorkbench({
                             onChange={() => setAnnotationField(field.id)}
                             className="text-blue-600"
                           />
-                          <span className={hasBox ? "font-medium text-slate-900" : "text-slate-500"}>{field.label}</span>
+                          <span className={hasBox ? "font-medium text-slate-900" : "text-slate-500"}>
+                            {getLocalizedTableFieldLabel(field, locale)}
+                          </span>
                           {count > 0 ? (
                             <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-600">
                               {t("annotation.boxesCount", { n: count })}
@@ -1511,6 +1628,30 @@ export function TrainingAnnotationWorkbench({
                           <span className="text-xs text-slate-400">{t("annotation.noSelection")}</span>
                         )}
                       </div>
+
+                      {annotationMode === "table" ? (
+                        <textarea
+                          className="min-h-[88px] w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-blue-500"
+                          value={tableFieldTexts[field.id] ?? ""}
+                          onChange={(e) => setAnnotationFieldValue(field, e.target.value)}
+                          placeholder={t("annotation.phTableLines", {
+                            label: getLocalizedTableFieldLabel(field, locale),
+                          })}
+                        />
+                      ) : (
+                        <>
+                          <input
+                            type={field.type === "number" ? "number" : "text"}
+                            className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-blue-500"
+                            value={getAnnotationFieldValue(field.id)}
+                            onChange={(e) => setAnnotationFieldValue(field, e.target.value)}
+                            placeholder={t("annotation.phField", {
+                              label: getLocalizedTableFieldLabel(field, locale),
+                            })}
+                          />
+                        </>
+                      )}
+
                       {count > 1 ? (
                         <ul className="mt-2 space-y-1 border-t border-slate-100 pt-2 text-[11px] text-slate-600">
                           {boxesFor.map((b, i) => (
@@ -1537,45 +1678,47 @@ export function TrainingAnnotationWorkbench({
               <p className="mt-3 text-xs text-slate-500">
                 {t("annotation.multiBoxHint")}
               </p>
-            </div>
-
-            <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-              <div className="mb-3 text-sm font-medium text-slate-700">{t("annotation.extraNotes")}</div>
-              <textarea
-                className="w-full resize-none rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-blue-500"
-                rows={2}
-                value={annotationNotes}
-                onChange={(e) => setAnnotationNotes(e.target.value)}
-                placeholder={t("annotation.notesPh")}
-              />
-            </div>
-
-            <div className="mt-auto flex flex-col gap-2">
-              <button
-                type="button"
-                className="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm font-medium text-slate-700 hover:bg-slate-50"
-                onClick={handleClose}
-              >
-                {t("annotation.closePanel")}
-              </button>
-              <button
-                type="button"
-                className="w-full rounded-xl border border-violet-300 bg-violet-50 px-4 py-3 text-sm font-medium text-violet-900 hover:bg-violet-100 disabled:cursor-not-allowed disabled:opacity-50"
-                onClick={() => void previewFillFromAnnotations()}
-                disabled={isPreviewFillLoading || isSavingTraining || !resolvedImageSrc || visibleAnnotationBoxes.length === 0}
-              >
-                {isPreviewFillLoading ? t("annotation.previewLoading") : t("annotation.previewAi")}
-              </button>
-              <button
-                type="button"
-                className="w-full rounded-xl bg-emerald-600 px-4 py-3 font-medium text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:bg-emerald-300"
-                onClick={() => void saveAnnotationToTrainingPool()}
-                disabled={isSavingTraining || isPreviewFillLoading}
-              >
-                {isSavingTraining ? t("annotation.saving") : t("annotation.saveTrain")}
-              </button>
-            </div>
           </div>
+        </div>
+        <div className="flex shrink-0 flex-wrap items-center justify-center gap-4 border-t border-slate-200 bg-white p-4">
+          <button
+            type="button"
+            className="rounded-xl border border-violet-300 bg-violet-50 px-8 py-3 text-sm font-medium text-violet-900 hover:bg-violet-100 disabled:cursor-not-allowed disabled:opacity-50"
+            onClick={() => void previewFillFromAnnotations()}
+            disabled={
+              isPreviewFillLoading ||
+              isSavingTraining ||
+              isApplyingToMain ||
+              !resolvedImageSrc ||
+              visibleAnnotationBoxes.length === 0
+            }
+          >
+            {isPreviewFillLoading ? t("annotation.previewLoading") : t("annotation.previewAi")}
+          </button>
+          {onApply ? (
+            <button
+              type="button"
+              className="rounded-xl border border-sky-300 bg-sky-50 px-8 py-3 text-sm font-medium text-sky-900 hover:bg-sky-100 disabled:cursor-not-allowed disabled:opacity-50"
+              onClick={() => void applyAnnotationToMainTable()}
+              disabled={
+                isApplyingToMain ||
+                isSavingTraining ||
+                isPreviewFillLoading ||
+                !resolvedImageSrc ||
+                visibleAnnotationBoxes.length === 0
+              }
+            >
+              {isApplyingToMain ? t("annotation.applyingMain") : t("annotation.applyMain")}
+            </button>
+          ) : null}
+          <button
+            type="button"
+            className="rounded-xl bg-emerald-600 px-8 py-3 text-sm font-medium text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:bg-emerald-300"
+            onClick={() => void saveAnnotationToTrainingPool()}
+            disabled={isSavingTraining || isPreviewFillLoading || isApplyingToMain}
+          >
+            {isSavingTraining ? t("annotation.saving") : t("annotation.saveTrain")}
+          </button>
         </div>
       </div>
     </div>

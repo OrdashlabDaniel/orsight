@@ -15,6 +15,8 @@ import {
   type TableAnnotationFieldValues,
   type WorkbenchAnnotationBox,
 } from "@/components/TrainingAnnotationWorkbench";
+import { getLocalizedFormName } from "@/lib/form-display";
+import { getLocalizedTableFieldLabel } from "@/lib/table-field-display";
 import {
   DEFAULT_FORM_ID,
   buildFormFillHref,
@@ -32,6 +34,7 @@ import {
   type TableFieldDefinition,
   type TableFieldType,
 } from "@/lib/table-fields";
+import { useLocale } from "@/i18n/LocaleProvider";
 
 type FormResponse = {
   form?: FormDefinition | null;
@@ -109,21 +112,6 @@ function withFormId(formId: string, path: string) {
 
 function buildTrainingImageRawUrl(formId: string, imageName: string) {
   return withFormId(formId, `/api/training/image?imageName=${encodeURIComponent(imageName)}&raw=1`);
-}
-
-function formatTemplateSource(source?: FormDefinition["templateSource"]) {
-  switch (source) {
-    case "manual":
-      return "手动搭建";
-    case "excel":
-      return "Excel 模板导入";
-    case "image":
-      return "模板图片识别";
-    case "copied":
-      return "复制自已有填表";
-    default:
-      return "空白模板";
-  }
 }
 
 function normalizeHeaderCells(row: unknown[]) {
@@ -255,9 +243,15 @@ function UploadDropArea({
 }
 
 export function FormSetupClient({ initialForm }: { initialForm: FormDefinition }) {
+  const { locale, t } = useLocale();
   const router = useRouter();
   const formId = initialForm.id;
   const apiPathBuilder = useCallback((path: string) => withFormId(formId, path), [formId]);
+
+  function formatTemplateSourceLabel(source?: FormDefinition["templateSource"]) {
+    const key = source ?? "blank";
+    return t(`formSetup.templateSource.${key}`);
+  }
 
   const [form, setForm] = useState<FormDefinition>(initialForm);
   const [tableFields, setTableFields] = useState<TableFieldDefinition[]>([]);
@@ -786,22 +780,26 @@ export function FormSetupClient({ initialForm }: { initialForm: FormDefinition }
         <header className="rounded-3xl border border-slate-200 bg-white px-6 py-5 shadow-sm">
           <div className="mb-3 flex flex-wrap items-center justify-between gap-3 text-sm">
             <Link href="/forms" className="font-medium text-blue-600 hover:underline">
-              ← 返回填表池
+              {t("formSetup.backPool")}
             </Link>
             <div className="flex flex-wrap items-center gap-2">
-              <span className="rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-600">当前填表: {form.name}</span>
+              <span className="rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-600">
+                {t("formSetup.currentFormBadge", { name: getLocalizedFormName(form, locale) })}
+              </span>
               <span className="rounded-full bg-blue-100 px-3 py-1 text-xs text-blue-700">
-                模板来源: {formatTemplateSource(form.templateSource)}
+                {t("formSetup.templateOrigin", { source: formatTemplateSourceLabel(form.templateSource) })}
               </span>
               <Link
                 href={buildFormTrainingHref(formId)}
                 className="rounded-xl border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
               >
-                进入完整训练模式
+                {t("formSetup.openFullTraining")}
               </Link>
             </div>
           </div>
-          <h1 className="text-3xl font-semibold tracking-tight">{form.name} · 新建填表</h1>
+          <h1 className="text-3xl font-semibold tracking-tight">
+            {t("formSetup.headerWithFormName", { name: getLocalizedFormName(form, locale) })}
+          </h1>
           <p className="mt-2 text-sm text-slate-600">
             每个填表都会拥有自己的表格模板、训练池和专属工作规则。先搭建模板，再上传数据来源图片标注训练，最后完成新建进入填表模式。
           </p>
@@ -872,7 +870,7 @@ export function FormSetupClient({ initialForm }: { initialForm: FormDefinition }
                   >
                     {activeTableFields.map((field) => (
                       <div key={field.id} className="border-r border-slate-800 px-3 py-3 last:border-r-0">
-                        {field.label}
+                        {getLocalizedTableFieldLabel(field, locale)}
                       </div>
                     ))}
                   </div>
@@ -975,7 +973,9 @@ export function FormSetupClient({ initialForm }: { initialForm: FormDefinition }
                           className="flex items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-3 py-3"
                         >
                           <div>
-                            <div className="text-sm font-medium text-slate-700">{field.label}</div>
+                            <div className="text-sm font-medium text-slate-700">
+                              {getLocalizedTableFieldLabel(field, locale)}
+                            </div>
                             <div className="mt-1 text-xs text-slate-500">
                               {field.type === "number" ? "数字项目" : "文本项目"}
                             </div>

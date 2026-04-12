@@ -30,6 +30,7 @@ import {
   setRecordFieldValue,
   type TableFieldDefinition,
 } from "@/lib/table-fields";
+import { getLocalizedTableFieldLabel } from "@/lib/table-field-display";
 import { DEFAULT_FORM_ID, buildFormTrainingHref, normalizeFormId } from "@/lib/forms";
 import { LoginLoadingFallback } from "@/app/login/LoginLoadingFallback";
 import { useLocale } from "@/i18n/LocaleProvider";
@@ -555,7 +556,10 @@ function HomeContent() {
     () => activeBuiltInFieldIds.has("route"),
     [activeBuiltInFieldIds],
   );
-  const tableHeaders = useMemo(() => activeTableFields.map((field) => field.label), [activeTableFields]);
+  const tableHeaders = useMemo(
+    () => activeTableFields.map((field) => getLocalizedTableFieldLabel(field, locale)),
+    [activeTableFields, locale],
+  );
 
   useEffect(() => {
     if (!routeFieldActive) {
@@ -1023,8 +1027,8 @@ function HomeContent() {
   function handleDeleteFieldDraft(field: TableFieldDefinition) {
     const hasCurrentValues = records.some((record) => hasRecordFieldValue(record, field));
     const message = hasCurrentValues
-      ? t("home.confirmDeleteFieldWithData", { label: field.label })
-      : t("home.confirmDeleteField", { label: field.label });
+      ? t("home.confirmDeleteFieldWithData", { label: getLocalizedTableFieldLabel(field, locale) })
+      : t("home.confirmDeleteField", { label: getLocalizedTableFieldLabel(field, locale) });
     if (!window.confirm(message)) {
       return;
     }
@@ -1633,7 +1637,7 @@ function HomeContent() {
           </th>
           {activeTableFields.map((column) => (
             <th key={column.id} className="px-3 py-2 text-left text-xs font-medium text-[var(--muted-foreground)]">
-              {column.label}
+              {getLocalizedTableFieldLabel(column, locale)}
             </th>
           ))}
         </tr>
@@ -1934,7 +1938,9 @@ function HomeContent() {
                           .map((field) => (
                             <div key={field.id} className="flex items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-3 py-3">
                               <div>
-                                <div className="text-sm font-medium text-slate-700">{field.label}</div>
+                                <div className="text-sm font-medium text-slate-700">
+                                  {getLocalizedTableFieldLabel(field, locale)}
+                                </div>
                                 <div className="mt-1 text-xs text-slate-500">
                                   {field.type === "number"
                                     ? t("formSetup.fieldTypeNumberFull")
@@ -2436,6 +2442,11 @@ function HomeContent() {
             onClose={closeRecordPopup}
             onNotice={setNoticeMessage}
             onError={setErrorMessage}
+            onApply={async ({ finalSeed }) => {
+              const recordId = annotatingRecord.id;
+              applyAnnotationSeedToRecord(recordId, finalSeed);
+              setNoticeMessage(t("home.noticeAppliedMain"));
+            }}
             onSaved={async ({ totalExamples, finalSeed }) => {
               const recordId = annotatingRecord.id;
               await loadTrainingStatus();

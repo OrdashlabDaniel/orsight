@@ -6,6 +6,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useLocale } from "@/i18n/LocaleProvider";
 import { isDevMockLoginEnabled } from "@/lib/dev-mock-auth";
 import { isSupabaseAuthEnabled } from "@/lib/supabase";
+import { getLocalizedFormDescription, getLocalizedFormName } from "@/lib/form-display";
 import {
   DEFAULT_FORM_ID,
   buildFormFillHref,
@@ -26,6 +27,8 @@ type FormMutationResponse = {
 
 export default function FormsPoolBoard() {
   const { locale, t } = useLocale();
+  const formTitle = useCallback((form: FormDefinition) => getLocalizedFormName(form, locale), [locale]);
+  const formDesc = useCallback((form: FormDefinition) => getLocalizedFormDescription(form, locale), [locale]);
 
   function statusLabel(form: FormDefinition) {
     return form.ready ? t("formsPool.statusDone") : t("formsPool.statusDraft");
@@ -102,7 +105,7 @@ export default function FormsPoolBoard() {
       });
       const payload = (await response.json()) as FormMutationResponse;
       if (!response.ok || !payload.form) {
-        throw new Error(payload.error || "新建填表失败。");
+        throw new Error(payload.error || t("formsPool.errCreate"));
       }
       window.location.href = buildFormSetupHref(payload.form.id);
     } catch (error) {
@@ -129,7 +132,7 @@ export default function FormsPoolBoard() {
           return next;
         });
       }
-      setNoticeMessage(cloned ? t("formsPool.cloned", { name: cloned.name }) : t("formsPool.clonedShort"));
+      setNoticeMessage(cloned ? t("formsPool.cloned", { name: formTitle(cloned) }) : t("formsPool.clonedShort"));
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : t("formsPool.errClone"));
     } finally {
@@ -144,7 +147,7 @@ export default function FormsPoolBoard() {
     try {
       await mutateForm(form.id, { action: "delete" });
       await loadForms();
-      setNoticeMessage(t("formsPool.trashed", { name: form.name }));
+      setNoticeMessage(t("formsPool.trashed", { name: formTitle(form) }));
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : t("formsPool.errDelete"));
     } finally {
@@ -159,7 +162,7 @@ export default function FormsPoolBoard() {
     try {
       await mutateForm(form.id, { action: "restore" });
       await loadForms();
-      setNoticeMessage(t("formsPool.restored", { name: form.name }));
+      setNoticeMessage(t("formsPool.restored", { name: formTitle(form) }));
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : t("formsPool.errRestore"));
     } finally {
@@ -191,7 +194,7 @@ export default function FormsPoolBoard() {
         ...(password != null && password !== "" ? { password } : {}),
       });
       await loadForms();
-      setNoticeMessage(t("formsPool.purged", { name: form.name }));
+      setNoticeMessage(t("formsPool.purged", { name: formTitle(form) }));
       setPurgeTarget(null);
       setPurgePassword("");
     } catch (error) {
@@ -239,7 +242,7 @@ export default function FormsPoolBoard() {
       await loadForms();
       setEditingId(null);
       setEditingName("");
-      setNoticeMessage(form ? t("formsPool.renamed", { name: form.name }) : t("formsPool.renamedShort"));
+      setNoticeMessage(form ? t("formsPool.renamed", { name: formTitle(form) }) : t("formsPool.renamedShort"));
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : t("formsPool.errRename"));
     } finally {
@@ -302,42 +305,44 @@ export default function FormsPoolBoard() {
                         </button>
                       </div>
                     ) : (
-                      <div className="flex flex-wrap items-center gap-2">
-                        <h2 className="text-lg font-semibold text-slate-900">{form.name}</h2>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setEditingId(form.id);
-                            setEditingName(form.name);
-                          }}
-                          className="rounded-md border border-slate-300 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50"
-                        >
-                          {t("formsPool.rename")}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => void handleCloneForm(form)}
-                          disabled={isBusy}
-                          className="rounded-md border border-slate-300 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50 disabled:opacity-50"
-                        >
-                          {t("formsPool.clone")}
-                        </button>
-                        {!isDefaultForm ? (
+                      <>
+                        <h2 className="text-lg font-semibold text-slate-900">{formTitle(form)}</h2>
+                        <div className="mt-2 flex flex-wrap items-center gap-2">
                           <button
                             type="button"
-                            onClick={() => void handleDeleteForm(form)}
-                            disabled={isBusy}
-                            className="rounded-md border border-rose-300 px-2 py-1 text-xs text-rose-700 hover:bg-rose-50 disabled:opacity-50"
+                            onClick={() => {
+                              setEditingId(form.id);
+                              setEditingName(form.name);
+                            }}
+                            className="rounded-md border border-slate-300 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50"
                           >
-                            {t("formsPool.delete")}
+                            {t("formsPool.rename")}
                           </button>
-                        ) : null}
-                      </div>
+                          <button
+                            type="button"
+                            onClick={() => void handleCloneForm(form)}
+                            disabled={isBusy}
+                            className="rounded-md border border-slate-300 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50 disabled:opacity-50"
+                          >
+                            {t("formsPool.clone")}
+                          </button>
+                          {!isDefaultForm ? (
+                            <button
+                              type="button"
+                              onClick={() => void handleDeleteForm(form)}
+                              disabled={isBusy}
+                              className="rounded-md border border-rose-300 px-2 py-1 text-xs text-rose-700 hover:bg-rose-50 disabled:opacity-50"
+                            >
+                              {t("formsPool.delete")}
+                            </button>
+                          ) : null}
+                        </div>
+                      </>
                     )}
-                    <p className="mt-2 text-sm text-slate-600">{form.description}</p>
+                    <p className="mt-2 text-sm text-slate-600">{formDesc(form)}</p>
                   </div>
                   <span
-                    className={`rounded-full px-3 py-1 text-xs font-medium ${
+                    className={`shrink-0 rounded-full px-3 py-1 text-xs font-medium ${
                       form.ready ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"
                     }`}
                   >
@@ -406,7 +411,7 @@ export default function FormsPoolBoard() {
                   className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3"
                 >
                   <div>
-                    <div className="text-sm font-semibold text-slate-800">{form.name}</div>
+                    <div className="text-sm font-semibold text-slate-800">{formTitle(form)}</div>
                     <div className="mt-1 text-xs text-slate-500">
                       {form.deletedAt != null
                         ? t("formsPool.deletedAt", {
@@ -456,7 +461,9 @@ export default function FormsPoolBoard() {
               <h2 id="purge-dialog-title" className="text-lg font-semibold text-slate-900">
                 {t("formsPool.purgeConfirmTitle")}
               </h2>
-              <p className="mt-2 text-sm text-slate-600">{t("formsPool.purgeConfirmBody", { name: purgeTarget.name })}</p>
+              <p className="mt-2 text-sm text-slate-600">
+                {t("formsPool.purgeConfirmBody", { name: formTitle(purgeTarget) })}
+              </p>
               <label className="mt-4 block">
                 <span className="text-sm font-medium text-slate-700">{t("formsPool.purgePasswordLabel")}</span>
                 <input

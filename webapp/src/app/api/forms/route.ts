@@ -21,7 +21,7 @@ export async function GET() {
   } catch (error) {
     return NextResponse.json(
       {
-        error: error instanceof Error ? error.message : "读取填表池失败。",
+        error: error instanceof Error ? error.message : "首页加载失败。",
       },
       { status: 500 },
     );

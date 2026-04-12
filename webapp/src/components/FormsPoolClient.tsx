@@ -56,11 +56,11 @@ export default function FormsPoolClient() {
       const response = await fetch("/api/forms", { cache: "no-store" });
       const payload = (await response.json()) as FormsResponse;
       if (!response.ok) {
-        throw new Error(payload.error || "读取填表池失败。");
+        throw new Error(payload.error || "首页加载失败。");
       }
       setForms(payload.forms || []);
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "读取填表池失败。");
+      setErrorMessage(error instanceof Error ? error.message : "首页加载失败。");
     } finally {
       setIsLoading(false);
     }
@@ -192,9 +192,9 @@ export default function FormsPoolClient() {
     <main className="flex min-h-0 flex-1 flex-col overflow-y-auto bg-slate-100 px-4 py-6 text-slate-900">
       <div className="mx-auto max-w-6xl space-y-4">
         <header className="rounded-2xl border border-slate-200 bg-white px-6 py-5 shadow-sm">
-          <h1 className="text-2xl font-semibold">填表池</h1>
+          <h1 className="text-2xl font-semibold">首页</h1>
           <p className="mt-2 text-sm text-slate-600">
-            在这里管理多个填表。每个填表都拥有独立的填表模式、训练模式、训练池和工作规则。
+            在此创建、进入各填表工作区；每个填表拥有独立的填表模式、训练模式、训练池与规则。
           </p>
           {noticeMessage ? (
             <div className="mt-4 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
@@ -340,7 +340,7 @@ export default function FormsPoolClient() {
           </div>
 
           {isLoading ? (
-            <p className="mt-4 text-sm text-slate-500">正在读取填表池...</p>
+            <p className="mt-4 text-sm text-slate-500">正在加载…</p>
           ) : recycleBin.length === 0 ? (
             <p className="mt-4 text-sm text-slate-500">回收站为空。</p>
           ) : (

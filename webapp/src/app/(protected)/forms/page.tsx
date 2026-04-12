@@ -225,7 +225,7 @@ export default function FormsPoolPage() {
     <main className="min-h-screen bg-slate-100 px-4 py-6 text-slate-900">
       <div className="mx-auto max-w-6xl space-y-4">
         <header className="rounded-2xl border border-slate-200 bg-white px-6 py-5 shadow-sm">
-          <h1 className="text-2xl font-semibold">填表池</h1>
+          <h1 className="text-2xl font-semibold">首页</h1>
           <p className="mt-2 text-sm text-slate-600">
             在这里管理多个填表。点击填表后将直接进入该填表的填表模式。
           </p>

@@ -14,6 +14,8 @@ import {
   type TableAnnotationFieldValues,
   type WorkbenchAnnotationBox,
 } from "@/components/TrainingAnnotationWorkbench";
+import { getLocalizedFormName } from "@/lib/form-display";
+import { getLocalizedTableFieldLabel } from "@/lib/table-field-display";
 import {
   buildFormFillHref,
   buildFormTrainingHref,
@@ -226,7 +228,7 @@ function blankSeed(): AnnotationWorkbenchSeed {
 }
 
 export function FormSetupFlow({ initialForm }: { initialForm: FormDefinition }) {
-  const { t } = useLocale();
+  const { locale, t } = useLocale();
   const router = useRouter();
   const formId = initialForm.id;
 
@@ -1045,7 +1047,7 @@ export function FormSetupFlow({ initialForm }: { initialForm: FormDefinition }) 
               {t("nav.backToPool")}
             </Link>
             <div className="flex flex-wrap items-center gap-3 text-xs text-[var(--muted-foreground)]">
-              <span>{form.name}</span>
+              <span>{getLocalizedFormName(form, locale)}</span>
               <span>·</span>
               <span>{formatTemplateSourceLabel(form.templateSource)}</span>
               <Link
@@ -1200,7 +1202,7 @@ export function FormSetupFlow({ initialForm }: { initialForm: FormDefinition }) 
                   >
                     {activeTableFields.map((field) => (
                       <div key={field.id} className="border-r border-slate-800 px-3 py-3 last:border-r-0">
-                        {field.label}
+                        {getLocalizedTableFieldLabel(field, locale)}
                       </div>
                     ))}
                   </div>
@@ -1310,7 +1312,9 @@ export function FormSetupFlow({ initialForm }: { initialForm: FormDefinition }) 
                           className="flex items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-3 py-3"
                         >
                           <div>
-                            <div className="text-sm font-medium text-slate-700">{field.label}</div>
+                            <div className="text-sm font-medium text-slate-700">
+                              {getLocalizedTableFieldLabel(field, locale)}
+                            </div>
                             <div className="mt-1 text-xs text-slate-500">
                               {field.type === "number" ? t("formSetup.fieldTypeNumberFull") : t("formSetup.fieldTypeTextFull")}
                             </div>
