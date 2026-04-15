@@ -41,6 +41,20 @@ export async function extractDocumentPlainText(
       if (!sheet) {
         continue;
       }
+      
+      // Fix sheet range if it's incorrect (sometimes Excel files have data beyond the encoded !ref range)
+      if (sheet["!ref"]) {
+        const keys = Object.keys(sheet).filter((k) => !k.startsWith("!"));
+        if (keys.length > 0) {
+          const maxRow = Math.max(...keys.map((k) => parseInt(k.replace(/[A-Z]/g, ""), 10) || 0));
+          const range = XLSX.utils.decode_range(sheet["!ref"]);
+          if (maxRow - 1 > range.e.r) {
+            range.e.r = maxRow - 1;
+            sheet["!ref"] = XLSX.utils.encode_range(range);
+          }
+        }
+      }
+
       const csv = XLSX.utils.sheet_to_csv(sheet, { FS: "\t", blankrows: false });
       parts.push(`### ${sheetName}\n${csv}`);
     }
