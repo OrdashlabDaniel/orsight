@@ -2241,11 +2241,26 @@ function selectDenseRowBandRun(bands: DenseRowBand[], height: number, initialRec
     return [] as DenseRowBand[];
   }
 
+  const gaps: number[] = [];
+  for (let index = 1; index < bands.length; index += 1) {
+    gaps.push(bands[index]!.center - bands[index - 1]!.center);
+  }
+  const validGaps = gaps.filter((g) => g >= 5);
+  if (validGaps.length === 0) {
+    return bands;
+  }
+
+  const sortedGaps = validGaps.sort((a, b) => a - b);
+  const medianGap = sortedGaps[Math.floor(sortedGaps.length / 2)] || 24;
+
+  const minGap = Math.max(8, medianGap * 0.65);
+  const maxGap = Math.max(44, medianGap * 2.5);
+
   const runs: Array<{ start: number; end: number }> = [];
   let runStart = 0;
   for (let index = 1; index < bands.length; index += 1) {
     const gap = bands[index]!.center - bands[index - 1]!.center;
-    if (gap < 10 || gap > 44) {
+    if (gap < minGap || gap > maxGap) {
       runs.push({ start: runStart, end: index - 1 });
       runStart = index;
     }
@@ -2410,11 +2425,11 @@ async function callVisionModelForDenseWebTableRow(
   )}\n${ctx.editableRecognitionRulesText}
 
 【当前待识别图片】
-下面是一张网页表格（WEB_TABLE）中的单行裁剪图，理论上只对应 1 条数据记录。这是第 ${rowIndex}/${totalRows} 行。
+下面是一张网页表格（WEB_TABLE）中的局部裁剪图，通常对应 1 条数据记录，但也可能包含多条。这是第 ${rowIndex}/${totalRows} 段裁剪。
 请严格遵守：
-1. 只允许返回 0 或 1 条 records，绝不能返回多条。
-2. 只要当前裁剪里是有效数据行，就必须返回 1 条 record；看不清的字段留空，并将 reviewRequired 设为 true、reviewReason 简要说明。
-3. 只有在确认当前裁剪只是表头、空白、分隔线时，才允许返回空数组。
+1. 提取该裁剪图中的所有完整数据记录，图片中有几行有效数据就返回几条 records。
+2. 只要当前裁剪里有有效数据行，就必须提取；看不清的字段留空，并将 reviewRequired 设为 true、reviewReason 简要说明。
+3. 只有在确认当前裁剪只是表头、空白、分隔线、分页控件时，才允许返回空数组。
 4. 不要把列标题、操作按钮、分页、滚动条、装饰文字当成字段值。
 5. imageType 固定返回 WEB_TABLE。`;
 
@@ -2462,7 +2477,7 @@ async function callVisionModelForDenseWebTableRow(
   }
 
   return {
-    records: (parsed.records || []).slice(0, 1),
+    records: parsed.records || [],
     imageType: "WEB_TABLE",
     usage: payload.usage,
   };
@@ -2526,15 +2541,15 @@ async function extractDenseWebTableRows(
       { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
     );
 
-    const records = rowResults.map((item) => {
-      const first = item?.records?.[0];
-      if (first) {
-        return first;
+    const records = rowResults.flatMap((item) => {
+      const recs = item?.records;
+      if (recs && recs.length > 0) {
+        return recs;
       }
-      return {
+      return [{
         reviewRequired: true,
-        reviewReason: "检测到一条有效数据行，但单行识别未返回结果，需要人工补录。",
-      } satisfies RawModelRecord;
+        reviewReason: "检测到有效数据区域，但单行识别未返回结果，需要人工补录。",
+      } satisfies RawModelRecord];
     });
 
     return {
@@ -2687,7 +2702,9 @@ ${ctx.editableRecognitionRulesText}
 
 【电子文档模式】上传文件已转为纯文本（非截图）。请仅依据下列文本抽取结构化记录，输出与图片模式相同的 JSON（含 imageType 与 records）。
 ${docHint}
-不要把规则或示例中的虚构数据填入结果；看不清或无法对应字段时留空并标记 reviewRequired。
+请严格遵守：
+1. 提取文档中的所有有效数据行，文档中有几条数据就必须返回几条 records，绝不能遗漏。
+2. 不要把规则或示例中的虚构数据填入结果；看不清或无法对应字段时留空并标记 reviewRequired。
 
 --- 文档正文（节选）---
 ${clipped}
@@ -4012,20 +4029,16 @@ export async function POST(request: Request) {
 
           const imageType = docAttempts[0]?.imageType || guessDocumentImageType(file.name);
           const attemptRecords = docAttempts.map((attempt) =>
-            dedupeSameImageRecords(
-              attempt.records.map((raw, index) =>
-                applyRecognitionRuleCodeToRecord(
-                  stripInactiveBuiltInValues(
-                    mapRecord(file.name, raw, index),
-                    activeBuiltInFieldIds,
-                  ),
-                  visionCtx.recognitionRuleCode,
+            attempt.records.map((raw, index) =>
+              applyRecognitionRuleCodeToRecord(
+                stripInactiveBuiltInValues(
+                  mapRecord(file.name, raw, index),
                   activeBuiltInFieldIds,
                 ),
+                visionCtx.recognitionRuleCode,
+                activeBuiltInFieldIds,
               ),
-              file.name,
-              visionCtx.tableFields,
-            ),
+            )
           );
 
           let workingRecords = attemptRecords[0] || [];
@@ -4038,11 +4051,11 @@ export async function POST(request: Request) {
 
           const sanityChecked = applyRecordSanityChecks(file.name, sourceCheckedRecords, activeBuiltInFieldIds);
           let checkedRecords = sanityChecked.records;
-          let counterIssues: ExtractionIssue[] = sanityChecked.issues;
+          const counterIssues: ExtractionIssue[] = sanityChecked.issues;
 
-          let totalPromptTokens = docPromptTokens;
-          let totalCompletionTokens = docCompletionTokens;
-          let totalTokens = docTotalTokens;
+          const totalPromptTokens = docPromptTokens;
+          const totalCompletionTokens = docCompletionTokens;
+          const totalTokens = docTotalTokens;
 
           checkedRecords = checkedRecords.map((record) => ({
             ...record,
