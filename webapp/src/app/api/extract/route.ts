@@ -102,6 +102,23 @@ function getConsistencyAttemptCount(): number {
   return 4;
 }
 
+const CUSTOM_UPDATE_STATUS_LABEL_RE = /更新状态|轨迹更新/i;
+const CUSTOM_SHIPMENT_STATUS_LABEL_RE = /运单状态|物流状态|配送状态|shipment\s*status|waybill\s*status/i;
+const CUSTOM_IDENTIFIER_LABEL_RE =
+  /运单号|参考单号|第三方.*单号|单号|编号|编码|任务编码|task\s*code|tracking|waybill|shipment|reference|ref\b|订单号|订单编号/i;
+const CUSTOM_VOLATILE_STATUS_LABEL_RE = /更新状态|运单状态|物流状态|配送状态|status|state/i;
+
+type VisionImagePayload = {
+  dataUrl: string;
+  note?: string;
+};
+
+type TallImageSlice = {
+  dataUrl: string;
+  index: number;
+  total: number;
+};
+
 type ExtractVisionContext = {
   formId: string;
   examples: TrainingExample[];
@@ -115,6 +132,10 @@ type ExtractVisionContext = {
   recognitionValidationConfig: RecognitionValidationConfig;
   currentImageVisualPacks: WeakMap<File, Promise<Awaited<ReturnType<typeof buildVisualReferencePack>>>>;
   currentImageSimilarExamples: WeakMap<File, Promise<TrainingExample[]>>;
+  currentImageDenseWebTableResults: WeakMap<
+    File,
+    Map<string, Promise<{ records: RawModelRecord[]; imageType: string; usage?: OpenAIUsage }>>
+  >;
 };
 
 function activeBuiltInIdsFromTableFields(tableFields: TableFieldDefinition[]): ReadonlySet<string> {
@@ -392,6 +413,7 @@ async function buildExtractVisionContext(formId: string): Promise<ExtractVisionC
     recognitionValidationConfig: extractRecognitionValidationConfigFromWorkingRules(normalizedRules.workingRules),
     currentImageVisualPacks: new WeakMap(),
     currentImageSimilarExamples: new WeakMap(),
+    currentImageDenseWebTableResults: new WeakMap(),
   };
 }
 
@@ -554,6 +576,315 @@ function normalizeCustomFieldValues(value: unknown): Record<string, string | num
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
+function normalizeComparableScalar(value: string | number | "" | undefined | null) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return String(value);
+  }
+  return normalizeText(value)?.toLowerCase() || "";
+}
+
+function buildCustomFieldMetaMap(tableFields: TableFieldDefinition[]) {
+  return new Map(tableFields.map((field) => [field.id, field] as const));
+}
+
+function isFieldLabelMatch(field: TableFieldDefinition | undefined, pattern: RegExp) {
+  if (!field) {
+    return false;
+  }
+  return pattern.test(`${field.label} ${field.id}`);
+}
+
+function scoreRecordCompleteness(record: PodRecord) {
+  let score = 0;
+  if (record.date) score += 1;
+  if (record.route) score += 1;
+  if (record.driver) score += 1;
+  if (record.taskCode) score += 2;
+  if (record.total !== "") score += 1;
+  if (record.unscanned !== "") score += 1;
+  if (record.exceptions !== "") score += 1;
+  if (record.waybillStatus) score += 1;
+  if (record.stationTeam) score += 1;
+  for (const value of Object.values(record.customFieldValues || {})) {
+    if (value !== "" && value != null) {
+      score += 2;
+    }
+  }
+  if (!record.reviewRequired) {
+    score += 1;
+  }
+  return score;
+}
+
+function pickPreferredTextValue(records: PodRecord[], pick: (record: PodRecord) => string | undefined) {
+  const counts = new Map<string, number>();
+  for (const record of records) {
+    const value = normalizeText(pick(record));
+    if (value) {
+      counts.set(value, (counts.get(value) ?? 0) + 1);
+    }
+  }
+  if (counts.size === 0) {
+    return "";
+  }
+  let best = "";
+  let bestCount = -1;
+  for (const record of records) {
+    const value = normalizeText(pick(record));
+    if (!value) continue;
+    const count = counts.get(value) ?? 0;
+    if (count > bestCount) {
+      best = value;
+      bestCount = count;
+    }
+  }
+  return best;
+}
+
+function pickPreferredNumberValue(records: PodRecord[], pick: (record: PodRecord) => number | "" | undefined) {
+  const counts = new Map<number, number>();
+  for (const record of records) {
+    const value = pick(record);
+    if (typeof value === "number" && Number.isFinite(value)) {
+      counts.set(value, (counts.get(value) ?? 0) + 1);
+    }
+  }
+  if (counts.size === 0) {
+    return "" as const;
+  }
+  let best: number | "" = "";
+  let bestCount = -1;
+  for (const record of records) {
+    const value = pick(record);
+    if (typeof value !== "number" || !Number.isFinite(value)) continue;
+    const count = counts.get(value) ?? 0;
+    if (count > bestCount) {
+      best = value;
+      bestCount = count;
+    }
+  }
+  return best;
+}
+
+function buildSameImageIdentifierKeys(
+  record: PodRecord,
+  fieldMetaMap: ReadonlyMap<string, TableFieldDefinition>,
+) {
+  const customEntries = Object.entries(record.customFieldValues || {});
+  const identifierEntries = customEntries
+    .filter(([fieldId, value]) => {
+      const field = fieldMetaMap.get(fieldId);
+      return (
+        isFieldLabelMatch(field, CUSTOM_IDENTIFIER_LABEL_RE) &&
+        normalizeComparableScalar(value) !== ""
+      );
+    })
+    .map(([fieldId, value]) => [fieldId, normalizeComparableScalar(value)] as const)
+    .sort(([left], [right]) => left.localeCompare(right, "en"));
+
+  const out = new Set<string>();
+  for (const [, value] of identifierEntries) {
+    if (value && value.length >= 6) {
+      out.add(`identifier:${value}`);
+    }
+  }
+  const taskCode = normalizeComparableScalar(record.taskCode);
+  if (taskCode && taskCode.length >= 6) {
+    out.add(`task:${taskCode}`);
+  }
+  return Array.from(out);
+}
+
+function buildSameImageDuplicateFallbackKey(
+  record: PodRecord,
+  fieldMetaMap: ReadonlyMap<string, TableFieldDefinition>,
+) {
+  const customEntries = Object.entries(record.customFieldValues || {});
+  const fallbackCustomEntries = customEntries
+    .filter(([fieldId, value]) => {
+      const field = fieldMetaMap.get(fieldId);
+      return (
+        !isFieldLabelMatch(field, CUSTOM_VOLATILE_STATUS_LABEL_RE) &&
+        normalizeComparableScalar(value) !== ""
+      );
+    })
+    .map(([fieldId, value]) => [fieldId, normalizeComparableScalar(value)] as const)
+    .sort(([left], [right]) => left.localeCompare(right, "en"));
+
+  const fallback = {
+    date: normalizeComparableScalar(record.date),
+    route: normalizeComparableScalar(record.route),
+    driver: normalizeComparableScalar(record.driver),
+    taskCode: normalizeComparableScalar(record.taskCode),
+    total: normalizeComparableScalar(record.total),
+    unscanned: normalizeComparableScalar(record.unscanned),
+    exceptions: normalizeComparableScalar(record.exceptions),
+    stationTeam: normalizeComparableScalar(record.stationTeam),
+    custom: fallbackCustomEntries,
+  };
+
+  return Object.values(fallback).some((value) =>
+    Array.isArray(value) ? value.length > 0 : value !== "",
+  )
+    ? JSON.stringify(fallback)
+    : null;
+}
+
+function mergeSameImageRecordGroup(
+  records: PodRecord[],
+  imageName: string,
+  nextIndex: number,
+): PodRecord {
+  const sorted = [...records].sort((left, right) => scoreRecordCompleteness(right) - scoreRecordCompleteness(left));
+  const base = sorted[0]!;
+
+  const mergedCustomFieldValues = sorted.reduce<Record<string, string | number | "">>((acc, record) => {
+    for (const [fieldId, value] of Object.entries(record.customFieldValues || {})) {
+      if (!(fieldId in acc) || acc[fieldId] === "") {
+        acc[fieldId] = value;
+      }
+    }
+    return acc;
+  }, {});
+
+  const reviewRequired = Boolean(base.reviewRequired);
+
+  return {
+    ...base,
+    id: `${imageName}-${nextIndex}`,
+    imageName,
+    date: pickPreferredTextValue(sorted, (record) => record.date),
+    route: pickPreferredTextValue(sorted, (record) => record.route),
+    driver: pickPreferredTextValue(sorted, (record) => record.driver),
+    taskCode: pickPreferredTextValue(sorted, (record) => record.taskCode),
+    total: pickPreferredNumberValue(sorted, (record) => record.total),
+    totalSourceLabel:
+      pickPreferredNumberValue(sorted, (record) => record.total) !== ""
+        ? pickPreferredTextValue(sorted, (record) => record.totalSourceLabel)
+        : "",
+    unscanned: pickPreferredNumberValue(sorted, (record) => record.unscanned),
+    exceptions: pickPreferredNumberValue(sorted, (record) => record.exceptions),
+    waybillStatus: pickPreferredTextValue(sorted, (record) => record.waybillStatus),
+    stationTeam: pickPreferredTextValue(sorted, (record) => record.stationTeam),
+    customFieldValues: Object.keys(mergedCustomFieldValues).length > 0 ? mergedCustomFieldValues : undefined,
+    reviewRequired,
+    reviewReason: reviewRequired ? mergeReviewReasonParts(sorted.filter((record) => record.reviewRequired)) : null,
+    mergedSourceCount: undefined,
+    sourceRecordIds: undefined,
+  };
+}
+
+function dedupeSameImageRecords(
+  records: PodRecord[],
+  imageName: string,
+  tableFields: TableFieldDefinition[],
+) {
+  if (records.length <= 1) {
+    return records;
+  }
+
+  const fieldMetaMap = buildCustomFieldMetaMap(tableFields);
+  const groups: Array<{
+    records: PodRecord[];
+    identifierKeys: Set<string>;
+    fallbackKeys: Set<string>;
+  }> = [];
+
+  records.forEach((record, index) => {
+    const identifierKeys = buildSameImageIdentifierKeys(record, fieldMetaMap);
+    const fallbackKey = buildSameImageDuplicateFallbackKey(record, fieldMetaMap) ?? `__unique__${index}`;
+    const matchingIndices: number[] = [];
+
+    for (let groupIndex = 0; groupIndex < groups.length; groupIndex += 1) {
+      const group = groups[groupIndex]!;
+      const identifierMatch =
+        identifierKeys.length > 0 && identifierKeys.some((key) => group.identifierKeys.has(key));
+      const fallbackMatch = group.fallbackKeys.has(fallbackKey);
+      if (identifierMatch || fallbackMatch) {
+        matchingIndices.push(groupIndex);
+      }
+    }
+
+    if (matchingIndices.length === 0) {
+      groups.push({
+        records: [record],
+        identifierKeys: new Set(identifierKeys),
+        fallbackKeys: new Set([fallbackKey]),
+      });
+      return;
+    }
+
+    const primaryIndex = matchingIndices[0]!;
+    const primary = groups[primaryIndex]!;
+    primary.records.push(record);
+    identifierKeys.forEach((key) => primary.identifierKeys.add(key));
+    primary.fallbackKeys.add(fallbackKey);
+
+    for (let i = matchingIndices.length - 1; i >= 1; i -= 1) {
+      const mergeIndex = matchingIndices[i]!;
+      const duplicateGroup = groups[mergeIndex]!;
+      duplicateGroup.records.forEach((item) => primary.records.push(item));
+      duplicateGroup.identifierKeys.forEach((key) => primary.identifierKeys.add(key));
+      duplicateGroup.fallbackKeys.forEach((key) => primary.fallbackKeys.add(key));
+      groups.splice(mergeIndex, 1);
+    }
+  });
+
+  return groups.map((group, index) => mergeSameImageRecordGroup(group.records, imageName, index));
+}
+
+function deriveCustomUpdateStatusValue(shipmentStatus: string | undefined) {
+  const normalized = normalizeText(shipmentStatus);
+  if (!normalized) {
+    return "";
+  }
+  return /站点签入/i.test(normalized) ? "无轨迹更新" : "有轨迹更新";
+}
+
+function deriveCustomFieldsFromKnownRules(records: PodRecord[], tableFields: TableFieldDefinition[]) {
+  const customFields = tableFields.filter((field) => !isBuiltInFieldId(field.id));
+  if (customFields.length === 0) {
+    return records;
+  }
+
+  const shipmentStatusFields = customFields.filter((field) => isFieldLabelMatch(field, CUSTOM_SHIPMENT_STATUS_LABEL_RE));
+  const updateStatusFields = customFields.filter(
+    (field) =>
+      isFieldLabelMatch(field, CUSTOM_UPDATE_STATUS_LABEL_RE) &&
+      !isFieldLabelMatch(field, CUSTOM_SHIPMENT_STATUS_LABEL_RE),
+  );
+
+  if (shipmentStatusFields.length === 0 || updateStatusFields.length === 0) {
+    return records;
+  }
+
+  return records.map((record) => {
+    const custom = { ...(record.customFieldValues || {}) };
+    const shipmentStatus = shipmentStatusFields
+      .map((field) => normalizeText(custom[field.id]))
+      .find(Boolean);
+    const derived = deriveCustomUpdateStatusValue(shipmentStatus);
+    if (!derived) {
+      return record;
+    }
+
+    let changed = false;
+    for (const field of updateStatusFields) {
+      if (custom[field.id] !== derived) {
+        custom[field.id] = derived;
+        changed = true;
+      }
+    }
+
+    return changed
+      ? {
+          ...record,
+          customFieldValues: custom,
+        }
+      : record;
+  });
+}
+
 // Legacy prompt builder kept only for rollback; current extraction uses buildRecognitionModeDynamicFieldPrompt instead.
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 function buildDynamicFieldPrompt(tableFields: TableFieldDefinition[]): string {
@@ -593,6 +924,18 @@ function buildRecognitionModeDynamicFieldPrompt(tableFields: TableFieldDefinitio
 
   for (const field of activeCustomFields) {
     lines.push(`- 字段 id: ${field.id}；当前显示名：「${field.label}」；类型：${field.type}`);
+  }
+
+  const hasCustomShipmentStatus = activeCustomFields.some((field) => isFieldLabelMatch(field, CUSTOM_SHIPMENT_STATUS_LABEL_RE));
+  const hasCustomUpdateStatus = activeCustomFields.some(
+    (field) =>
+      isFieldLabelMatch(field, CUSTOM_UPDATE_STATUS_LABEL_RE) &&
+      !isFieldLabelMatch(field, CUSTOM_SHIPMENT_STATUS_LABEL_RE),
+  );
+  if (hasCustomShipmentStatus && hasCustomUpdateStatus) {
+    lines.push(
+      "- 若当前表单同时存在「运单状态」与「更新状态」类自定义字段，则更新状态按同一行运单状态自动生成：运单状态 = 站点签入 => 更新状态 = 无轨迹更新；其他非空运单状态 => 更新状态 = 有轨迹更新。此规则优先于图上是否单独显示“更新状态”列。",
+    );
   }
 
   lines.push("识别结果写入 customFieldValues 对象，键必须严格使用上面的字段 id。");
@@ -1730,17 +2073,16 @@ async function runPODTrainingRefinesParallel(
   };
 }
 
-async function callVisionModel(
+async function callVisionModelWithPreparedImage(
   file: File,
   model: string,
   ctx: ExtractVisionContext,
+  currentImage: VisionImagePayload,
 ): Promise<{ records: RawModelRecord[]; imageType: string; usage?: OpenAIUsage }> {
   if (!OPENAI_API_KEY) {
     throw new Error("Missing OPENAI_API_KEY. Please configure the AI model first.");
   }
 
-  const bytes = Buffer.from(await file.arrayBuffer());
-  const dataUrl = `data:${file.type || "image/jpeg"};base64,${bytes.toString("base64")}`;
   const visualPack = await buildVisualPackForCurrentImage(file, ctx);
   const baseText = `${buildPrimaryExtractionPrompt(
     ctx.tableFields,
@@ -1756,9 +2098,11 @@ async function callVisionModel(
 
   userContent.push({
     type: "text",
-    text: "\n【当前待识别图片】仅根据下面这一张图输出 JSON 中的 records；上面的人工标注参考图只用于帮助你先理解同类界面，不得把参考图中的文字或数字抄进结果。\n",
+    text:
+      currentImage.note ||
+      "\n【当前待识别图片】仅根据下面这一张图输出 JSON 中的 records；上面的人工标注参考图只用于帮助你先理解同类界面，不得把参考图中的文字或数字抄进结果。\n",
   });
-  userContent.push({ type: "image_url", image_url: { url: dataUrl } });
+  userContent.push({ type: "image_url", image_url: { url: currentImage.dataUrl } });
 
   const body = {
     model,
@@ -1811,6 +2155,504 @@ async function callVisionModel(
     records: parsed.records || [],
     imageType: parsed.imageType || "OTHER",
     usage: payload.usage,
+  };
+}
+
+type VerticalSliceOptions = {
+  minHeight: number;
+  segmentHeight: number;
+  overlap: number;
+  maxSlices: number;
+};
+
+type DenseRowBand = {
+  start: number;
+  end: number;
+  center: number;
+  peak: number;
+};
+
+const MAX_TALL_IMAGE_SLICES = 12;
+const MAX_DENSE_TABLE_SLICES = 4;
+const DENSE_TABLE_ROW_CONCURRENCY = 6;
+
+async function buildVerticalImageSlices(
+  bytes: Buffer,
+  options: VerticalSliceOptions,
+): Promise<TallImageSlice[]> {
+  const metadata = await sharp(bytes).metadata();
+  const width = metadata.width ?? 0;
+  const height = metadata.height ?? 0;
+  if (!width || !height || height < options.minHeight) {
+    return [];
+  }
+
+  const segmentHeight = Math.max(1, Math.min(options.segmentHeight, height - 1));
+  if (height <= segmentHeight) {
+    return [];
+  }
+  const overlap = Math.max(1, Math.min(options.overlap, segmentHeight - 1));
+  const slices: Array<{ top: number; height: number }> = [];
+  const step = Math.max(1, segmentHeight - overlap);
+  let top = 0;
+
+  while (top < height && slices.length < options.maxSlices) {
+    const currentHeight = Math.min(segmentHeight, height - top);
+    slices.push({ top, height: currentHeight });
+    if (top + currentHeight >= height) {
+      break;
+    }
+    top += step;
+  }
+
+  const lastSlice = slices[slices.length - 1];
+  if (lastSlice && lastSlice.top + lastSlice.height < height) {
+    const finalTop = Math.max(0, height - segmentHeight);
+    if (lastSlice.top !== finalTop) {
+      slices.push({ top: finalTop, height: height - finalTop });
+    } else {
+      lastSlice.height = height - finalTop;
+    }
+  }
+
+  if (slices.length <= 1) {
+    return [];
+  }
+
+  const total = slices.length;
+  const out: TallImageSlice[] = [];
+  for (let i = 0; i < slices.length; i++) {
+    const slice = slices[i]!;
+    const buf = await sharp(bytes)
+      .extract({ left: 0, top: slice.top, width, height: slice.height })
+      .png()
+      .toBuffer();
+    out.push({
+      dataUrl: `data:image/png;base64,${buf.toString("base64")}`,
+      index: i + 1,
+      total,
+    });
+  }
+  return out;
+}
+
+function selectDenseRowBandRun(bands: DenseRowBand[], height: number, initialRecordsCount: number) {
+  if (bands.length === 0) {
+    return [] as DenseRowBand[];
+  }
+
+  const runs: Array<{ start: number; end: number }> = [];
+  let runStart = 0;
+  for (let index = 1; index < bands.length; index += 1) {
+    const gap = bands[index]!.center - bands[index - 1]!.center;
+    if (gap < 10 || gap > 44) {
+      runs.push({ start: runStart, end: index - 1 });
+      runStart = index;
+    }
+  }
+  runs.push({ start: runStart, end: bands.length - 1 });
+
+  const bestRun = runs.sort((left, right) => (right.end - right.start) - (left.end - left.start))[0];
+  if (!bestRun) {
+    return [];
+  }
+
+  let selected = bands.slice(bestRun.start, bestRun.end + 1);
+  if (
+    selected.length >= 2 &&
+    selected[0]!.center < Math.max(18, Math.round(height * 0.05)) &&
+    (initialRecordsCount <= 0 || selected.length >= initialRecordsCount)
+  ) {
+    selected = selected.slice(1);
+  }
+  return selected;
+}
+
+async function detectDenseWebTableRowBands(
+  bytes: Buffer,
+  width: number,
+  height: number,
+  initialRecordsCount: number,
+  imageType: string,
+): Promise<DenseRowBand[]> {
+  if (!width || !height || imageType !== "WEB_TABLE") {
+    return [];
+  }
+  if (height < 720 || initialRecordsCount < 12) {
+    return [];
+  }
+
+  const scanLeft = Math.max(0, Math.min(width - 1, Math.floor(width * (width >= 900 ? 0.24 : 0.08))));
+  const scanRight = Math.max(scanLeft + 1, Math.min(width, Math.floor(width * 0.98)));
+  const scanWidth = scanRight - scanLeft;
+  if (scanWidth < Math.max(120, Math.floor(width * 0.35))) {
+    return [];
+  }
+
+  const raw = await sharp(bytes).grayscale().raw().toBuffer();
+  const rowScores = new Array<number>(height).fill(0);
+  for (let y = 0; y < height; y += 1) {
+    let count = 0;
+    const rowOffset = y * width;
+    for (let x = scanLeft; x < scanRight; x += 1) {
+      if (raw[rowOffset + x]! < 220) {
+        count += 1;
+      }
+    }
+    rowScores[y] = count;
+  }
+
+  const smoothScores = rowScores.map((_, index) => {
+    const start = Math.max(0, index - 1);
+    const end = Math.min(height, index + 2);
+    let total = 0;
+    for (let y = start; y < end; y += 1) {
+      total += rowScores[y]!;
+    }
+    return total / Math.max(1, end - start);
+  });
+
+  const peak = smoothScores.reduce((max, value) => Math.max(max, value), 0);
+  const threshold = Math.max(12, peak * 0.18);
+  const rawBands: DenseRowBand[] = [];
+  let start = -1;
+  for (let index = 0; index < smoothScores.length; index += 1) {
+    const value = smoothScores[index]!;
+    if (value >= threshold) {
+      if (start < 0) {
+        start = index;
+      }
+      continue;
+    }
+    if (start >= 0) {
+      if (index - start >= 3) {
+        rawBands.push({
+          start,
+          end: index - 1,
+          center: Math.round((start + index - 1) / 2),
+          peak: Math.max(...smoothScores.slice(start, index)),
+        });
+      }
+      start = -1;
+    }
+  }
+  if (start >= 0 && height - start >= 3) {
+    rawBands.push({
+      start,
+      end: height - 1,
+      center: Math.round((start + height - 1) / 2),
+      peak: Math.max(...smoothScores.slice(start)),
+    });
+  }
+
+  const selected = selectDenseRowBandRun(rawBands, height, initialRecordsCount);
+  if (selected.length < 12) {
+    return [];
+  }
+  return selected;
+}
+
+function buildDenseWebTableRowRegions(bands: DenseRowBand[], height: number) {
+  if (bands.length === 0) {
+    return [] as Array<{ top: number; height: number }>;
+  }
+  const centers = bands.map((band) => band.center);
+  return bands.map((band, index) => {
+    const topBoundary =
+      index === 0
+        ? Math.max(0, band.start - Math.round(((centers[index + 1] ?? band.center) - band.center) / 2))
+        : Math.max(0, Math.round((centers[index - 1]! + band.center) / 2));
+    const bottomBoundary =
+      index === bands.length - 1
+        ? Math.min(height, band.end + Math.round((band.center - (centers[index - 1] ?? band.center)) / 2))
+        : Math.min(height, Math.round((band.center + centers[index + 1]!) / 2));
+
+    const top = Math.max(0, topBoundary - 2);
+    const bottom = Math.min(height, Math.max(top + 1, bottomBoundary + 2));
+    return {
+      top,
+      height: Math.max(1, bottom - top),
+    };
+  });
+}
+
+async function cropVerticalRegionsToPngDataUrls(
+  bytes: Buffer,
+  width: number,
+  regions: Array<{ top: number; height: number }>,
+) {
+  const out: string[] = [];
+  for (const region of regions) {
+    const cropBuf = await sharp(bytes)
+      .extract({ left: 0, top: region.top, width, height: region.height })
+      .png()
+      .toBuffer();
+    out.push(`data:image/png;base64,${cropBuf.toString("base64")}`);
+  }
+  return out;
+}
+
+async function callVisionModelForDenseWebTableRow(
+  model: string,
+  ctx: ExtractVisionContext,
+  dataUrl: string,
+  rowIndex: number,
+  totalRows: number,
+): Promise<{ records: RawModelRecord[]; imageType: string; usage?: OpenAIUsage }> {
+  if (!OPENAI_API_KEY) {
+    throw new Error("Missing OPENAI_API_KEY. Please configure the AI model first.");
+  }
+
+  const prompt = `${buildPrimaryExtractionPrompt(
+    ctx.tableFields,
+    ctx.activeBuiltInFieldIds,
+    ctx.recognitionRuleCode,
+  )}\n${ctx.editableRecognitionRulesText}
+
+【当前待识别图片】
+下面是一张网页表格（WEB_TABLE）中的单行裁剪图，理论上只对应 1 条数据记录。这是第 ${rowIndex}/${totalRows} 行。
+请严格遵守：
+1. 只允许返回 0 或 1 条 records，绝不能返回多条。
+2. 只要当前裁剪里是有效数据行，就必须返回 1 条 record；看不清的字段留空，并将 reviewRequired 设为 true、reviewReason 简要说明。
+3. 只有在确认当前裁剪只是表头、空白、分隔线时，才允许返回空数组。
+4. 不要把列标题、操作按钮、分页、滚动条、装饰文字当成字段值。
+5. imageType 固定返回 WEB_TABLE。`;
+
+  const response = await fetch(`${OPENAI_BASE_URL}/chat/completions`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${OPENAI_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model,
+      reasoning_effort: OPENAI_REASONING_EFFORT,
+      response_format: { type: "json_object" },
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: prompt },
+            { type: "image_url", image_url: { url: dataUrl } },
+          ] satisfies OpenAIMessageContent[],
+        },
+      ],
+    }),
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Dense row vision API error: ${response.status} ${text}`);
+  }
+
+  const payload = (await response.json()) as {
+    choices?: Array<{ message?: { content?: string } }>;
+    usage?: OpenAIUsage;
+  };
+  const content = payload.choices?.[0]?.message?.content;
+  if (!content) {
+    throw new Error("Dense row vision API returned empty content.");
+  }
+
+  let parsed: { records?: RawModelRecord[]; imageType?: string };
+  try {
+    parsed = JSON.parse(content) as { records?: RawModelRecord[]; imageType?: string };
+  } catch (error) {
+    throw new Error(`Dense row model did not return valid JSON: ${String(error)}`);
+  }
+
+  return {
+    records: (parsed.records || []).slice(0, 1),
+    imageType: "WEB_TABLE",
+    usage: payload.usage,
+  };
+}
+
+function getDenseWebTableCache(
+  file: File,
+  model: string,
+  ctx: ExtractVisionContext,
+  producer: () => Promise<{ records: RawModelRecord[]; imageType: string; usage?: OpenAIUsage }>,
+) {
+  let perFile = ctx.currentImageDenseWebTableResults.get(file);
+  if (!perFile) {
+    perFile = new Map();
+    ctx.currentImageDenseWebTableResults.set(file, perFile);
+  }
+  const existing = perFile.get(model);
+  if (existing) {
+    return existing;
+  }
+  const promise = producer();
+  perFile.set(model, promise);
+  return promise;
+}
+
+async function extractDenseWebTableRows(
+  file: File,
+  model: string,
+  ctx: ExtractVisionContext,
+  bytes: Buffer,
+  width: number,
+  height: number,
+  rowBands: DenseRowBand[],
+) {
+  return getDenseWebTableCache(file, model, ctx, async () => {
+    const regions = buildDenseWebTableRowRegions(rowBands, height);
+    const rowUrls = await cropVerticalRegionsToPngDataUrls(bytes, width, regions);
+
+    const rowResults: Array<{ records: RawModelRecord[]; imageType: string; usage?: OpenAIUsage }> = new Array(rowUrls.length);
+    let currentIndex = 0;
+    async function worker() {
+      while (currentIndex < rowUrls.length) {
+        const index = currentIndex;
+        currentIndex += 1;
+        rowResults[index] = await callVisionModelForDenseWebTableRow(
+          model,
+          ctx,
+          rowUrls[index]!,
+          index + 1,
+          rowUrls.length,
+        );
+      }
+    }
+
+    await Promise.all(
+      Array.from({ length: Math.min(DENSE_TABLE_ROW_CONCURRENCY, rowUrls.length) }, () => worker()),
+    );
+
+    const mergedUsage = rowResults.reduce(
+      (acc, item) => mergeRefineUsage(acc, item?.usage),
+      { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+    );
+
+    const records = rowResults.map((item) => {
+      const first = item?.records?.[0];
+      if (first) {
+        return first;
+      }
+      return {
+        reviewRequired: true,
+        reviewReason: "检测到一条有效数据行，但单行识别未返回结果，需要人工补录。",
+      } satisfies RawModelRecord;
+    });
+
+    return {
+      records,
+      imageType: "WEB_TABLE",
+      usage: mergedUsage,
+    };
+  });
+}
+
+function getVerticalSliceOptions(
+  width: number,
+  height: number,
+  initialRecordsCount: number,
+  imageType: string,
+): VerticalSliceOptions | null {
+  if (!width || !height) {
+    return null;
+  }
+  if (initialRecordsCount < 5) {
+    return null;
+  }
+
+  const rowHeightEstimate = height / Math.max(initialRecordsCount, 1);
+  if (
+    imageType === "WEB_TABLE" &&
+    height >= 900 &&
+    initialRecordsCount >= 18 &&
+    rowHeightEstimate <= 34
+  ) {
+    const segmentHeight = Math.max(560, Math.min(840, Math.round(height * 0.72)));
+    return {
+      minHeight: 900,
+      segmentHeight,
+      overlap: Math.max(96, Math.min(180, Math.round(segmentHeight * 0.18))),
+      maxSlices: MAX_DENSE_TABLE_SLICES,
+    };
+  }
+
+  if (imageType === "OTHER" && initialRecordsCount < 8) {
+    return null;
+  }
+  if (height < 2400 || height / Math.max(width, 1) < 1.45) {
+    return null;
+  }
+
+  const segmentHeight = Math.max(1800, Math.min(3200, Math.round(width * 2.6)));
+  return {
+    minHeight: 2400,
+    segmentHeight,
+    overlap: Math.max(180, Math.min(360, Math.round(segmentHeight * 0.16))),
+    maxSlices: MAX_TALL_IMAGE_SLICES,
+  };
+}
+
+async function callVisionModel(
+  file: File,
+  model: string,
+  ctx: ExtractVisionContext,
+): Promise<{ records: RawModelRecord[]; imageType: string; usage?: OpenAIUsage }> {
+  const bytes = Buffer.from(await file.arrayBuffer());
+  const dataUrl = `data:${file.type || "image/jpeg"};base64,${bytes.toString("base64")}`;
+  const base = await callVisionModelWithPreparedImage(file, model, ctx, {
+    dataUrl,
+  });
+
+  const metadata = await sharp(bytes).metadata();
+  const width = metadata.width ?? 0;
+  const height = metadata.height ?? 0;
+  const denseRowBands = await detectDenseWebTableRowBands(
+    bytes,
+    width,
+    height,
+    base.records.length,
+    base.imageType,
+  );
+  if (denseRowBands.length >= 18) {
+    return await extractDenseWebTableRows(file, model, ctx, bytes, width, height, denseRowBands);
+  }
+
+  const sliceOptions = getVerticalSliceOptions(width, height, base.records.length, base.imageType);
+  if (!sliceOptions) {
+    return base;
+  }
+
+  const slices = await buildVerticalImageSlices(bytes, sliceOptions);
+  if (slices.length === 0) {
+    return base;
+  }
+
+  const segmentResults = await Promise.all(
+    slices.map((slice) =>
+      callVisionModelWithPreparedImage(file, model, ctx, {
+        dataUrl: slice.dataUrl,
+        note: `\n【当前待识别图片】这是同一张表格截图的第 ${slice.index}/${slice.total} 段纵向切片，仅根据这段切片输出 JSON 中的 records。若切片顶部或底部出现被裁开的半行，无法确认时请省略；不要补写切片外的行。\n`,
+      }),
+    ),
+  );
+
+  const mergedUsage = segmentResults.reduce(
+    (acc, item) => mergeRefineUsage(acc, item.usage),
+    mergeRefineUsage(
+      { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+      base.usage,
+    ),
+  );
+
+  const imageTypeCounts = new Map<string, number>();
+  [base.imageType, ...segmentResults.map((item) => item.imageType)].forEach((type) => {
+    imageTypeCounts.set(type, (imageTypeCounts.get(type) ?? 0) + 1);
+  });
+  const resolvedImageType =
+    [...imageTypeCounts.entries()].sort((left, right) => right[1] - left[1])[0]?.[0] || base.imageType;
+
+  return {
+    records: [...base.records, ...segmentResults.flatMap((item) => item.records)],
+    imageType: resolvedImageType,
+    usage: mergedUsage,
   };
 }
 
@@ -3059,15 +3901,19 @@ async function runConsistencyCheck(file: File, model: string, ctx: ExtractVision
   }
 
   const mappedAttempts = attempts.map((attempt, attemptIndex) =>
-    attempt.records
-      .map((rawRecord, recordIndex) => mapRecord(file.name, rawRecord, recordIndex + attemptIndex * 100))
-      .map((record) =>
-        applyRecognitionRuleCodeToRecord(
-          stripInactiveBuiltInValues(record, ctx.activeBuiltInFieldIds),
-          ctx.recognitionRuleCode,
-          ctx.activeBuiltInFieldIds,
+    dedupeSameImageRecords(
+      attempt.records
+        .map((rawRecord, recordIndex) => mapRecord(file.name, rawRecord, recordIndex + attemptIndex * 100))
+        .map((record) =>
+          applyRecognitionRuleCodeToRecord(
+            stripInactiveBuiltInValues(record, ctx.activeBuiltInFieldIds),
+            ctx.recognitionRuleCode,
+            ctx.activeBuiltInFieldIds,
+          ),
         ),
-      ),
+      file.name,
+      ctx.tableFields,
+    ),
   );
 
   return {
@@ -3166,15 +4012,19 @@ export async function POST(request: Request) {
 
           const imageType = docAttempts[0]?.imageType || guessDocumentImageType(file.name);
           const attemptRecords = docAttempts.map((attempt) =>
-            attempt.records.map((raw, index) =>
-              applyRecognitionRuleCodeToRecord(
-                stripInactiveBuiltInValues(
-                  mapRecord(file.name, raw, index),
+            dedupeSameImageRecords(
+              attempt.records.map((raw, index) =>
+                applyRecognitionRuleCodeToRecord(
+                  stripInactiveBuiltInValues(
+                    mapRecord(file.name, raw, index),
+                    activeBuiltInFieldIds,
+                  ),
+                  visionCtx.recognitionRuleCode,
                   activeBuiltInFieldIds,
                 ),
-                visionCtx.recognitionRuleCode,
-                activeBuiltInFieldIds,
               ),
+              file.name,
+              visionCtx.tableFields,
             ),
           );
 
@@ -3199,6 +4049,7 @@ export async function POST(request: Request) {
             imageType,
           }));
           checkedRecords = deriveWaybillStatus(checkedRecords, activeBuiltInFieldIds);
+          checkedRecords = deriveCustomFieldsFromKnownRules(checkedRecords, visionCtx.tableFields);
 
           const recoveryResult = { records: checkedRecords };
 
@@ -3224,6 +4075,7 @@ export async function POST(request: Request) {
             );
           });
           checkedRecords = deriveWaybillStatus(checkedRecords, activeBuiltInFieldIds);
+          checkedRecords = deriveCustomFieldsFromKnownRules(checkedRecords, visionCtx.tableFields);
 
           const consistencyAnalysis = applyProcessedConsistencyAnalysis(
             file.name,
@@ -3355,6 +4207,7 @@ export async function POST(request: Request) {
           imageType: consistencyResult.imageType,
         }));
         checkedRecords = deriveWaybillStatus(checkedRecords, activeBuiltInFieldIds);
+        checkedRecords = deriveCustomFieldsFromKnownRules(checkedRecords, visionCtx.tableFields);
 
         const recoveryResult = await recoverMissingFieldsFromVision(file, model, visionCtx, checkedRecords);
         checkedRecords = recoveryResult.records
@@ -3379,6 +4232,7 @@ export async function POST(request: Request) {
           );
         });
         checkedRecords = deriveWaybillStatus(checkedRecords, activeBuiltInFieldIds);
+        checkedRecords = deriveCustomFieldsFromKnownRules(checkedRecords, visionCtx.tableFields);
 
         const consistencyAnalysis = applyProcessedConsistencyAnalysis(
           file.name,

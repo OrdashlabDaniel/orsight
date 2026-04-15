@@ -3,7 +3,7 @@
 import Image from "next/image";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Fragment, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import * as XLSX from "xlsx";
 
 import {
@@ -32,6 +32,16 @@ import {
 } from "@/lib/table-fields";
 import { getLocalizedTableFieldLabel } from "@/lib/table-field-display";
 import { DEFAULT_FORM_ID, buildFormTrainingHref, normalizeFormId } from "@/lib/forms";
+import {
+  clearWorkbenchSessionDraft,
+  loadWorkbenchSessionDraft,
+  saveWorkbenchSessionDraft,
+} from "@/lib/workbench-session";
+import {
+  clearPersistedWorkbenchUploads,
+  loadPersistedWorkbenchUploads,
+  savePersistedWorkbenchUploads,
+} from "@/lib/workbench-upload-store";
 import { LoginLoadingFallback } from "@/app/login/LoginLoadingFallback";
 import { useLocale } from "@/i18n/LocaleProvider";
 import {
@@ -45,6 +55,14 @@ type UploadItem = {
   file: File;
   previewUrl: string;
 };
+
+function revokeUploadPreviewUrls(items: UploadItem[]) {
+  items.forEach((upload) => {
+    if (upload.previewUrl.startsWith("blob:")) {
+      URL.revokeObjectURL(upload.previewUrl);
+    }
+  });
+}
 
 type ConfirmedCorrectRecord = {
   recordId: string;
@@ -129,9 +147,23 @@ type WindowWithSavePicker = Window &
   };
 
 const EXTRACTION_BATCH_SIZE = 5;
+const SOURCE_FILTER_COLUMN_ID = "__source__";
+const EMPTY_COLUMN_FILTER_VALUE = "__orsight_empty__";
 
 /** Stable map key when a record has no route (UI label comes from `home.ungrouped`). */
 const UNGROUPED_ROUTE_KEY = "__orsight_ungrouped__";
+
+type FilterableColumnDefinition = {
+  id: string;
+  label: string;
+  type: TableFieldDefinition["type"];
+};
+
+type ColumnFilterOption = {
+  value: string;
+  label: string;
+  count: number;
+};
 
 function podRecordToAnnotationSeed(record: PodRecord): AnnotationWorkbenchSeed {
   return {
@@ -151,6 +183,40 @@ function podRecordToAnnotationSeed(record: PodRecord): AnnotationWorkbenchSeed {
 
 function buildExportRows(records: PodRecord[], fields: TableFieldDefinition[]) {
   return records.map((record) => fields.map((field) => getRecordFieldValue(record, field)));
+}
+
+function normalizeColumnFilterValue(value: string | number | "" | null | undefined) {
+  return value == null ? "" : String(value).trim();
+}
+
+function getFilterableColumnValue(
+  record: PodRecord,
+  columnId: string,
+  fieldMap: ReadonlyMap<string, TableFieldDefinition>,
+) {
+  if (columnId === SOURCE_FILTER_COLUMN_ID) {
+    return normalizeColumnFilterValue(record.imageName);
+  }
+
+  const field = fieldMap.get(columnId);
+  if (!field) {
+    return "";
+  }
+
+  return normalizeColumnFilterValue(getRecordFieldValue(record, field));
+}
+
+function matchesColumnFilterValue(
+  record: PodRecord,
+  columnId: string,
+  selectedValue: string,
+  fieldMap: ReadonlyMap<string, TableFieldDefinition>,
+) {
+  const currentValue = getFilterableColumnValue(record, columnId, fieldMap);
+  if (selectedValue === EMPTY_COLUMN_FILTER_VALUE) {
+    return currentValue === "";
+  }
+  return currentValue === selectedValue;
 }
 
 function formatDateForFilename(rawDate: string | undefined, dataSuffix: string) {
@@ -237,6 +303,7 @@ function HomeContent() {
   const [issues, setIssues] = useState<ExtractionIssue[]>([]);
   const [confirmedCorrectRecords, setConfirmedCorrectRecords] = useState<ConfirmedCorrectRecord[]>([]);
   const [isExtracting, setIsExtracting] = useState(false);
+  const [isHighQualityReextracting, setIsHighQualityReextracting] = useState(false);
   const [isRetryingReviewAll, setIsRetryingReviewAll] = useState(false);
   const [retryingKeys, setRetryingKeys] = useState<string[]>([]);
   const [progress, setProgress] = useState<{ completed: number; total: number } | null>(null);
@@ -271,10 +338,7 @@ function HomeContent() {
   const [isSavingFieldConfig, setIsSavingFieldConfig] = useState(false);
   const [fieldManagerOffset, setFieldManagerOffset] = useState<FieldManagerOffset>({ x: 0, y: 0 });
   const [fieldManagerDragState, setFieldManagerDragState] = useState<FieldManagerDragState | null>(null);
-  const [routeFilter, setRouteFilter] = useState("");
-  const [isRouteDropdownOpen, setIsRouteDropdownOpen] = useState(false);
-  const filterInputRef = useRef<HTMLInputElement | null>(null);
-  const filterDropdownRef = useRef<HTMLDivElement | null>(null);
+  const [columnFilters, setColumnFilters] = useState<Record<string, string>>({});
   const viewerAnchorRef = useRef<HTMLElement | null>(null);
   const uploadPanelRef = useRef<HTMLDivElement | null>(null);
   const splitResultsRef = useRef<HTMLDivElement | null>(null);
@@ -282,6 +346,9 @@ function HomeContent() {
   const rowDragRef = useRef<{ startY: number; startHeight: number; shellHeight: number } | null>(null);
   const uploadPanelWidthRef = useRef(380);
   const remindersPanelHeightRef = useRef(160);
+  const prevWorkbenchFormIdRef = useRef<string | null>(null);
+  const uploadRestoreRequestIdRef = useRef(0);
+  const skipNextWorkbenchSessionSaveRef = useRef(true);
 
   const UPLOAD_PANEL_WIDTH_KEY = "orsight-home-upload-width";
   const RESULTS_REMINDERS_HEIGHT_KEY = "orsight-home-results-reminders-height";
@@ -294,7 +361,7 @@ function HomeContent() {
 
   useEffect(() => {
     return () => {
-      uploadsRef.current.forEach((upload) => URL.revokeObjectURL(upload.previewUrl));
+      revokeUploadPreviewUrls(uploadsRef.current);
     };
   }, []);
 
@@ -408,6 +475,32 @@ function HomeContent() {
     (event.currentTarget as HTMLElement).setPointerCapture?.(event.pointerId);
   }
 
+  function setColumnFilterValue(columnId: string, nextValue: string) {
+    setColumnFilters((current) => {
+      if (!nextValue) {
+        if (!(columnId in current)) {
+          return current;
+        }
+        const next = { ...current };
+        delete next[columnId];
+        return next;
+      }
+      if (current[columnId] === nextValue) {
+        return current;
+      }
+      return { ...current, [columnId]: nextValue };
+    });
+  }
+
+  function clearAllColumnFilters() {
+    setColumnFilters((current) => {
+      if (!Object.keys(current).length) {
+        return current;
+      }
+      return {};
+    });
+  }
+
   useEffect(() => {
     void loadTableFieldConfig();
   }, [currentFormId]);
@@ -417,17 +510,107 @@ function HomeContent() {
   }, [currentFormId]);
 
   useEffect(() => {
-    setRecords([]);
-    setIssues([]);
-    setConfirmedCorrectRecords([]);
-    setRouteFilter("");
-    setSelectedUploadId(null);
-    setUploads([]);
-    setNoticeMessage("");
-    setErrorMessage("");
-    closeRecordPopup();
-    closeViewerPopup();
+    let cancelled = false;
+    const requestId = uploadRestoreRequestIdRef.current + 1;
+    uploadRestoreRequestIdRef.current = requestId;
+
+    void loadPersistedWorkbenchUploads(currentFormId)
+      .then((restoredUploads) => {
+        if (cancelled || uploadRestoreRequestIdRef.current !== requestId) {
+          revokeUploadPreviewUrls(restoredUploads);
+          return;
+        }
+        uploadsRef.current = restoredUploads;
+        setUploads(restoredUploads);
+        setSelectedUploadId((current) =>
+          current && restoredUploads.some((upload) => upload.id === current)
+            ? current
+            : restoredUploads[0]?.id ?? null,
+        );
+      })
+      .catch(() => {
+        if (!cancelled && uploadRestoreRequestIdRef.current === requestId) {
+          uploadsRef.current = [];
+          setUploads([]);
+          setSelectedUploadId(null);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, [currentFormId]);
+
+  useLayoutEffect(() => {
+    const prev = prevWorkbenchFormIdRef.current;
+    const switchedForm = prev !== null && prev !== currentFormId;
+
+    if (switchedForm) {
+      revokeUploadPreviewUrls(uploadsRef.current);
+      uploadsRef.current = [];
+      setRecords([]);
+      setIssues([]);
+      setConfirmedCorrectRecords([]);
+      setTrainingExamplesLoaded(0);
+      setColumnFilters({});
+      setSelectedUploadId(null);
+      setUploads([]);
+      setNoticeMessage("");
+      setErrorMessage("");
+      closeRecordPopup();
+      closeViewerPopup();
+    }
+
+    skipNextWorkbenchSessionSaveRef.current = true;
+    const draft = loadWorkbenchSessionDraft(currentFormId);
+    if (draft && (switchedForm || prev === null)) {
+      setRecords(draft.records);
+      setIssues(draft.issues);
+      setConfirmedCorrectRecords(draft.confirmedCorrectRecords);
+      setColumnFilters(draft.columnFilters);
+      setTrainingExamplesLoaded(draft.trainingExamplesLoaded);
+      setSelectedUploadId(draft.selectedUploadId || null);
+    }
+
+    prevWorkbenchFormIdRef.current = currentFormId;
+  }, [currentFormId]);
+
+  useEffect(() => {
+    if (skipNextWorkbenchSessionSaveRef.current) {
+      skipNextWorkbenchSessionSaveRef.current = false;
+      return;
+    }
+    const formId = currentFormId;
+    const handle = window.setTimeout(() => {
+      const hasContent =
+        records.length > 0 ||
+        issues.length > 0 ||
+        confirmedCorrectRecords.length > 0 ||
+        Object.keys(columnFilters).length > 0;
+      if (hasContent) {
+        saveWorkbenchSessionDraft(formId, {
+          v: 1,
+          records,
+          issues,
+          confirmedCorrectRecords,
+          columnFilters,
+          trainingExamplesLoaded,
+          selectedUploadId,
+        });
+      } else {
+        clearWorkbenchSessionDraft(formId);
+      }
+    }, 400);
+    return () => window.clearTimeout(handle);
+  }, [
+    records,
+    issues,
+    confirmedCorrectRecords,
+    columnFilters,
+    trainingExamplesLoaded,
+    selectedUploadId,
+    currentFormId,
+  ]);
 
   useEffect(() => {
     const existingIds = new Set(records.map((record) => record.id));
@@ -461,24 +644,6 @@ function HomeContent() {
       window.removeEventListener("scroll", updateViewerPopupPosition, true);
     };
   }, [viewingRecord]);
-
-  useEffect(() => {
-    function handleClickOutside(event: MouseEvent) {
-      if (
-        filterDropdownRef.current &&
-        !filterDropdownRef.current.contains(event.target as Node) &&
-        filterInputRef.current &&
-        !filterInputRef.current.contains(event.target as Node)
-      ) {
-        setIsRouteDropdownOpen(false);
-      }
-    }
-
-    document.addEventListener("mousedown", handleClickOutside);
-    return () => {
-      document.removeEventListener("mousedown", handleClickOutside);
-    };
-  }, []);
 
   useEffect(() => {
     if (!fieldManagerDragState) {
@@ -552,9 +717,24 @@ function HomeContent() {
     () => new Set(activeTableFields.filter((field) => field.builtIn).map((field) => field.id)),
     [activeTableFields],
   );
+  const activeFieldMap = useMemo(
+    () => new Map(activeTableFields.map((field) => [field.id, field])),
+    [activeTableFields],
+  );
   const routeFieldActive = useMemo(
     () => activeBuiltInFieldIds.has("route"),
     [activeBuiltInFieldIds],
+  );
+  const filterableColumns = useMemo<FilterableColumnDefinition[]>(
+    () => [
+      { id: SOURCE_FILTER_COLUMN_ID, label: t("home.sourceCol"), type: "text" },
+      ...activeTableFields.map((field) => ({
+        id: field.id,
+        label: getLocalizedTableFieldLabel(field, locale),
+        type: field.type,
+      })),
+    ],
+    [activeTableFields, locale, t],
   );
   const tableHeaders = useMemo(
     () => activeTableFields.map((field) => getLocalizedTableFieldLabel(field, locale)),
@@ -562,45 +742,106 @@ function HomeContent() {
   );
 
   useEffect(() => {
-    if (!routeFieldActive) {
-      setRouteFilter("");
-      setIsRouteDropdownOpen(false);
-    }
-  }, [routeFieldActive]);
+    const allowedIds = new Set([SOURCE_FILTER_COLUMN_ID, ...activeTableFields.map((field) => field.id)]);
+    setColumnFilters((current) => {
+      let changed = false;
+      const next: Record<string, string> = {};
+      for (const [id, value] of Object.entries(current)) {
+        if (allowedIds.has(id) && value) {
+          next[id] = value;
+        } else {
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+  }, [activeTableFields]);
 
   const organizedRecordsResult = useMemo(() => organizeRecords(records), [records]);
-  
-  const allAvailableRoutes = useMemo(() => {
-    const routes = new Set<string>();
-    for (const record of organizedRecordsResult.records) {
-      if (record.route) {
-        routes.add(record.route);
-      }
-    }
-    return Array.from(routes).sort();
-  }, [organizedRecordsResult.records]);
-
-  const filteredRoutes = useMemo(() => {
-    if (!routeFilter.trim()) {
-      return allAvailableRoutes;
-    }
-    const lowerFilter = routeFilter.toLowerCase().trim();
-    return allAvailableRoutes.filter(route => route.toLowerCase().includes(lowerFilter));
-  }, [allAvailableRoutes, routeFilter]);
+  const activeColumnFilterEntries = useMemo(
+    () => Object.entries(columnFilters).filter(([, value]) => value),
+    [columnFilters],
+  );
+  const hasActiveColumnFilters = activeColumnFilterEntries.length > 0;
 
   const filteredRecordsResult = useMemo(() => {
-    if (!routeFilter.trim()) {
+    if (!activeColumnFilterEntries.length) {
       return organizedRecordsResult;
     }
-    const lowerFilter = routeFilter.toLowerCase().trim();
-    const filtered = organizedRecordsResult.records.filter((record) => 
-      record.route && record.route.toLowerCase().includes(lowerFilter)
+    const filtered = organizedRecordsResult.records.filter((record) =>
+      activeColumnFilterEntries.every(([columnId, selectedValue]) =>
+        matchesColumnFilterValue(record, columnId, selectedValue, activeFieldMap),
+      ),
     );
     return {
       records: filtered,
-      duplicateCount: organizedRecordsResult.duplicateCount
+      duplicateCount: organizedRecordsResult.duplicateCount,
     };
-  }, [organizedRecordsResult, routeFilter]);
+  }, [organizedRecordsResult, activeColumnFilterEntries, activeFieldMap]);
+
+  const columnFilterOptions = useMemo<Record<string, ColumnFilterOption[]>>(() => {
+    const collator = new Intl.Collator(locale === "en" ? "en-US" : "zh-CN", {
+      numeric: true,
+      sensitivity: "base",
+    });
+    const next: Record<string, ColumnFilterOption[]> = {};
+
+    for (const column of filterableColumns) {
+      const counts = new Map<string, number>();
+      for (const record of organizedRecordsResult.records) {
+        const matchesOtherFilters = activeColumnFilterEntries.every(
+          ([otherColumnId, selectedValue]) =>
+            otherColumnId === column.id ||
+            matchesColumnFilterValue(record, otherColumnId, selectedValue, activeFieldMap),
+        );
+        if (!matchesOtherFilters) {
+          continue;
+        }
+
+        const rawValue = getFilterableColumnValue(record, column.id, activeFieldMap);
+        const optionValue = rawValue === "" ? EMPTY_COLUMN_FILTER_VALUE : rawValue;
+        counts.set(optionValue, (counts.get(optionValue) ?? 0) + 1);
+      }
+
+      const selectedValue = columnFilters[column.id];
+      if (selectedValue && !counts.has(selectedValue)) {
+        counts.set(selectedValue, 0);
+      }
+
+      next[column.id] = Array.from(counts.entries())
+        .sort(([a], [b]) => {
+          if (a === EMPTY_COLUMN_FILTER_VALUE) {
+            return 1;
+          }
+          if (b === EMPTY_COLUMN_FILTER_VALUE) {
+            return -1;
+          }
+          if (column.type === "number") {
+            const aNum = Number(a);
+            const bNum = Number(b);
+            if (Number.isFinite(aNum) && Number.isFinite(bNum) && aNum !== bNum) {
+              return aNum - bNum;
+            }
+          }
+          return collator.compare(a, b);
+        })
+        .map(([value, count]) => ({
+          value,
+          label: value === EMPTY_COLUMN_FILTER_VALUE ? t("home.filterBlank") : value,
+          count,
+        }));
+    }
+
+    return next;
+  }, [
+    activeColumnFilterEntries,
+    activeFieldMap,
+    columnFilters,
+    filterableColumns,
+    locale,
+    organizedRecordsResult.records,
+    t,
+  ]);
 
   const groupedRecords = useMemo(() => {
     if (!routeFieldActive) {
@@ -891,6 +1132,7 @@ function HomeContent() {
     if (!fileList?.length) {
       return;
     }
+    uploadRestoreRequestIdRef.current += 1;
 
     try {
       const nextUploads = await Promise.all(
@@ -904,16 +1146,19 @@ function HomeContent() {
         })
       );
 
-      setUploads((current) => {
-        const merged = [...current, ...nextUploads];
-        setSelectedUploadId((currentId) => {
-          if (!currentId && merged[0]) {
-            return merged[0].id;
-          }
+      const merged = [...uploadsRef.current, ...nextUploads];
+      uploadsRef.current = merged;
+      setUploads(merged);
+      setSelectedUploadId((currentId) => {
+        if (currentId && merged.some((upload) => upload.id === currentId)) {
           return currentId;
-        });
-        return merged;
+        }
+        return merged[0]?.id ?? null;
       });
+      void savePersistedWorkbenchUploads(
+        currentFormId,
+        merged.map((upload) => ({ id: upload.id, file: upload.file })),
+      );
       setNoticeMessage(t("home.noticeAdded", { n: nextUploads.length }));
       setErrorMessage("");
     } catch {
@@ -944,12 +1189,17 @@ function HomeContent() {
   }
 
   function clearAll() {
-    uploads.forEach((upload) => URL.revokeObjectURL(upload.previewUrl));
+    uploadRestoreRequestIdRef.current += 1;
+    revokeUploadPreviewUrls(uploadsRef.current);
+    uploadsRef.current = [];
+    clearWorkbenchSessionDraft(currentFormId);
+    void clearPersistedWorkbenchUploads(currentFormId);
     setUploads([]);
     setSelectedUploadId(null);
     setRecords([]);
     setIssues([]);
     setConfirmedCorrectRecords([]);
+    setTrainingExamplesLoaded(0);
     setErrorMessage("");
     setNoticeMessage(t("home.cleared"));
   }
@@ -1069,6 +1319,46 @@ function HomeContent() {
       setErrorMessage(error instanceof Error ? error.message : t("home.errSaveFields"));
     } finally {
       setIsSavingFieldConfig(false);
+    }
+  }
+
+  async function reextractAllWithHigherModel() {
+    if (!uploads.length) {
+      setErrorMessage(t("home.errNoUpload"));
+      return;
+    }
+
+    setIsHighQualityReextracting(true);
+    setErrorMessage("");
+    setNoticeMessage("");
+    setSelectedUploadId(uploads[0]?.id ?? null);
+
+    try {
+      const payload = await runParallelExtraction(
+        uploads.map((upload) => upload.file),
+        3,
+        "review",
+      );
+
+      setRecords(payload.records || []);
+      setIssues(payload.issues || []);
+      setConfirmedCorrectRecords([]);
+      setTrainingExamplesLoaded(payload.trainingExamplesLoaded || 0);
+      const organized = organizeRecords(payload.records || []);
+      const dedupeMessage =
+        organized.duplicateCount > 0 ? t("home.dedupe", { n: organized.duplicateCount }) : "";
+      setNoticeMessage(
+        t("home.noticeExtractHighQualityDone", {
+          n: organized.records.length,
+          dedupe: dedupeMessage,
+          model: payload.modelUsed || reviewModelName,
+        }),
+      );
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : t("home.errExtractFail"));
+    } finally {
+      setIsHighQualityReextracting(false);
+      setProgress(null);
     }
   }
 
@@ -1632,147 +1922,159 @@ function HomeContent() {
     <table className="min-w-full border-separate border-spacing-0 text-sm">
       <thead className="sticky top-0 z-20 bg-[var(--background)] text-[var(--foreground)] shadow-[0_1px_0_var(--border)]">
         <tr>
-          <th className="px-3 py-2 text-left text-xs font-medium text-[var(--muted-foreground)]">
-            {t("home.sourceCol")}
-          </th>
-          {activeTableFields.map((column) => (
-            <th key={column.id} className="px-3 py-2 text-left text-xs font-medium text-[var(--muted-foreground)]">
-              {getLocalizedTableFieldLabel(column, locale)}
+          {filterableColumns.map((column) => (
+            <th key={column.id} className="px-3 py-2 align-top text-left text-xs font-medium text-[var(--muted-foreground)]">
+              <div className={`flex flex-col gap-1 ${column.id === SOURCE_FILTER_COLUMN_ID ? "min-w-56" : "min-w-36"}`}>
+                <span>{column.label}</span>
+                <select
+                  value={columnFilters[column.id] ?? ""}
+                  onChange={(event) => setColumnFilterValue(column.id, event.target.value)}
+                  aria-label={t("home.filterBy", { label: column.label })}
+                  className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-normal text-slate-700 outline-none focus:border-slate-500"
+                >
+                  <option value="">{t("home.filterAll")}</option>
+                  {columnFilterOptions[column.id]?.map((option) => (
+                    <option key={`${column.id}-${option.value}`} value={option.value}>
+                      {`${option.label} (${option.count.toLocaleString(nLoc)})`}
+                    </option>
+                  ))}
+                </select>
+              </div>
             </th>
           ))}
         </tr>
       </thead>
       <tbody>
-          {filteredRecordsResult.records.length ? (
-            groupedRecords.map(([route, routeRecords]) => (
-              <Fragment key={route}>
-                {routeFieldActive ? (
-                  <tr className="bg-slate-200">
-                    <td colSpan={activeTableFields.length + 1} className="border-b border-slate-300 px-3 py-2 text-left font-semibold text-slate-800">
-                      {t("home.groupRoute", {
-                        route: route === UNGROUPED_ROUTE_KEY ? t("home.ungrouped") : route,
-                        n: routeRecords.length,
-                      })}
-                    </td>
-                  </tr>
-                ) : null}
-                {routeRecords.map((record) => (
-                  <tr
-                    key={record.id}
-                    id={`record-row-${record.id}`}
-                    className={`${
-                      needsManualAnnotation(record)
-                        ? "bg-rose-50/70"
-                        : isCrossImageMergedRow(record)
-                          ? "bg-violet-50/60 odd:bg-violet-50/50 even:bg-violet-50/60"
-                          : "odd:bg-white even:bg-slate-50"
-                    } ${
-                      activePopupRecordId === record.id
-                        ? "relative ring-2 ring-blue-400 ring-inset bg-blue-50/80"
-                        : ""
-                    }`}
-                  >
-                    <td className="border-b border-slate-200 px-3 py-2 align-top text-slate-600">
-                      <div className="max-w-56 whitespace-pre-wrap break-words">{record.imageName}</div>
-                      {isCrossImageMergedRow(record) ? (
-                        <div className="mt-1 inline-flex max-w-full flex-wrap items-center gap-1">
-                          <span className="inline-flex rounded-full bg-violet-100 px-2 py-0.5 text-xs font-medium text-violet-800">
-                            {t("home.mergedCross")}
-                          </span>
-                          <span className="text-xs text-violet-700">
-                            {t("home.mergedSources", { n: mergedSourceImageCount(record) })}
-                          </span>
-                        </div>
-                      ) : null}
-                      {recordNeedsReviewBadge(record) ? (
-                        <div className="mt-1 inline-flex rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-700">
-                          {t("home.pendingReview")}
-                        </div>
-                      ) : null}
-                      {isRecordConfirmedCorrect(record) ? (
-                        <div className="mt-1 inline-flex rounded-full bg-emerald-100 px-2 py-0.5 text-xs text-emerald-700">
-                          {t("home.confirmed")}
-                        </div>
-                      ) : null}
-                      {getConsistencyRatio(record) ? (
-                        <div
-                          className={`mt-1 inline-flex rounded-full px-2 py-0.5 text-xs ${
-                            hasConsistencyMismatch(record)
-                              ? "bg-rose-100 text-rose-700"
-                              : "bg-emerald-100 text-emerald-700"
-                          }`}
-                        >
-                          {t("home.consistency", { ratio: getConsistencyRatio(record) ?? "" })}
-                        </div>
-                      ) : null}
-                      {hasTotalSourceMismatch(record) ? (
-                        <div className="mt-1 inline-flex rounded-full bg-rose-100 px-2 py-0.5 text-xs text-rose-700">
-                          {t("home.totalSourceBad")}
-                        </div>
-                      ) : null}
-                      {getRecordIssues(record).length ? (
-                        <div className="mt-2">
-                          <button
-                            className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-medium text-amber-700 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-60"
-                            onClick={() => retryRecord(record)}
-                            disabled={retryingKeys.includes(record.id)}
-                          >
-                            {retryingKeys.includes(record.id) ? t("home.retrying") : t("home.retryExtract")}
-                          </button>
-                        </div>
-                      ) : null}
-                      <div className="mt-2 flex flex-wrap gap-2">
+        {filteredRecordsResult.records.length ? (
+          groupedRecords.map(([route, routeRecords]) => (
+            <Fragment key={route}>
+              {routeFieldActive ? (
+                <tr className="bg-slate-200">
+                  <td colSpan={activeTableFields.length + 1} className="border-b border-slate-300 px-3 py-2 text-left font-semibold text-slate-800">
+                    {t("home.groupRoute", {
+                      route: route === UNGROUPED_ROUTE_KEY ? t("home.ungrouped") : route,
+                      n: routeRecords.length,
+                    })}
+                  </td>
+                </tr>
+              ) : null}
+              {routeRecords.map((record) => (
+                <tr
+                  key={record.id}
+                  id={`record-row-${record.id}`}
+                  className={`${
+                    needsManualAnnotation(record)
+                      ? "bg-rose-50/70"
+                      : isCrossImageMergedRow(record)
+                        ? "bg-violet-50/60 odd:bg-violet-50/50 even:bg-violet-50/60"
+                        : "odd:bg-white even:bg-slate-50"
+                  } ${
+                    activePopupRecordId === record.id
+                      ? "relative ring-2 ring-blue-400 ring-inset bg-blue-50/80"
+                      : ""
+                  }`}
+                >
+                  <td className="border-b border-slate-200 px-3 py-2 align-top text-slate-600">
+                    <div className="max-w-56 whitespace-pre-wrap break-words">{record.imageName}</div>
+                    {isCrossImageMergedRow(record) ? (
+                      <div className="mt-1 inline-flex max-w-full flex-wrap items-center gap-1">
+                        <span className="inline-flex rounded-full bg-violet-100 px-2 py-0.5 text-xs font-medium text-violet-800">
+                          {t("home.mergedCross")}
+                        </span>
+                        <span className="text-xs text-violet-700">
+                          {t("home.mergedSources", { n: mergedSourceImageCount(record) })}
+                        </span>
+                      </div>
+                    ) : null}
+                    {recordNeedsReviewBadge(record) ? (
+                      <div className="mt-1 inline-flex rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-700">
+                        {t("home.pendingReview")}
+                      </div>
+                    ) : null}
+                    {isRecordConfirmedCorrect(record) ? (
+                      <div className="mt-1 inline-flex rounded-full bg-emerald-100 px-2 py-0.5 text-xs text-emerald-700">
+                        {t("home.confirmed")}
+                      </div>
+                    ) : null}
+                    {getConsistencyRatio(record) ? (
+                      <div
+                        className={`mt-1 inline-flex rounded-full px-2 py-0.5 text-xs ${
+                          hasConsistencyMismatch(record)
+                            ? "bg-rose-100 text-rose-700"
+                            : "bg-emerald-100 text-emerald-700"
+                        }`}
+                      >
+                        {t("home.consistency", { ratio: getConsistencyRatio(record) ?? "" })}
+                      </div>
+                    ) : null}
+                    {hasTotalSourceMismatch(record) ? (
+                      <div className="mt-1 inline-flex rounded-full bg-rose-100 px-2 py-0.5 text-xs text-rose-700">
+                        {t("home.totalSourceBad")}
+                      </div>
+                    ) : null}
+                    {getRecordIssues(record).length ? (
+                      <div className="mt-2">
                         <button
-                          className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100"
-                          onClick={(event) => openRecordImage(record, event.currentTarget)}
+                          className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-medium text-amber-700 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-60"
+                          onClick={() => retryRecord(record)}
+                          disabled={retryingKeys.includes(record.id)}
                         >
-                          {t("home.viewImage")}
-                        </button>
-                        <button
-                          className={`rounded-lg px-3 py-1.5 text-xs font-medium ${
-                            isRecordConfirmedCorrect(record)
-                              ? "border border-emerald-300 bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
-                              : "border border-emerald-300 bg-white text-emerald-700 hover:bg-emerald-50"
-                          }`}
-                          onClick={() => toggleRecordConfirmedCorrect(record)}
-                        >
-                          {isRecordConfirmedCorrect(record) ? t("home.unconfirm") : t("home.markCorrect")}
-                        </button>
-                        {needsManualAnnotation(record) ? (
-                          <button
-                            className="rounded-lg border border-blue-300 bg-blue-50 px-3 py-1.5 text-xs font-medium text-blue-700 hover:bg-blue-100"
-                            onClick={(event) => void openAnnotationPanel(record, event.currentTarget)}
-                          >
-                            {t("home.openAnnotation")}
-                          </button>
-                        ) : null}
-                        <button
-                          className="rounded-lg border border-rose-300 bg-rose-50 px-3 py-1.5 text-xs font-medium text-rose-700 hover:bg-rose-100"
-                          onClick={() => deleteRecord(record)}
-                        >
-                          {t("home.deleteRow")}
+                          {retryingKeys.includes(record.id) ? t("home.retrying") : t("home.retryExtract")}
                         </button>
                       </div>
+                    ) : null}
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      <button
+                        className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100"
+                        onClick={(event) => openRecordImage(record, event.currentTarget)}
+                      >
+                        {t("home.viewImage")}
+                      </button>
+                      <button
+                        className={`rounded-lg px-3 py-1.5 text-xs font-medium ${
+                          isRecordConfirmedCorrect(record)
+                            ? "border border-emerald-300 bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
+                            : "border border-emerald-300 bg-white text-emerald-700 hover:bg-emerald-50"
+                        }`}
+                        onClick={() => toggleRecordConfirmedCorrect(record)}
+                      >
+                        {isRecordConfirmedCorrect(record) ? t("home.unconfirm") : t("home.markCorrect")}
+                      </button>
+                      {needsManualAnnotation(record) ? (
+                        <button
+                          className="rounded-lg border border-blue-300 bg-blue-50 px-3 py-1.5 text-xs font-medium text-blue-700 hover:bg-blue-100"
+                          onClick={(event) => void openAnnotationPanel(record, event.currentTarget)}
+                        >
+                          {t("home.openAnnotation")}
+                        </button>
+                      ) : null}
+                      <button
+                        className="rounded-lg border border-rose-300 bg-rose-50 px-3 py-1.5 text-xs font-medium text-rose-700 hover:bg-rose-100"
+                        onClick={() => deleteRecord(record)}
+                      >
+                        {t("home.deleteRow")}
+                      </button>
+                    </div>
+                  </td>
+                  {activeTableFields.map((column) => (
+                    <td key={column.id} className="border-b border-slate-200 px-2 py-2 align-top">
+                      <input
+                        type={column.type === "number" ? "number" : "text"}
+                        value={String(getRecordFieldValue(record, column) ?? "")}
+                        onChange={(event) => updateRecord(record.id, column, event.target.value)}
+                        className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 outline-none focus:border-slate-500"
+                      />
                     </td>
-                    {activeTableFields.map((column) => (
-                      <td key={column.id} className="border-b border-slate-200 px-2 py-2 align-top">
-                        <input
-                          type={column.type === "number" ? "number" : "text"}
-                          value={String(getRecordFieldValue(record, column) ?? "")}
-                          onChange={(event) => updateRecord(record.id, column, event.target.value)}
-                          className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 outline-none focus:border-slate-500"
-                        />
-                      </td>
-                    ))}
-                  </tr>
-                ))}
-              </Fragment>
-            ))
-          ) : (
-            <tr>
-              <td colSpan={activeTableFields.length + 1} className="px-4 py-16 text-center text-slate-500">
-                {routeFilter ? t("home.emptyFilter") : t("home.emptyNoData")}
-              </td>
+                  ))}
+                </tr>
+              ))}
+            </Fragment>
+          ))
+        ) : (
+          <tr>
+            <td colSpan={activeTableFields.length + 1} className="px-4 py-16 text-center text-slate-500">
+              {hasActiveColumnFilters ? t("home.emptyFilter") : t("home.emptyNoData")}
+            </td>
           </tr>
         )}
       </tbody>
@@ -2029,9 +2331,16 @@ function HomeContent() {
                 <button
                   className="rounded-md bg-[var(--foreground)] px-3 py-2 text-sm text-[var(--background)] hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
                   onClick={extractData}
-                  disabled={isExtracting || !uploads.length}
+                  disabled={isExtracting || isHighQualityReextracting || isRetryingReviewAll || !uploads.length}
                 >
                   {isExtracting ? t("home.extracting") : t("home.extract")}
+                </button>
+                <button
+                  className="rounded-md border border-[var(--border)] px-3 py-2 text-sm hover:bg-[var(--background)] disabled:cursor-not-allowed disabled:opacity-40"
+                  onClick={() => void reextractAllWithHigherModel()}
+                  disabled={isExtracting || isHighQualityReextracting || isRetryingReviewAll || !uploads.length}
+                >
+                  {isHighQualityReextracting ? t("home.extractingHighQuality") : t("home.extractHighQuality")}
                 </button>
                 <button
                   className="rounded-md border border-[var(--border)] px-3 py-2 text-sm hover:bg-[var(--background)]"
@@ -2169,7 +2478,7 @@ function HomeContent() {
                         n: organizedRecordsResult.duplicateCount.toLocaleString(nLoc),
                       })}`
                     : ""}
-                  {routeFilter.trim() && filteredRecordsResult.records.length !== organizedRecordsResult.records.length
+                  {hasActiveColumnFilters
                     ? t("home.filtered", {
                         n: filteredRecordsResult.records.length.toLocaleString(nLoc),
                       })
@@ -2177,67 +2486,20 @@ function HomeContent() {
                 </p>
               </div>
               <div className="flex flex-wrap items-center gap-2">
-                {routeFieldActive ? (
-                  <div className="relative flex items-center">
-                    <input
-                      ref={filterInputRef}
-                      type="text"
-                      placeholder={t("home.routePh")}
-                      value={routeFilter}
-                      onChange={(e) => {
-                        setRouteFilter(e.target.value);
-                        setIsRouteDropdownOpen(true);
-                      }}
-                      onFocus={() => setIsRouteDropdownOpen(true)}
-                      className="w-48 rounded-md border border-[var(--border)] bg-[var(--background)] px-2 py-1.5 pr-7 text-sm outline-none focus:border-[var(--foreground)]"
-                    />
-                    {routeFilter ? (
-                      <button
-                        onClick={() => {
-                          setRouteFilter("");
-                          setIsRouteDropdownOpen(false);
-                        }}
-                        className="absolute right-2 text-slate-400 hover:text-slate-600"
-                        title={t("home.clearSearch")}
-                      >
-                        ✕
-                      </button>
-                    ) : (
-                      <svg className="absolute right-2.5 h-4 w-4 text-slate-400 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7" />
-                      </svg>
-                    )}
-
-                    {isRouteDropdownOpen && allAvailableRoutes.length > 0 && (
-                      <div
-                        ref={filterDropdownRef}
-                        className="absolute left-0 top-full z-50 mt-1 max-h-60 w-full overflow-auto rounded-xl border border-slate-200 bg-white py-1 shadow-lg"
-                      >
-                        {filteredRoutes.length > 0 ? (
-                          filteredRoutes.map((route) => (
-                            <button
-                              key={route}
-                              className="w-full px-3 py-2 text-left text-sm hover:bg-slate-50 focus:bg-slate-50 outline-none"
-                              onClick={() => {
-                                setRouteFilter(route);
-                                setIsRouteDropdownOpen(false);
-                              }}
-                            >
-                              {route}
-                            </button>
-                          ))
-                        ) : (
-                          <div className="px-3 py-2 text-sm text-slate-500">{t("home.noRouteMatch")}</div>
-                        )}
-                      </div>
-                    )}
-                  </div>
+                {hasActiveColumnFilters ? (
+                  <button
+                    type="button"
+                    className="rounded-md border border-[var(--border)] px-3 py-1.5 text-sm hover:bg-[var(--background)]"
+                    onClick={clearAllColumnFilters}
+                  >
+                    {t("home.clearFilters")}
+                  </button>
                 ) : null}
                 <div className="flex flex-wrap gap-2">
                   <button
                     className="rounded-md border border-[var(--border)] px-3 py-1.5 text-sm hover:bg-[var(--background)] disabled:cursor-not-allowed disabled:opacity-40"
                     onClick={() => void retryAllReviewRecords()}
-                    disabled={!reviewRecords.length || isExtracting || isRetryingReviewAll}
+                    disabled={!reviewRecords.length || isExtracting || isHighQualityReextracting || isRetryingReviewAll}
                   >
                     {isRetryingReviewAll
                       ? t("home.reviewing")

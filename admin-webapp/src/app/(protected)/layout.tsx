@@ -1,5 +1,8 @@
 import { Sidebar } from "@/components/Sidebar";
 
+/** Avoid build-time prerender when Supabase env is not available (e.g. first Vercel deploy). */
+export const dynamic = "force-dynamic";
+
 export default function ProtectedLayout({
   children,
 }: {

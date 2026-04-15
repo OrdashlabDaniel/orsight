@@ -40,6 +40,7 @@ NEXT_PUBLIC_DEV_MOCK_LOGIN=true
 3. **`SUPABASE_SERVICE_ROLE_KEY`**：service_role（仅服务端；训练池写 Postgres/Storage 需要，见 **`SUPABASE_SETUP.md`**）。
 4. **Authentication → Providers → Email**：关闭 **Confirm email**（无需邮箱验证）。
 5. **Authentication → URL**：Site URL = `http://localhost:3000`；Redirect URLs 增加 `http://localhost:3000/auth/callback`。
+6. **管理员子域入口（可选）**：在用户端 `.env.local` / 生产环境设置 `NEXT_PUBLIC_ADMIN_APP_URL`（无末尾斜杠），例如本地 `http://localhost:3002`、生产 `https://admin.你的域名.com`。登录页会显示「进入管理员登录」。管理员站部署与 Supabase Redirect 说明见 **`admin-webapp/README.md`**。
 
 改完 `.env.local` 后务必 **重启开发服务器**。
 

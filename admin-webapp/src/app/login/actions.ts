@@ -46,9 +46,15 @@ function resolveLoginEmailCandidates(identifier: string): { ok: true; emails: st
     return { ok: false };
   }
 
-  // New flow supports direct email sign-in; keep username hashing for compatibility.
+  // Support both true email accounts and legacy "email-looking username" hash aliases.
   if (value.includes("@")) {
-    return { ok: true, emails: [value.toLowerCase()] };
+    try {
+      const modern = usernameToPodLoginEmailSync(value);
+      const legacy = usernameToPodLoginEmailLegacySync(value);
+      return { ok: true, emails: Array.from(new Set([value.toLowerCase(), modern, legacy])) };
+    } catch {
+      return { ok: true, emails: [value.toLowerCase()] };
+    }
   }
 
   try {

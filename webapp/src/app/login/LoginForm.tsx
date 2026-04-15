@@ -10,6 +10,7 @@ import {
   POD_USERNAME_METADATA_KEY,
   usernameToPodLoginEmail,
 } from "@/lib/auth-username";
+import { getAdminAppLoginUrl } from "@/lib/admin-app-url";
 import { isDevMockLoginEnabled } from "@/lib/dev-mock-auth";
 import { useLocale } from "@/i18n/LocaleProvider";
 import { createClient } from "@/lib/supabase/browser";
@@ -32,6 +33,7 @@ export function LoginForm() {
 
   const devMock = isDevMockLoginEnabled();
   const supabaseOn = isSupabaseAuthEnabled();
+  const adminLoginUrl = getAdminAppLoginUrl();
 
   if (!supabaseOn && !devMock) {
     return (
@@ -46,6 +48,18 @@ export function LoginForm() {
             {t("login.devMockHint")}
           </p>
           <p className="mt-4 text-sm text-slate-600">{t("login.noLoginHint")}</p>
+          {adminLoginUrl ? (
+            <p className="mt-4 text-center text-sm">
+              <a
+                href={adminLoginUrl}
+                className="text-blue-600 underline-offset-2 hover:underline"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                {t("login.adminLoginEntry")}
+              </a>
+            </p>
+          ) : null}
           {!isLoginStrictlyRequired() ? (
             <p className="mt-4 text-sm text-slate-600">
               <Link href="/" className="text-blue-600 hover:underline">
@@ -157,6 +171,18 @@ export function LoginForm() {
         <p className="mt-2 text-center text-sm text-slate-500">
           {mode === "login" ? t("login.subtitleLogin") : t("login.subtitleRegister")}
         </p>
+        {adminLoginUrl ? (
+          <p className="mt-3 text-center">
+            <a
+              href={adminLoginUrl}
+              className="text-sm text-slate-600 underline-offset-2 hover:text-slate-900 hover:underline"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              {t("login.adminLoginEntry")}
+            </a>
+          </p>
+        ) : null}
 
         <form className="mt-8 space-y-4" onSubmit={(e) => void handleSubmit(e)}>
           <label className="block">
