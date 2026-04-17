@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import sharp from "sharp";
 
-import { getAuthUserOrSkip } from "@/lib/auth-server";
+import { withAuthedStorageTenant } from "@/lib/storage-tenant";
 import { getFormIdFromRequest } from "@/lib/form-request";
 import type { FieldAggregation, TrainingField } from "@/lib/training";
 import {
@@ -24,6 +24,9 @@ const PREVIEW_MODEL =
   process.env.OPENAI_PRIMARY_MODEL ||
   "gpt-5";
 const OPENAI_REASONING_EFFORT = process.env.OPENAI_REASONING_EFFORT || "minimal";
+const PREVIEW_CROP_MIN_WIDTH = 320;
+const PREVIEW_CROP_MIN_HEIGHT = 120;
+const PREVIEW_CROP_MAX_SCALE = 3;
 
 const DEFAULT_FIELD_LABELS = getFieldLabelMap(DEFAULT_TABLE_FIELDS);
 const DEFAULT_FIELD_TYPES = getFieldTypeMap(DEFAULT_TABLE_FIELDS);
@@ -139,10 +142,92 @@ function parseDataUrlToBuffer(dataUrl: string): Buffer | null {
   }
 }
 
-async function cropsToPngDataUrls(
-  imageBuffer: Buffer,
+type CropContextOptions = {
+  padLeft: number;
+  padTop: number;
+  padRight: number;
+  padBottom: number;
+  minWidth: number;
+  minHeight: number;
+  maxScale: number;
+};
+
+function getPreviewCropContextOptions(
+  field: TrainingField,
+  fieldTypeMap: Record<string, "text" | "number">,
+  variant: "default" | "focused" = "default",
+): CropContextOptions {
+  if (variant === "focused" && field === "exceptions") {
+    return {
+      padLeft: 0.18,
+      padTop: 1.0,
+      padRight: 2.8,
+      padBottom: 1.1,
+      minWidth: 720,
+      minHeight: 320,
+      maxScale: 5,
+    };
+  }
+
+  if (field === "taskCode") {
+    return {
+      padLeft: 0.08,
+      padTop: 0.55,
+      padRight: 2.2,
+      padBottom: 0.75,
+      minWidth: 560,
+      minHeight: 220,
+      maxScale: 4,
+    };
+  }
+
+  if (fieldTypeMap[field] === "number") {
+    return {
+      padLeft: 0.12,
+      padTop: 0.6,
+      padRight: 2.15,
+      padBottom: 0.8,
+      minWidth: 520,
+      minHeight: 220,
+      maxScale: 4,
+    };
+  }
+
+  return {
+    padLeft: 0.08,
+    padTop: 0.28,
+    padRight: 1.25,
+    padBottom: 0.38,
+    minWidth: PREVIEW_CROP_MIN_WIDTH,
+    minHeight: PREVIEW_CROP_MIN_HEIGHT,
+    maxScale: PREVIEW_CROP_MAX_SCALE,
+  };
+}
+
+function buildUnionBox(
   boxes: Array<{ field: TrainingField; x: number; y: number; width: number; height: number }>,
-): Promise<string[]> {
+): { field: TrainingField; x: number; y: number; width: number; height: number } | null {
+  if (boxes.length === 0) {
+    return null;
+  }
+  const x1 = Math.min(...boxes.map((box) => box.x));
+  const y1 = Math.min(...boxes.map((box) => box.y));
+  const x2 = Math.max(...boxes.map((box) => box.x + box.width));
+  const y2 = Math.max(...boxes.map((box) => box.y + box.height));
+  return {
+    field: boxes[0]!.field,
+    x: x1,
+    y: y1,
+    width: Math.max(0.01, x2 - x1),
+    height: Math.max(0.01, y2 - y1),
+  };
+}
+
+async function cropBoxToPngDataUrl(
+  imageBuffer: Buffer,
+  box: { field: TrainingField; x: number; y: number; width: number; height: number },
+  options: CropContextOptions,
+): Promise<string> {
   const meta = await sharp(imageBuffer).metadata();
   const imageWidth = meta.width ?? 0;
   const imageHeight = meta.height ?? 0;
@@ -150,23 +235,49 @@ async function cropsToPngDataUrls(
     throw new Error("无法读取图片宽高");
   }
 
+  const x0 = Math.max(0, box.x - box.width * options.padLeft);
+  const y0 = Math.max(0, box.y - box.height * options.padTop);
+  const x1 = Math.min(1, box.x + box.width * (1 + options.padRight));
+  const y1 = Math.min(1, box.y + box.height * (1 + options.padBottom));
+
+  const left = Math.max(0, Math.min(imageWidth - 1, Math.floor(x0 * imageWidth)));
+  const top = Math.max(0, Math.min(imageHeight - 1, Math.floor(y0 * imageHeight)));
+  const width = Math.max(1, Math.min(imageWidth - left, Math.ceil((x1 - x0) * imageWidth)));
+  const height = Math.max(1, Math.min(imageHeight - top, Math.ceil((y1 - y0) * imageHeight)));
+
+  const scale = Math.min(
+    options.maxScale,
+    Math.max(options.minWidth / width, options.minHeight / height, 1),
+  );
+  const targetWidth = Math.max(1, Math.round(width * scale));
+  const targetHeight = Math.max(1, Math.round(height * scale));
+
+  const crop = sharp(imageBuffer).extract({ left, top, width, height });
+  const cropBuffer = await (scale > 1
+    ? crop
+        .resize({ width: targetWidth, height: targetHeight, fit: "inside", withoutEnlargement: false })
+        .sharpen()
+    : crop
+  )
+    .png()
+    .toBuffer();
+  return `data:image/png;base64,${cropBuffer.toString("base64")}`;
+}
+
+async function cropsToPngDataUrls(
+  imageBuffer: Buffer,
+  boxes: Array<{ field: TrainingField; x: number; y: number; width: number; height: number }>,
+  fieldTypeMap: Record<string, "text" | "number">,
+): Promise<string[]> {
   const out: string[] = [];
   for (const box of boxes) {
-    let left = Math.floor(box.x * imageWidth);
-    let top = Math.floor(box.y * imageHeight);
-    let width = Math.ceil(box.width * imageWidth);
-    let height = Math.ceil(box.height * imageHeight);
-
-    left = Math.max(0, Math.min(imageWidth - 1, left));
-    top = Math.max(0, Math.min(imageHeight - 1, top));
-    width = Math.max(1, Math.min(imageWidth - left, width));
-    height = Math.max(1, Math.min(imageHeight - top, height));
-
-    const cropBuffer = await sharp(imageBuffer)
-      .extract({ left, top, width, height })
-      .png()
-      .toBuffer();
-    out.push(`data:image/png;base64,${cropBuffer.toString("base64")}`);
+    out.push(
+      await cropBoxToPngDataUrl(
+        imageBuffer,
+        box,
+        getPreviewCropContextOptions(box.field, fieldTypeMap),
+      ),
+    );
   }
   return out;
 }
@@ -190,8 +301,10 @@ function buildCropInstructionText(
   const boxedCustomFields = customFields.filter((field) => byField.has(field.id));
 
   const lines: string[] = [
-    `下面会附上 ${boxes.length} 张裁剪小图（PNG），顺序固定：第 1 张对应第 1 个框，以此类推。`,
-    "每张图里只包含原图中该矩形框内的像素，禁止臆造框外文字。",
+    `下面会附上 1 张完整原图 + ${boxes.length} 张裁剪小图（PNG）。`,
+    "第一张原图用于识别字段标题/特征；后续小图用于放大读取数值。",
+    "禁止仅凭裁剪坐标猜字段，必须以原图中可见的字段标题/项目名称为准。",
+    "若小图主要框住了字段标题，请结合原图在同一行/同一卡片里读取该标题直接对应的值，尤其注意标题右侧或下方的数字。",
     "",
     "字段与图片对应关系：",
   ];
@@ -246,9 +359,10 @@ function buildTableCropInstructionText(
   }
 
   const lines: string[] = [
-    `下面会附上 ${boxes.length} 张裁剪小图（PNG），每张图通常对应整张表格中的一列或一段列区域。`,
-    "请对每张小图只做列内 OCR：按表格从上到下读取当前列每一行的值，返回数组。",
+    `下面会附上 1 张完整原图 + ${boxes.length} 张裁剪小图（PNG）。`,
+    "先用原图确认字段标题/列含义，再对小图做列内 OCR：按表格从上到下读取当前列每一行的值。",
     "不要把列标题、分页、按钮（如查看/打印）、序号、空白装饰当成数据行。",
+    "禁止仅凭裁剪位置猜字段；必须以原图中的字段标题/项目名称为准。",
     "如果同一字段有多张小图，请分别为每张图返回数组；服务器会按字段聚合规则合并它们。",
     "",
     "图片与字段对应关系：",
@@ -300,9 +414,90 @@ function buildTableCropInstructionText(
 function parsePreviewJson(content: string): { record: Record<string, unknown>; previewNote: string } {
   const parsed = JSON.parse(content) as Record<string, unknown>;
   const previewNote = typeof parsed.previewNote === "string" ? parsed.previewNote.trim() : "";
-  const record = { ...parsed };
+  const nestedRecord =
+    parsed.record && typeof parsed.record === "object" ? (parsed.record as Record<string, unknown>) : null;
+  const record = nestedRecord ? { ...parsed, ...nestedRecord } : { ...parsed };
   delete record.previewNote;
+  delete record.record;
   return { record, previewNote };
+}
+
+function appendPreviewNote(base: string, extra: string) {
+  if (!extra) return base;
+  if (!base) return extra;
+  return base.includes(extra) ? base : `${base}；${extra}`;
+}
+
+async function recoverExceptionsPreviewValue(
+  imageDataUrl: string,
+  imageBuffer: Buffer,
+  boxes: Array<{ field: TrainingField; x: number; y: number; width: number; height: number }>,
+): Promise<number | null> {
+  try {
+    if (!OPENAI_API_KEY) {
+      return null;
+    }
+
+    const unionBox = buildUnionBox(boxes);
+    if (!unionBox) {
+      return null;
+    }
+
+    const contextUrl = await cropBoxToPngDataUrl(
+      imageBuffer,
+      unionBox,
+      getPreviewCropContextOptions("exceptions", DEFAULT_FIELD_TYPES, "focused"),
+    );
+
+    const response = await fetch(`${OPENAI_BASE_URL}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: PREVIEW_MODEL,
+        reasoning_effort: OPENAI_REASONING_EFFORT,
+        response_format: { type: "json_object" },
+        messages: [
+          {
+            role: "system",
+            content:
+              'You are OrSight\'s targeted OCR fallback for the exceptions field. Return strict JSON only: {"exceptions": number|null}.',
+          },
+          {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text:
+                  "第一张是完整原图，第二张是围绕「错扫 / 错分 / 误扫」标签区域扩展出的上下文图。请只读取与该异常件数字段标签直接对应的非负整数。这个数字在 POD 界面里常是同一行或同一卡片里、靠近标签右侧的小号数字。不要把未收数量、运单数量、任务编码、时间或其他角标数字当成错扫数量；若标签或数值不能稳定确认，就返回 null。",
+              },
+              { type: "image_url", image_url: { url: imageDataUrl } },
+              { type: "image_url", image_url: { url: contextUrl } },
+            ],
+          },
+        ],
+      }),
+    });
+
+    if (!response.ok) {
+      return null;
+    }
+
+    const payload = (await response.json()) as {
+      choices?: Array<{ message?: { content?: string } }>;
+    };
+    const content = payload.choices?.[0]?.message?.content;
+    if (!content) {
+      return null;
+    }
+
+    const parsed = JSON.parse(content) as { exceptions?: unknown };
+    return normalizeNumber(parsed.exceptions);
+  } catch {
+    return null;
+  }
 }
 
 function parseTablePreviewJson(content: string): {
@@ -404,12 +599,12 @@ function mergeTablePreviewSeries(
 }
 
 export async function POST(request: Request) {
-  try {
-    const { user, skipAuth } = await getAuthUserOrSkip();
-    if (!skipAuth && !user) {
-      return NextResponse.json({ error: "请先登录后再试。" }, { status: 401 });
-    }
-    const formId = getFormIdFromRequest(request);
+  return withAuthedStorageTenant(async ({ user, skipAuth }) => {
+    try {
+      if (!skipAuth && !user) {
+        return NextResponse.json({ error: "请先登录后再试。" }, { status: 401 });
+      }
+      const formId = getFormIdFromRequest(request);
     if (!OPENAI_API_KEY) {
       return NextResponse.json({ error: "服务端缺少 OPENAI_API_KEY。" }, { status: 503 });
     }
@@ -449,7 +644,7 @@ export async function POST(request: Request) {
 
     let cropUrls: string[];
     try {
-      cropUrls = await cropsToPngDataUrls(imageBuffer, boxes);
+      cropUrls = await cropsToPngDataUrls(imageBuffer, boxes, fieldTypeMap);
     } catch (error) {
       return NextResponse.json(
         { error: error instanceof Error ? error.message : "裁剪标注框失败。" },
@@ -524,13 +719,16 @@ export async function POST(request: Request) {
 
     const systemText =
       resolvedAnnotationMode === "table"
-        ? 'You are OrSight\'s training preview OCR assistant. The screenshot represents a whole table with multiple rows. Each crop corresponds to one selected field column. Read values from top to bottom and return strict JSON in the format {"imageValues":{"1":["row1","row2"],"2":[...]}, "previewNote":"optional short note"}. Use empty strings for unreadable cells and preserve row order.'
-        : 'You are OrSight\'s training preview OCR assistant. The screenshot represents a single record/detail view. Read each cropped field image and return strict JSON in the format {"record":{"field":"value"},"previewNote":"optional short note"}. Use empty strings for unreadable fields.';
+        ? 'You are OrSight\'s training preview OCR assistant. You will receive the full screenshot first, followed by cropped column images. Use the full screenshot to confirm field titles/column meanings, then read values from the crops top-to-bottom. Return strict JSON in the format {"imageValues":{"1":["row1","row2"],"2":[...]}, "previewNote":"optional short note"}. Use empty strings for unreadable cells and preserve row order.'
+        : 'You are OrSight\'s training preview OCR assistant. You will receive the full screenshot first, followed by cropped field images. Use the full screenshot to confirm field titles/labels, then read values from the crops or the immediately adjacent value in the same row/card. Return strict JSON with top-level field keys, for example {"date":"...","route":"...","exceptions":1,"previewNote":"optional short note"}. Use empty strings for unreadable fields.';
 
     const userContent: Array<
       | { type: "text"; text: string }
       | { type: "image_url"; image_url: { url: string } }
-    > = [{ type: "text", text: userText }];
+    > = [
+      { type: "text", text: userText },
+      { type: "image_url", image_url: { url: imageDataUrl } },
+    ];
     for (const url of cropUrls) {
       userContent.push({ type: "image_url", image_url: { url } });
     }
@@ -635,6 +833,18 @@ export async function POST(request: Request) {
       }
     }
 
+    if (boxedFields.has("exceptions") && out.exceptions === "") {
+      const recoveredExceptions = await recoverExceptionsPreviewValue(
+        imageDataUrl,
+        imageBuffer,
+        boxes.filter((box) => box.field === "exceptions"),
+      );
+      if (recoveredExceptions !== null) {
+        out.exceptions = recoveredExceptions;
+        previewNote = appendPreviewNote(previewNote, "错扫数量已按字段标签定向补读。");
+      }
+    }
+
     const rawCustomFieldValues =
       parsedRecord.customFieldValues && typeof parsedRecord.customFieldValues === "object"
         ? (parsedRecord.customFieldValues as Record<string, unknown>)
@@ -652,16 +862,17 @@ export async function POST(request: Request) {
       out.customFieldValues = customFieldValues;
     }
 
-    return NextResponse.json({
-      detectedMode: resolvedAnnotationMode,
-      detectedModeReason: detectionReason || undefined,
-      record: out,
-      previewNote: previewNote || undefined,
-    });
-  } catch (error) {
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : "AI 试填失败。" },
-      { status: 500 },
-    );
-  }
+      return NextResponse.json({
+        detectedMode: resolvedAnnotationMode,
+        detectedModeReason: detectionReason || undefined,
+        record: out,
+        previewNote: previewNote || undefined,
+      });
+    } catch (error) {
+      return NextResponse.json(
+        { error: error instanceof Error ? error.message : "AI 试填失败。" },
+        { status: 500 },
+      );
+    }
+  });
 }

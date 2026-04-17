@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>Orsight 项目报告</title>
+<style>
+body { font-family: "Microsoft YaHei", "Noto Sans SC", SimHei, sans-serif; line-height: 1.55; max-width: 900px; margin: 0 auto; padding: 28px; color: #111; }
+h1 { font-size: 22pt; margin-top: 0; }
+h2 { font-size: 14pt; border-bottom: 1px solid #ccc; padding-bottom: 4px; margin-top: 22pt; page-break-after: avoid; }
+h3 { font-size: 12pt; margin-top: 14pt; page-break-after: avoid; }
+table { border-collapse: collapse; width: 100%; margin: 10pt 0; font-size: 10pt; }
+th, td { border: 1px solid #bbb; padding: 6px 8px; vertical-align: top; }
+th { background: #f3f4f6; }
+code { font-family: Consolas, monospace; font-size: 9pt; background: #f6f8fa; padding: 1px 4px; border-radius: 3px; }
+ul, ol { padding-left: 1.2em; }
+hr { border: none; border-top: 1px solid #ddd; margin: 18pt 0; }
+@page { size: A4; margin: 18mm; }
+@media print { body { padding: 0; } }
+</style>
+</head>
+<body>
+<h1>Orsight（OrSight）项目开放进展报告</h1>
+<p><strong>文档版本</strong>：2026-04-12<br><strong>仓库</strong>：Orsight（双端 Web 应用：用户工作台 <code>webapp</code> + 管理端 <code>admin-webapp</code>）<br><strong>说明</strong>：本报告基于当前代码库结构与近期迭代内容整理，用于对内/对外同步产品能力、阶段与成果。</p>
+<hr>
+<h2>一、项目概述</h2>
+<h3>1.1 产品定位</h3>
+<p>Orsight 面向 <strong>物流 POD（Proof of Delivery）签退截图</strong> 等场景的 <strong>批量识别与结构化填表</strong>：用户上传多张截图或文档，系统结合 <strong>大模型视觉/文本能力</strong> 与 <strong>可配置表格字段</strong>，将信息抽取为可编辑表格记录，并支持 <strong>导出、人工复核、训练样本沉淀</strong> 等闭环能力。</p>
+<h3>1.2 仓库组成</h3>
+<table>
+<thead>
+<tr>
+<th>模块</th>
+<th>路径</th>
+<th>角色</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>用户工作台</td>
+<td><code>webapp/</code></td>
+<td>主业务：上传、识别、结果表、表单与训练标注、账户等</td>
+</tr>
+<tr>
+<td>管理后台</td>
+<td><code>admin-webapp/</code></td>
+<td>运营/管理：用户、可视化等（与主站分离部署）</td>
+</tr>
+<tr>
+<td>训练与规则数据</td>
+<td><code>training/</code>（若存在）及按表单分目录的资源</td>
+<td>训练池样本、全局规则等（由 API 与文件系统协同）</td>
+</tr>
+</tbody></table>
+<h3>1.3 核心技术栈</h3>
+<ul>
+<li><strong>框架</strong>：Next.js App Router（<code>webapp</code> 当前 <code>next@16.1.6</code>，<code>admin-webapp</code> 略新小版本）</li>
+<li><strong>UI</strong>：React 19、Tailwind CSS v4</li>
+<li><strong>认证</strong>：Supabase Auth（<code>@supabase/ssr</code>、<code>@supabase/supabase-js</code>），并保留开发环境会话/登录辅助接口</li>
+<li><strong>文档与表格处理</strong>：<code>xlsx</code>、<code>pdf-parse</code> / <code>pdfjs-dist</code>、<code>mammoth</code>、<code>word-extractor</code>、<code>sharp</code> 等</li>
+<li><strong>国际化</strong>：<code>webapp</code> 内中英双语资源（<code>src/i18n/locales/zh.ts</code>、<code>en.ts</code>）与 <code>LocaleProvider</code></li>
+</ul>
+<hr>
+<h2>二、开放阶段与总体进度（定性）</h2>
+<h3>2.1 阶段划分（建议表述）</h3>
+<table>
+<thead>
+<tr>
+<th>阶段</th>
+<th>状态</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>MVP：识别 → 表格 → 导出</strong></td>
+<td>已具备</td>
+<td>上传、抽取、结果编辑、分组与筛选、Excel 导出等主路径可用</td>
+</tr>
+<tr>
+<td><strong>多表单 / 多租户表单</strong></td>
+<td>已具备</td>
+<td>表单列表、创建、复制、软删除与恢复、按 <code>formId</code> 隔离 API 与数据路径</td>
+</tr>
+<tr>
+<td><strong>训练闭环</strong></td>
+<td>已具备</td>
+<td>标注弹窗、框选、训练池保存、预览试填、训练状态查询等</td>
+</tr>
+<tr>
+<td><strong>体验与可运营性</strong></td>
+<td>持续迭代</td>
+<td>品牌与排版、中英文展示一致性、布局可调、标注交互优化等</td>
+</tr>
+<tr>
+<td><strong>企业级治理</strong></td>
+<td>部分具备</td>
+<td>登录与权限依赖 Supabase；管理端独立；更细粒度审计/配额等需按产品路线扩展</td>
+</tr>
+</tbody></table>
+<h3>2.2 当前开放进度（摘要）</h3>
+<ul>
+<li><strong>主业务链路</strong>：从「选表单 → 上传 → 识别 → 表格编辑 → 导出/标记正确」已形成闭环。  </li>
+<li><strong>训练增强链路</strong>：支持将人工框选与正确值写入训练池，并在后续识别中作为上下文与规则输入（具体策略见 <code>lib/training</code> 与相关 API）。  </li>
+<li><strong>工程成熟度</strong>：<code>webapp</code> 可通过 <code>npm run build</code> 生产构建；API 路由覆盖提取、表单、表格字段、训练子域等。</li>
+</ul>
+<hr>
+<h2>三、已实现功能（按域详细列举）</h2>
+<h3>3.1 用户工作台（<code>webapp</code>）</h3>
+<h4>3.1.1 首页 / 工作台（<code>/</code>）</h4>
+<ul>
+<li><strong>多文件上传</strong>：拖拽、点击选择、剪贴板粘贴（图片）；支持常见图片格式与 PDF 等（与提取管线一致）。</li>
+<li><strong>批量识别与进度</strong>：抽取任务进度展示；主模型与复审模型分工（代码中可见 <code>gpt-5-mini</code> / <code>gpt-5</code> 等配置）。</li>
+<li><strong>结果表</strong>：按表格项目（列）动态渲染；支持路线分组、筛选、行级操作；与「待复核/问题」联动展示。</li>
+<li><strong>图片查看</strong>：记录关联多源图时的画廊查看、缩放与拖拽浏览（独立查看器区域）。</li>
+<li><strong>人工标注入口</strong>：从记录进入 <strong>图片框选标注</strong> 弹窗，用于训练或纠错场景。</li>
+<li><strong>布局与分区</strong>：上传区、结果与提醒区等支持用户可调尺寸（面板宽度/高度记忆等，见页面内状态与 localStorage 键）。</li>
+<li><strong>导出</strong>：Excel 导出（含表头与行数据构建逻辑）。</li>
+</ul>
+<h4>3.1.2 表单首页（原「填表池」概念，现为「首页/Home」语义）</h4>
+<ul>
+<li><strong>表单卡片列表</strong>：创建、重命名、克隆、删除（默认模板策略与权限边界由 API 保障）。</li>
+<li><strong>模板展示</strong>：系统模板名称/描述在英文界面下对 <strong>已知中文模板</strong> 做展示层映射（用户自定义名称保持原样），降低英文用户认知成本。</li>
+<li><strong>进入配置与填表</strong>：从卡片进入表单配置流程或主填表界面（与路由参数 <code>formId</code> 绑定）。</li>
+</ul>
+<h4>3.1.3 表单配置 / 训练准备（<code>FormSetupFlow</code> / <code>FormSetupClient</code> 等）</h4>
+<ul>
+<li><strong>表格项目管理</strong>：启用/停用字段、内置字段与自定义字段等（与 <code>table-fields</code> API 协同）。</li>
+<li><strong>从图片/文档推断列</strong>：模板来自截图识别、Excel 导入、文档推断等多来源（具体能力分散在对应 API 与组件流程中）。</li>
+<li><strong>训练标注</strong>：在配置流程中打开与主工作台同源的 <code>TrainingAnnotationWorkbench</code>，用于沉淀训练样本。</li>
+</ul>
+<h4>3.1.4 训练模式页（<code>/training</code>）</h4>
+<ul>
+<li><strong>训练池图片网格</strong>：待标注列表与已标注状态展示。</li>
+<li><strong>与表单字段联动</strong>：标注时使用当前表单激活字段定义。</li>
+<li><strong>保存样本</strong>：写入训练池并刷新训练状态。</li>
+</ul>
+<h4>3.1.5 账户与登录</h4>
+<ul>
+<li><strong>登录页</strong>、<strong>账户页</strong>、<strong>OAuth 回调</strong>（<code>auth/callback</code>）等与 Supabase 流程衔接。</li>
+<li><strong>开发辅助登录/会话</strong>（<code>api/auth/dev-*</code>）：便于本地与测试环境调试（生产部署需按安全策略收敛）。</li>
+</ul>
+<h4>3.1.6 图片框选标注（<code>TrainingAnnotationWorkbench</code>）</h4>
+<ul>
+<li><strong>双模式</strong>：单条记录 / 完整表格模式切换；与后端 <code>preview-fill</code> 的自动判定结果对齐。</li>
+<li><strong>字段选择与画框</strong>：字段与填写区合并为同一工作区；支持多框、数字字段默认合并策略（求和/拼接等）。</li>
+<li><strong>缩放与平移</strong>：放大缩小；<strong>拖动画面</strong> 模式下在视口内平移查看（含横向/纵向可拖动画布区域）。</li>
+<li><strong>左右分栏可调</strong>：桌面端拖拽中间分隔条调节图片区与表单区比例；窄屏纵向堆叠时分隔条调节上下比例。</li>
+<li><strong>AI 试填预览</strong>：调用 <code>/api/training/preview-fill</code>，将框选区域送模型试填并写回右侧表单。</li>
+<li><strong>存入训练池</strong>：调用 <code>/api/training/save</code>，持久化样本、框与聚合配置等。</li>
+<li><strong>确认填入主表（不存训练池）</strong>（主工作台场景）：通过 <code>onApply</code> 将当前（含试填后核对过的）值写回首页结果行，<strong>不调用</strong>训练池保存接口，满足「只纠错入库、不污染训练集」的场景。</li>
+</ul>
+<h3>3.2 后端 API 能力（<code>webapp/src/app/api</code>）</h3>
+<table>
+<thead>
+<tr>
+<th>路径</th>
+<th>能力摘要</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>POST /api/extract</code></td>
+<td>核心抽取：多文件、表单上下文、vision 上下文、问题列表与记录结构化输出</td>
+</tr>
+<tr>
+<td><code>GET/POST /api/forms</code></td>
+<td>表单列表加载、创建等</td>
+</tr>
+<tr>
+<td><code>POST /api/forms/[formId]</code></td>
+<td>更新、复制、软删除/恢复、永久删除（含密码校验分支）、标记 ready 等</td>
+</tr>
+<tr>
+<td><code>POST /api/forms/template-from-image</code></td>
+<td>从模板图生成/辅助表单结构</td>
+</tr>
+<tr>
+<td><code>GET/POST /api/table-fields</code></td>
+<td>读取/保存表格字段配置</td>
+</tr>
+<tr>
+<td><code>POST /api/training/save</code></td>
+<td>保存训练样本（输出、框、表格输出、模式等）</td>
+</tr>
+<tr>
+<td><code>POST /api/training/preview-fill</code></td>
+<td>基于框选与字段定义的试填预览</td>
+</tr>
+<tr>
+<td><code>GET /api/training/status</code></td>
+<td>训练池/样本量等状态</td>
+</tr>
+<tr>
+<td><code>GET /api/training/image</code></td>
+<td>按图片名读取训练相关图像数据</td>
+</tr>
+<tr>
+<td><code>GET/POST /api/training/rules</code></td>
+<td>训练规则读取/更新</td>
+</tr>
+<tr>
+<td><code>POST /api/training/guidance-chat</code></td>
+<td>训练/配置向导类对话接口</td>
+</tr>
+<tr>
+<td><code>POST /api/training/parse-document</code></td>
+<td>文档解析分支（与训练/文档上传场景相关）</td>
+</tr>
+<tr>
+<td><code>GET /api/training/context-asset</code></td>
+<td>训练上下文资源读取</td>
+</tr>
+<tr>
+<td><code>dev-login</code> / <code>dev-logout</code> / <code>dev-session</code></td>
+<td>开发环境认证辅助</td>
+</tr>
+</tbody></table>
+<h3>3.3 管理端（<code>admin-webapp</code>）</h3>
+<ul>
+<li><strong>登录与受保护首页</strong>、<strong>用户列表与详情</strong>、<strong>可视化（viz）</strong> 等页面骨架存在，用于运营侧数据查看（具体权限与数据范围依赖后端配置）。</li>
+</ul>
+<h3>3.4 工程与体验规范</h3>
+<ul>
+<li><strong>字体栈统一</strong>：<code>Noto Sans</code> + <code>Noto Sans SC</code>，且 <strong>字体 CSS 变量挂在 <code>&lt;html&gt;</code></strong> 以兼容 Tailwind v4 preflight（见 <code>.cursor/rules/orsight-typography.mdc</code>）。</li>
+<li><strong>顶部品牌</strong>：用户端导航展示产品名 <strong>Orsight</strong>。</li>
+<li><strong>i18n</strong>：关键界面字符串中英双语；动态数据（系统模板名、内置列标题等）通过 <code>form-display</code>、<code>table-field-display</code> 等工具在英文环境下做 <strong>展示层</strong> 映射，不强制改写用户自定义内容。</li>
+</ul>
+<hr>
+<h2>四、解决的典型场景问题（问题 → 方案）</h2>
+<h3>4.1 识别结果与表格结构不一致</h3>
+<ul>
+<li><strong>问题</strong>：不同客户表单列不同，硬编码列无法满足。  </li>
+<li><strong>方案</strong>：表格项目可配置 + 抽取 API 按激活字段集合构建 prompt 与校验逻辑。</li>
+</ul>
+<h3>4.2 英文用户看到大量中文系统文案</h3>
+<ul>
+<li><strong>问题</strong>：模板名、内置字段标签等来自中文默认值，切换英文后体验割裂。  </li>
+<li><strong>方案</strong>：i18n 词条 + 对 <strong>系统模板/内置字段</strong> 的展示映射；用户自定义名称保持原样。</li>
+</ul>
+<h3>4.3 字体未按预期生效（看起来像系统默认字体）</h3>
+<ul>
+<li><strong>问题</strong>：Tailwind v4 在 <code>html</code> 上应用 <code>font-family</code>，而 <code>next/font</code> 变量只在 <code>body</code> 上时，变量无法作用于 <code>html</code>。  </li>
+<li><strong>方案</strong>：将字体 variable class 提升到 <code>&lt;html&gt;</code>，并在 <code>globals.css</code> 明确 <code>html { font-family: ... }</code>；文档化到 Cursor Rule 防止回归。</li>
+</ul>
+<h3>4.4 标注时「填值」与「选字段画框」割裂</h3>
+<ul>
+<li><strong>问题</strong>：操作路径长、易错。  </li>
+<li><strong>方案</strong>：合并为单一工作区，每字段旁选择当前画框目标，保留多框与聚合逻辑不变。</li>
+</ul>
+<h3>4.5 标注弹窗底部操作混乱</h3>
+<ul>
+<li><strong>问题</strong>：附加说明、重复关闭按钮、主操作不醒目。  </li>
+<li><strong>方案</strong>：移除冗余区块；主按钮（试填/保存）跨弹窗底部居中；保留 Esc/右上角关闭符合习惯。</li>
+</ul>
+<h3>4.6 图片区滚动与「拖动画面」预期不一致</h3>
+<ul>
+<li><strong>问题</strong>：竖图在常用缩放下横向可拖范围不足，用户感觉只能纵向动。  </li>
+<li><strong>方案</strong>：为画布外包一层可滚动平面并预留 padding，使平移有明确横向行程；移除底部「主区/页脚」高度拖拽条，避免与「拖动画布」混淆。</li>
+</ul>
+<h3>4.7 试填结果只停在弹窗内，无法只更新主表</h3>
+<ul>
+<li><strong>问题</strong>：用户确认预览正确但不想写入训练池。  </li>
+<li><strong>方案</strong>：新增 <strong>「确认填入主表（不存训练池）」</strong>，走 <code>onApply</code> 回调更新首页记录；<strong>「存入训练池」</strong> 仍负责样本沉淀并可继续同步主表。</li>
+</ul>
+<hr>
+<h2>五、开放成果（可对外表述的要点）</h2>
+<ol>
+<li><strong>端到端工作台</strong>：上传 → 识别 → 编辑 → 导出，支持多表单隔离。  </li>
+<li><strong>可演进字段模型</strong>：内置 POD 相关字段 + 自定义列，适配不同客户表格。  </li>
+<li><strong>训练与试填闭环</strong>：框选 + 正确值 + 保存样本 + 预览试填，提升长尾截图适配速度。  </li>
+<li><strong>双语与品牌化</strong>：统一字体与导航品牌，系统内容英文化展示策略清晰。  </li>
+<li><strong>工程可交付</strong>：Next.js 16 + React 19 + TS，构建与路由结构清晰，API 面完整。</li>
+</ol>
+<hr>
+<h2>六、风险、边界与后续建议</h2>
+<h3>6.1 模型与成本</h3>
+<ul>
+<li>识别质量与费用受模型版本、调用量、图片分辨率影响，需在生产环境配置 <strong>限流、缓存、失败重试与监控</strong>。</li>
+</ul>
+<h3>6.2 数据与合规</h3>
+<ul>
+<li>截图可能含个人信息；需明确 <strong>留存周期、访问控制与审计</strong>（依赖 Supabase 策略与产品政策）。</li>
+</ul>
+<h3>6.3 训练数据质量</h3>
+<ul>
+<li>「确认填入主表但不存训练池」可避免污染训练集；同时应配套 <strong>样本审核、去重与版本化</strong> 策略（部分已在训练管线中体现，可继续产品化）。</li>
+</ul>
+<h3>6.4 建议的下一里程碑（可选）</h3>
+<ul>
+<li>管理端与主站 <strong>统一版本策略</strong>（两端 Next 小版本差）。  </li>
+<li><strong>标注历史/版本回滚</strong>（行级变更记录）。  </li>
+<li><strong>批量试填/批量应用</strong> 与 <strong>差异高亮</strong>（提升运营效率）。</li>
+</ul>
+<hr>
+<h2>七、附录：文档与 PDF 文件</h2>
+<ul>
+<li><strong>Markdown 源稿</strong>：<code>docs/Orsight-Project-Report-2026-04.md</code>  </li>
+<li><strong>可打印 HTML</strong>：<code>docs/Orsight-Project-Report-2026-04.html</code>（由 <code>marked</code> 自 Markdown 转换并加版式）  </li>
+<li><strong>PDF</strong>：<code>docs/Orsight-Project-Report-2026-04.pdf</code>（由无头 Chrome <code>--print-to-pdf</code> 自上述 HTML 导出）</li>
+</ul>
+<p><strong>本地重新生成 PDF（已安装 Chrome 时）</strong>：</p>
+<pre><code class="language-powershell">npx --yes marked -i docs/Orsight-Project-Report-2026-04.md -o docs/_report-body.html
+node docs/_build-report-html.mjs
+&amp; &quot;C:\Program Files\Google\Chrome\Application\chrome.exe&quot; --headless=new --disable-gpu --no-pdf-header-footer --print-to-pdf=&quot;docs/Orsight-Project-Report-2026-04.pdf&quot; &quot;file:///绝对路径/docs/Orsight-Project-Report-2026-04.html&quot;
+</code></pre>
+<hr>
+<p><strong>结语</strong>：Orsight 当前阶段已从「能用」走向「可配置 + 可训练 + 可运营」的综合工作台；本报告可作为阶段性验收、对外简介或投资/合作材料的底稿，并建议每季度随版本更新修订一次。</p>
+
+</body>
+</html>

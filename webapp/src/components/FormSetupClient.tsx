@@ -776,7 +776,7 @@ export function FormSetupClient({ initialForm }: { initialForm: FormDefinition }
 
   return (
     <main className="flex min-h-0 flex-1 flex-col overflow-y-auto bg-slate-100 px-4 py-4 text-slate-900">
-      <div className="mx-auto flex max-w-[1700px] flex-col gap-4">
+      <div className="mx-auto flex w-[80%] max-w-full flex-col gap-4">
         <header className="rounded-3xl border border-slate-200 bg-white px-6 py-5 shadow-sm">
           <div className="mb-3 flex flex-wrap items-center justify-between gap-3 text-sm">
             <Link href="/forms" className="font-medium text-blue-600 hover:underline">

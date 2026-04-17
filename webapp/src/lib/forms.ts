@@ -1,6 +1,8 @@
 import { DEFAULT_TABLE_FIELDS, type TableFieldDefinition, type TableFieldType } from "@/lib/table-fields";
 
 export const DEFAULT_FORM_ID = "form-1";
+/** 新租户首页预置的第二个适用模板（与 {@link DEFAULT_FORM_ID} 同为最早一批）。 */
+export const STARTER_FORM_2_ID = "form-starter-2";
 export const FORMS_MANIFEST_KEY = "__forms_manifest__";
 export const FORM_META_PREFIX = "__form_meta__:";
 export const FORM_EXAMPLE_PREFIX = "__form_example__:";
@@ -76,10 +78,36 @@ export function createDefaultFormDefinition(): FormDefinition {
   };
 }
 
-export function normalizeForms(raw: unknown): FormDefinition[] {
+export function createSecondStarterFormDefinition(): FormDefinition {
+  const now = Date.now();
+  return {
+    id: STARTER_FORM_2_ID,
+    name: "派送与签收表",
+    description: "适用模板：可直接使用或按需调整列与训练样本。",
+    status: "ready",
+    ready: true,
+    createdAt: now + 1,
+    updatedAt: now + 1,
+    deletedAt: null,
+    templateSource: "copied",
+    sourceFormId: null,
+  };
+}
+
+export function buildTenantStarterForms(): FormDefinition[] {
+  return [createDefaultFormDefinition(), createSecondStarterFormDefinition()];
+}
+
+export type NormalizeFormsOptions = {
+  /** 为 false 时不在缺失 form-1 时自动插入内置默认填表（多租户首页仅展示清单内填表）。 */
+  injectBuiltinDefault?: boolean;
+};
+
+export function normalizeForms(raw: unknown, options?: NormalizeFormsOptions): FormDefinition[] {
   const out: FormDefinition[] = [];
   const seen = new Set<string>();
   const now = Date.now();
+  const injectBuiltinDefault = options?.injectBuiltinDefault !== false;
 
   if (Array.isArray(raw)) {
     for (const item of raw) {
@@ -101,7 +129,9 @@ export function normalizeForms(raw: unknown): FormDefinition[] {
             ? record.name.trim().slice(0, 48)
             : id === DEFAULT_FORM_ID
               ? "抽擦路线表"
-              : "未命名填表",
+              : id === STARTER_FORM_2_ID
+                ? "派送与签收表"
+                : "未命名填表",
         description:
           typeof record.description === "string"
             ? record.description.trim().slice(0, 160)
@@ -133,7 +163,7 @@ export function normalizeForms(raw: unknown): FormDefinition[] {
     }
   }
 
-  if (!seen.has(DEFAULT_FORM_ID)) {
+  if (injectBuiltinDefault && !seen.has(DEFAULT_FORM_ID)) {
     out.unshift(createDefaultFormDefinition());
   }
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 
 type PresetDays = "7" | "30" | "90" | "all";
@@ -18,6 +18,7 @@ export function UserTimeRangeControls() {
   const router = useRouter();
   const pathname = usePathname();
   const sp = useSearchParams();
+  const [mounted, setMounted] = useState(false);
 
   const preset = (sp.get("range") as PresetDays) || "30";
   const fromQ = sp.get("from") || "";
@@ -27,6 +28,16 @@ export function UserTimeRangeControls() {
 
   const [from, setFrom] = useState(clampDateStr(fromQ));
   const [to, setTo] = useState(clampDateStr(toQ));
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  useEffect(() => {
+    if (!mounted) return;
+    setFrom(clampDateStr(fromQ));
+    setTo(clampDateStr(toQ));
+  }, [fromQ, toQ, mounted]);
 
   function push(next: URLSearchParams) {
     next.delete("notice");
@@ -51,6 +62,30 @@ export function UserTimeRangeControls() {
     if (to) next.set("to", to);
     else next.delete("to");
     push(next);
+  }
+
+  if (!mounted) {
+    return (
+      <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <p className="text-sm font-semibold text-slate-900">时间范围</p>
+            <p className="mt-1 text-xs text-slate-500">用于筛选本用户的 usage_logs，并更新下方图表与明细</p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <div className="h-9 w-20 rounded-xl bg-slate-100" />
+            <div className="h-9 w-20 rounded-xl bg-slate-100" />
+            <div className="h-9 w-20 rounded-xl bg-slate-100" />
+            <div className="h-9 w-16 rounded-xl bg-slate-100" />
+          </div>
+        </div>
+        <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-[1fr_1fr_auto] sm:items-end">
+          <div className="h-[70px] rounded-xl bg-slate-50" />
+          <div className="h-[70px] rounded-xl bg-slate-50" />
+          <div className="h-11 rounded-xl bg-slate-100" />
+        </div>
+      </div>
+    );
   }
 
   return (

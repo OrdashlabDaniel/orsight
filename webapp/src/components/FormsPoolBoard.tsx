@@ -252,7 +252,7 @@ export default function FormsPoolBoard() {
 
   return (
     <main className="flex min-h-0 flex-1 flex-col overflow-y-auto bg-[var(--background)] px-3 py-8 text-[var(--foreground)]">
-      <div className="mx-auto max-w-5xl space-y-6">
+      <div className="mx-auto w-[80%] max-w-full space-y-6">
         <header className="border-b border-[var(--border)] pb-6">
           <h1 className="text-xl font-medium tracking-tight">{t("formsPool.title")}</h1>
           <p className="mt-1 text-sm text-[var(--muted-foreground)]">{t("formsPool.subtitle")}</p>

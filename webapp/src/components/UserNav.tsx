@@ -70,7 +70,7 @@ export function UserNav() {
 
   return (
     <header className="sticky top-0 z-40 border-b border-[var(--border)] bg-[var(--surface)]/90 backdrop-blur-sm">
-      <div className="mx-auto flex max-w-[1600px] items-center justify-between gap-4 px-3 py-2 text-sm">
+      <div className="mx-auto flex w-[80%] max-w-full items-center justify-between gap-4 px-3 py-2 text-sm">
         <Link
           href="/"
           className="shrink-0 text-base font-semibold tracking-tight text-[var(--foreground)] hover:opacity-80"

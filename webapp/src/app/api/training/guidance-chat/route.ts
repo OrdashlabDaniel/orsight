@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { getAuthUserOrSkip } from "@/lib/auth-server";
+import { withAuthedStorageTenant } from "@/lib/storage-tenant";
 import { getFormIdFromRequest } from "@/lib/form-request";
 import {
   buildAgentThreadReferenceImages,
@@ -117,13 +117,13 @@ function mergeValidationConfigs(
 }
 
 export async function POST(request: Request) {
-  try {
-    const { user, skipAuth } = await getAuthUserOrSkip();
-    if (!skipAuth && !user) {
-      return NextResponse.json({ error: "请先登录。" }, { status: 401 });
-    }
+  return withAuthedStorageTenant(async ({ user, skipAuth }) => {
+    try {
+      if (!skipAuth && !user) {
+        return NextResponse.json({ error: "请先登录。" }, { status: 401 });
+      }
 
-    const formId = getFormIdFromRequest(request);
+      const formId = getFormIdFromRequest(request);
     if (!OPENAI_API_KEY) {
       return NextResponse.json({ error: "未配置 OPENAI_API_KEY。" }, { status: 503 });
     }
@@ -325,11 +325,12 @@ ${fallbackContext}`;
     const revisedRuleCode = normalizeRecognitionRuleCode(parsed.revisedRuleCode ?? currentRuleCode);
     revisedWorkingRules = upsertRecognitionValidationConfigBlock(revisedWorkingRules, revisedValidationConfig);
     revisedWorkingRules = upsertRecognitionRuleCodeBlock(revisedWorkingRules, revisedRuleCode).slice(0, 50000);
-    return NextResponse.json({ assistantReply, revisedWorkingRules, revisedRuleCode });
-  } catch (error) {
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Guidance chat failed." },
-      { status: 500 },
-    );
-  }
+      return NextResponse.json({ assistantReply, revisedWorkingRules, revisedRuleCode });
+    } catch (error) {
+      return NextResponse.json(
+        { error: error instanceof Error ? error.message : "Guidance chat failed." },
+        { status: 500 },
+      );
+    }
+  });
 }

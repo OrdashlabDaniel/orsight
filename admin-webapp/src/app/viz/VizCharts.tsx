@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useRef, useState } from "react";
 import {
   Area,
   AreaChart,
@@ -7,7 +8,6 @@ import {
   Cell,
   Pie,
   PieChart,
-  ResponsiveContainer,
   Tooltip,
   XAxis,
   YAxis,
@@ -29,6 +29,61 @@ type Props = {
 };
 
 export function VizCharts({ daily, modelShares }: Props) {
+  const areaRef = useRef<HTMLDivElement | null>(null);
+  const pieRef = useRef<HTMLDivElement | null>(null);
+  const [mounted, setMounted] = useState(false);
+  const [areaSize, setAreaSize] = useState({ width: 0, height: 0 });
+  const [pieSize, setPieSize] = useState({ width: 0, height: 0 });
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  useEffect(() => {
+    if (!mounted || typeof ResizeObserver === "undefined") {
+      return;
+    }
+
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const width = Math.max(0, Math.floor(entry.contentRect.width));
+        const height = Math.max(0, Math.floor(entry.contentRect.height));
+        if (entry.target === areaRef.current) {
+          setAreaSize({ width, height });
+        }
+        if (entry.target === pieRef.current) {
+          setPieSize({ width, height });
+        }
+      }
+    });
+
+    if (areaRef.current) {
+      observer.observe(areaRef.current);
+    }
+    if (pieRef.current) {
+      observer.observe(pieRef.current);
+    }
+
+    return () => observer.disconnect();
+  }, [mounted]);
+
+  if (!mounted) {
+    return (
+      <div className="grid gap-8 lg:grid-cols-2">
+        <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+          <h2 className="text-lg font-semibold text-slate-900">每日 Token 用量</h2>
+          <p className="mt-1 text-sm text-slate-500">按 UTC 日期汇总 total_tokens</p>
+          <div className="mt-6 h-72 w-full rounded-xl bg-slate-50" />
+        </div>
+        <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+          <h2 className="text-lg font-semibold text-slate-900">模型占比（Token）</h2>
+          <p className="mt-1 text-sm text-slate-500">按 model_used 汇总</p>
+          <div className="mt-6 h-72 w-full rounded-xl bg-slate-50" />
+        </div>
+      </div>
+    );
+  }
+
   const pieData = modelShares.map((m) => ({
     name: m.name.length > 28 ? `${m.name.slice(0, 26)}…` : m.name,
     value: m.tokens,
@@ -38,46 +93,47 @@ export function VizCharts({ daily, modelShares }: Props) {
 
   return (
     <div className="grid gap-8 lg:grid-cols-2">
-      <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+      {/* overflow-hidden：避免 Recharts SVG/测量层溢出盖住下方「编辑」等可点击区域 */}
+      <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
         <h2 className="text-lg font-semibold text-slate-900">每日 Token 用量</h2>
         <p className="mt-1 text-sm text-slate-500">按 UTC 日期汇总 total_tokens</p>
-        <div className="mt-6 h-72 w-full">
+        <div ref={areaRef} className="mt-6 h-72 w-full">
           {daily.length === 0 ? (
             <p className="text-sm text-slate-400">暂无数据</p>
+          ) : areaSize.width > 0 && areaSize.height > 0 ? (
+            <AreaChart width={areaSize.width} height={areaSize.height} data={daily} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+              <defs>
+                <linearGradient id="vizFill" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor="#2563eb" stopOpacity={0.35} />
+                  <stop offset="100%" stopColor="#2563eb" stopOpacity={0} />
+                </linearGradient>
+              </defs>
+              <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+              <XAxis dataKey="date" tick={{ fontSize: 11 }} stroke="#64748b" />
+              <YAxis tick={{ fontSize: 11 }} stroke="#64748b" width={56} />
+              <Tooltip
+                contentStyle={{
+                  borderRadius: "12px",
+                  border: "1px solid #e2e8f0",
+                  fontSize: "13px",
+                }}
+              />
+              <Area
+                type="monotone"
+                dataKey="tokens"
+                name="Tokens"
+                stroke="#2563eb"
+                strokeWidth={2}
+                fill="url(#vizFill)"
+              />
+            </AreaChart>
           ) : (
-            <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={daily} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
-                <defs>
-                  <linearGradient id="vizFill" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stopColor="#2563eb" stopOpacity={0.35} />
-                    <stop offset="100%" stopColor="#2563eb" stopOpacity={0} />
-                  </linearGradient>
-                </defs>
-                <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                <XAxis dataKey="date" tick={{ fontSize: 11 }} stroke="#64748b" />
-                <YAxis tick={{ fontSize: 11 }} stroke="#64748b" width={56} />
-                <Tooltip
-                  contentStyle={{
-                    borderRadius: "12px",
-                    border: "1px solid #e2e8f0",
-                    fontSize: "13px",
-                  }}
-                />
-                <Area
-                  type="monotone"
-                  dataKey="tokens"
-                  name="Tokens"
-                  stroke="#2563eb"
-                  strokeWidth={2}
-                  fill="url(#vizFill)"
-                />
-              </AreaChart>
-            </ResponsiveContainer>
+            <div className="h-full w-full rounded-xl bg-slate-50" />
           )}
         </div>
       </div>
 
-      <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+      <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
         <h2 className="text-lg font-semibold text-slate-900">模型占比（Token）</h2>
         <p className="mt-1 text-sm text-slate-500">按 model_used 汇总</p>
         <div className="mt-6 flex flex-col items-center gap-6 sm:flex-row sm:items-start sm:justify-center">
@@ -85,9 +141,9 @@ export function VizCharts({ daily, modelShares }: Props) {
             <p className="text-sm text-slate-400">暂无数据</p>
           ) : (
             <>
-              <div className="h-64 w-64 shrink-0">
-                <ResponsiveContainer width="100%" height="100%">
-                  <PieChart>
+              <div ref={pieRef} className="h-64 w-64 shrink-0">
+                {pieSize.width > 0 && pieSize.height > 0 ? (
+                  <PieChart width={pieSize.width} height={pieSize.height}>
                     <Pie
                       data={pieData}
                       dataKey="value"
@@ -114,7 +170,9 @@ export function VizCharts({ daily, modelShares }: Props) {
                       }}
                     />
                   </PieChart>
-                </ResponsiveContainer>
+                ) : (
+                  <div className="h-full w-full rounded-full bg-slate-50" />
+                )}
               </div>
               <ul className="w-full max-w-sm space-y-2 text-sm">
                 {modelShares.map((m, i) => (

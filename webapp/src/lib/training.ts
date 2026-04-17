@@ -14,6 +14,14 @@ import {
   isReservedTrainingStorageKey,
   normalizeFormId,
 } from "./forms";
+import {
+  scopeTrainingBucketPath,
+  scopeTrainingExamplesImageName,
+  tenantActive,
+  tenantDbKeyPrefix,
+  tenantStorageFolderPrefix,
+  unscopeTrainingExamplesImageName,
+} from "./storage-tenant";
 import { getSupabaseAdmin, isSupabaseConfigured } from "./supabase";
 import type { TableFieldDefinition } from "./table-fields";
 
@@ -474,8 +482,9 @@ function saveLocalGlobalRules(rules: GlobalRules, formId = DEFAULT_FORM_ID) {
 
 export async function loadGlobalRules(formId = DEFAULT_FORM_ID): Promise<GlobalRules> {
   const normalizedFormId = normalizeFormId(formId);
-  const storageKey =
-    normalizedFormId === DEFAULT_FORM_ID ? GLOBAL_RULES_KEY : getFormGlobalRulesStorageKey(normalizedFormId);
+  const storageKey = scopeTrainingExamplesImageName(
+    normalizedFormId === DEFAULT_FORM_ID ? GLOBAL_RULES_KEY : getFormGlobalRulesStorageKey(normalizedFormId),
+  );
   const admin = getSupabaseAdmin();
   if (!isSupabaseConfigured() || !admin) {
     return loadLocalGlobalRules(normalizedFormId);
@@ -509,8 +518,9 @@ export async function loadGlobalRules(formId = DEFAULT_FORM_ID): Promise<GlobalR
 
 export async function saveGlobalRules(rules: GlobalRules, formId = DEFAULT_FORM_ID) {
   const normalizedFormId = normalizeFormId(formId);
-  const storageKey =
-    normalizedFormId === DEFAULT_FORM_ID ? GLOBAL_RULES_KEY : getFormGlobalRulesStorageKey(normalizedFormId);
+  const storageKey = scopeTrainingExamplesImageName(
+    normalizedFormId === DEFAULT_FORM_ID ? GLOBAL_RULES_KEY : getFormGlobalRulesStorageKey(normalizedFormId),
+  );
   const admin = getSupabaseAdmin();
   if (!isSupabaseConfigured() || !admin) {
     saveLocalGlobalRules(rules, normalizedFormId);
@@ -542,10 +552,14 @@ export async function loadTrainingExamples(formId = DEFAULT_FORM_ID): Promise<Tr
 
   try {
     const query = admin.from("training_examples").select("image_name,data");
+    const scopedExamplePrefix = scopeTrainingExamplesImageName(exampleKeyPrefix);
+    const tenantPrefix = tenantActive() ? tenantDbKeyPrefix() : "";
     const { data, error } =
       normalizedFormId === DEFAULT_FORM_ID
-        ? await query
-        : await query.like("image_name", `${exampleKeyPrefix}%`);
+        ? tenantActive()
+          ? await query.like("image_name", `${tenantPrefix}%`)
+          : await query
+        : await query.like("image_name", `${scopedExamplePrefix}%`);
 
     if (error) {
       console.error("Error loading examples from Supabase:", error);
@@ -554,10 +568,14 @@ export async function loadTrainingExamples(formId = DEFAULT_FORM_ID): Promise<Tr
 
     return data
       .filter((row) => {
-        if (normalizedFormId !== DEFAULT_FORM_ID) {
-          return typeof row.image_name === "string" && row.image_name.startsWith(exampleKeyPrefix);
+        if (typeof row.image_name !== "string") {
+          return false;
         }
-        return typeof row.image_name === "string" && !isReservedTrainingStorageKey(row.image_name);
+        if (normalizedFormId !== DEFAULT_FORM_ID) {
+          return row.image_name.startsWith(scopedExamplePrefix);
+        }
+        const logical = unscopeTrainingExamplesImageName(row.image_name);
+        return !isReservedTrainingStorageKey(logical);
       })
       .map((row) => row.data as TrainingExample)
       .filter((example) => example?.imageName && !isAgentContextImageName(example.imageName));
@@ -576,7 +594,7 @@ export async function upsertTrainingExample(example: TrainingExample, formId = D
     throw new Error("识别管家上下文图片不能保存到训练池。");
   }
   const normalizedFormId = normalizeFormId(formId);
-  const storageKey = getFormExampleStorageKey(normalizedFormId, example.imageName);
+  const storageKey = scopeTrainingExamplesImageName(getFormExampleStorageKey(normalizedFormId, example.imageName));
   const admin = getSupabaseAdmin();
   if (!isSupabaseConfigured() || !admin) {
     const current = loadLocalTrainingExamples(normalizedFormId);
@@ -610,7 +628,15 @@ export async function listTrainingImages(formId = DEFAULT_FORM_ID) {
     return listLocalTrainingImages(normalizedFormId);
   }
 
-  const listPath = normalizedFormId === DEFAULT_FORM_ID ? undefined : `${FORM_IMAGE_ROOT}/${normalizedFormId}`;
+  const tenantFolder = tenantStorageFolderPrefix();
+  const listPath =
+    normalizedFormId === DEFAULT_FORM_ID
+      ? tenantFolder
+        ? tenantFolder.replace(/\/$/, "")
+        : undefined
+      : tenantFolder
+        ? `${tenantFolder}${FORM_IMAGE_ROOT}/${normalizedFormId}`
+        : `${FORM_IMAGE_ROOT}/${normalizedFormId}`;
   const { data, error } = await admin.storage
     .from("training-images")
     .list(listPath);
@@ -653,7 +679,7 @@ export async function getTrainingImageDataUrl(imageName: string, formId = DEFAUL
 
 export async function saveTrainingImageDataUrl(imageName: string, dataUrl: string, formId = DEFAULT_FORM_ID) {
   const normalizedFormId = normalizeFormId(formId);
-  const storagePath = getFormImageStoragePath(normalizedFormId, imageName);
+  const storagePath = scopeTrainingBucketPath(getFormImageStoragePath(normalizedFormId, imageName));
   const admin = getSupabaseAdmin();
   if (!isSupabaseConfigured() || !admin) {
     saveLocalTrainingImageDataUrl(imageName, dataUrl, normalizedFormId);
@@ -722,7 +748,7 @@ export async function saveAgentContextImageDataUrl(
   formId = DEFAULT_FORM_ID,
 ) {
   const normalizedFormId = normalizeFormId(formId);
-  const storagePath = getAgentContextImageStoragePath(normalizedFormId, imageName);
+  const storagePath = scopeTrainingBucketPath(getAgentContextImageStoragePath(normalizedFormId, imageName));
   const admin = getSupabaseAdmin();
   if (!isSupabaseConfigured() || !admin) {
     saveLocalAgentContextImageDataUrl(imageName, dataUrl, normalizedFormId);
@@ -770,7 +796,7 @@ export async function getAgentContextImageBinary(
         : null;
     }
 
-    const storagePath = getAgentContextImageStoragePath(normalizedFormId, imageName);
+    const storagePath = scopeTrainingBucketPath(getAgentContextImageStoragePath(normalizedFormId, imageName));
     const { data, error } = await admin.storage.from("training-images").download(storagePath);
     if (!error && data) {
       const buffer = Buffer.from(await data.arrayBuffer());
@@ -784,7 +810,7 @@ export async function getAgentContextImageBinary(
       return null;
     }
 
-    const legacyStoragePath = getFormImageStoragePath(normalizedFormId, imageName);
+    const legacyStoragePath = scopeTrainingBucketPath(getFormImageStoragePath(normalizedFormId, imageName));
     const { data: legacyData, error: legacyError } = await admin.storage.from("training-images").download(legacyStoragePath);
     if (legacyError || !legacyData) {
       return null;
@@ -897,8 +923,8 @@ async function pruneTrainingImageFromGlobalRules(imageName: string, formId = DEF
 
 export async function deleteTrainingPoolImage(imageName: string, formId = DEFAULT_FORM_ID) {
   const normalizedFormId = normalizeFormId(formId);
-  const storageKey = getFormExampleStorageKey(normalizedFormId, imageName);
-  const storagePath = getFormImageStoragePath(normalizedFormId, imageName);
+  const storageKey = scopeTrainingExamplesImageName(getFormExampleStorageKey(normalizedFormId, imageName));
+  const storagePath = scopeTrainingBucketPath(getFormImageStoragePath(normalizedFormId, imageName));
   const admin = getSupabaseAdmin();
 
   if (!isSupabaseConfigured() || !admin) {
@@ -957,7 +983,7 @@ export async function getTrainingImageBinary(
   formId = DEFAULT_FORM_ID,
 ): Promise<TrainingImageBinary | null> {
   const normalizedFormId = normalizeFormId(formId);
-  const storagePath = getFormImageStoragePath(normalizedFormId, imageName);
+  const storagePath = scopeTrainingBucketPath(getFormImageStoragePath(normalizedFormId, imageName));
   const requestCache = getTrainingImageRequestCache();
   const cacheKey = trainingImageCacheKey(normalizedFormId, imageName);
 

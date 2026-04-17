@@ -1,7 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { DEFAULT_FORM_ID, getFormGlobalRulesStorageKey, normalizeFormId } from "@/lib/forms";
+import { DEFAULT_FORM_ID, STARTER_FORM_2_ID, getFormGlobalRulesStorageKey, normalizeFormId } from "@/lib/forms";
+import { scopeTrainingExamplesImageName } from "@/lib/storage-tenant";
 import { getSupabaseAdmin, isSupabaseConfigured } from "@/lib/supabase";
 import { DEFAULT_TABLE_FIELDS, normalizeTableFields, type TableFieldDefinition } from "@/lib/table-fields";
 
@@ -32,7 +33,8 @@ function cloneDefaultTableFields() {
 }
 
 function shouldUseBlankFieldConfig(formId = DEFAULT_FORM_ID) {
-  return normalizeFormId(formId) !== DEFAULT_FORM_ID;
+  const id = normalizeFormId(formId);
+  return id !== DEFAULT_FORM_ID && id !== STARTER_FORM_2_ID;
 }
 
 function loadLocalTableFields(formId = DEFAULT_FORM_ID): TableFieldDefinition[] {
@@ -60,8 +62,9 @@ function saveLocalTableFields(fields: TableFieldDefinition[], formId = DEFAULT_F
 
 export async function loadTableFields(formId = DEFAULT_FORM_ID): Promise<TableFieldDefinition[]> {
   const normalizedFormId = normalizeFormId(formId);
-  const storageKey =
-    normalizedFormId === DEFAULT_FORM_ID ? GLOBAL_RULES_KEY : getFormGlobalRulesStorageKey(normalizedFormId);
+  const storageKey = scopeTrainingExamplesImageName(
+    normalizedFormId === DEFAULT_FORM_ID ? GLOBAL_RULES_KEY : getFormGlobalRulesStorageKey(normalizedFormId),
+  );
   const admin = getSupabaseAdmin();
   if (!isSupabaseConfigured() || !admin) {
     return loadLocalTableFields(normalizedFormId);
@@ -95,8 +98,9 @@ export async function saveTableFields(fields: TableFieldDefinition[], formId = D
     preserveEmpty: blankFieldConfig,
     appendMissingBuiltIns: !blankFieldConfig,
   });
-  const storageKey =
-    normalizedFormId === DEFAULT_FORM_ID ? GLOBAL_RULES_KEY : getFormGlobalRulesStorageKey(normalizedFormId);
+  const storageKey = scopeTrainingExamplesImageName(
+    normalizedFormId === DEFAULT_FORM_ID ? GLOBAL_RULES_KEY : getFormGlobalRulesStorageKey(normalizedFormId),
+  );
   const admin = getSupabaseAdmin();
   if (!isSupabaseConfigured() || !admin) {
     saveLocalTableFields(normalized, normalizedFormId);

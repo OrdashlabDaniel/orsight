@@ -9,6 +9,8 @@ export const TOKEN_PRICING: Record<
 };
 
 export type UsageLogLike = {
+  id?: string;
+  action_type?: string | null;
   user_id: string;
   image_count?: number | null;
   total_tokens?: number | null;
@@ -18,6 +20,14 @@ export type UsageLogLike = {
   created_at?: string | null;
 };
 
+export function estimateLogCostUsd(
+  log: Pick<UsageLogLike, "model_used" | "prompt_tokens" | "completion_tokens">,
+): number {
+  const model = (log.model_used || "gpt-4o-mini") as keyof typeof TOKEN_PRICING;
+  const rates = TOKEN_PRICING[model] || TOKEN_PRICING["gpt-4o-mini"];
+  return (log.prompt_tokens || 0) * rates.prompt + (log.completion_tokens || 0) * rates.completion;
+}
+
 export function aggregateUsageLogs(logs: UsageLogLike[]) {
   let totalImages = 0;
   let totalTokens = 0;
@@ -26,11 +36,7 @@ export function aggregateUsageLogs(logs: UsageLogLike[]) {
   for (const log of logs) {
     totalImages += log.image_count || 0;
     totalTokens += log.total_tokens || 0;
-    const model = (log.model_used || "gpt-4o-mini") as keyof typeof TOKEN_PRICING;
-    const rates = TOKEN_PRICING[model] || TOKEN_PRICING["gpt-4o-mini"];
-    totalCost +=
-      (log.prompt_tokens || 0) * rates.prompt +
-      (log.completion_tokens || 0) * rates.completion;
+    totalCost += estimateLogCostUsd(log);
   }
 
   const uniqueActiveUsers = new Set(logs.map((l) => l.user_id)).size;

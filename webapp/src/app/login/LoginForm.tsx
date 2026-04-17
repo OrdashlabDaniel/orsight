@@ -23,9 +23,10 @@ export function LoginForm() {
   const nextPath = searchParams.get("next") || "/";
   const configReason = searchParams.get("reason") === "config";
 
-  const [mode, setMode] = useState<"login" | "register">("login");
+  const [mode, setMode] = useState<"login" | "register" | "verify">("login");
   const [account, setAccount] = useState("");
   const [password, setPassword] = useState("");
+  const [otp, setOtp] = useState("");
   const [isGofoEmployee, setIsGofoEmployee] = useState(false);
   const [gofoSite, setGofoSite] = useState("");
   const [message, setMessage] = useState("");
@@ -85,7 +86,7 @@ export function LoginForm() {
       }
 
       if (devMock && !supabaseOn) {
-        if (mode === "register") {
+        if (mode !== "login") {
           setMessage(t("login.mockRegister"));
           return;
         }
@@ -117,10 +118,10 @@ export function LoginForm() {
           setMessage("已勾选 GOFO 员工时，站点为必填。");
           return;
         }
-        const { error } = await supabase.auth.signUp({
+        const { error } = await supabase.auth.signInWithOtp({
           email,
-          password,
           options: {
+            shouldCreateUser: true,
             data: {
               [POD_USERNAME_METADATA_KEY]: email,
               [GOFO_EMPLOYEE_METADATA_KEY]: isGofoEmployee,
@@ -132,11 +133,35 @@ export function LoginForm() {
           setMessage(error.message);
           return;
         }
-        setMessage(t("login.okRegister"));
-        setMode("login");
+        setMessage("验证码已发送到邮箱，请输入验证码完成注册。");
         setAccount(email);
-        setIsGofoEmployee(false);
-        setGofoSite("");
+        setOtp("");
+        setMode("verify");
+        return;
+      }
+
+      if (mode === "verify") {
+        const email = trimmedAccount.toLowerCase();
+        if (!email.includes("@")) {
+          setMessage(t("login.errEmail"));
+          return;
+        }
+        const token = otp.trim();
+        if (!token) {
+          setMessage("请输入邮箱验证码。");
+          return;
+        }
+        const { error } = await supabase.auth.verifyOtp({
+          email,
+          token,
+          type: "email",
+        });
+        if (error) {
+          setMessage(error.message);
+          return;
+        }
+        router.push(nextPath);
+        router.refresh();
         return;
       }
 
@@ -159,6 +184,57 @@ export function LoginForm() {
     }
   }
 
+  async function handleGoogleLogin() {
+    setMessage("");
+    setLoading(true);
+    try {
+      const supabase = createClient();
+      const { error } = await supabase.auth.signInWithOAuth({
+        provider: "google",
+        options: {
+          redirectTo: `${window.location.origin}/auth/callback?next=${encodeURIComponent(nextPath)}`,
+        },
+      });
+      if (error) {
+        setMessage(error.message);
+      }
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleResendOtp() {
+    setMessage("");
+    setLoading(true);
+    try {
+      const email = account.trim().toLowerCase();
+      if (!email || !email.includes("@")) {
+        setMessage(t("login.errEmail"));
+        return;
+      }
+      const trimmedSite = gofoSite.trim();
+      const supabase = createClient();
+      const { error } = await supabase.auth.signInWithOtp({
+        email,
+        options: {
+          shouldCreateUser: true,
+          data: {
+            [POD_USERNAME_METADATA_KEY]: email,
+            [GOFO_EMPLOYEE_METADATA_KEY]: isGofoEmployee,
+            [GOFO_SITE_METADATA_KEY]: isGofoEmployee ? trimmedSite : null,
+          },
+        },
+      });
+      if (error) {
+        setMessage(error.message);
+        return;
+      }
+      setMessage("验证码已重新发送。");
+    } finally {
+      setLoading(false);
+    }
+  }
+
   return (
     <main className="flex min-h-screen items-center justify-center bg-slate-100 px-4">
       <div className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-8 shadow-sm">
@@ -169,7 +245,7 @@ export function LoginForm() {
         ) : null}
         <h1 className="text-center text-2xl font-semibold text-slate-900">OrSight</h1>
         <p className="mt-2 text-center text-sm text-slate-500">
-          {mode === "login" ? t("login.subtitleLogin") : t("login.subtitleRegister")}
+          {mode === "login" ? t("login.subtitleLogin") : mode === "register" ? t("login.subtitleRegister") : "输入邮箱验证码"}
         </p>
         {adminLoginUrl ? (
           <p className="mt-3 text-center">
@@ -199,13 +275,14 @@ export function LoginForm() {
               className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 outline-none focus:border-blue-500"
             />
           </label>
-          {mode === "register" ? (
+          {mode === "register" || mode === "verify" ? (
             <>
               <label className="flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2">
                 <input
                   type="checkbox"
                   checked={isGofoEmployee}
                   onChange={(e) => setIsGofoEmployee(e.target.checked)}
+                  disabled={mode === "verify"}
                 />
                 <span className="text-sm text-slate-700">{t("login.gofo")}</span>
               </label>
@@ -219,24 +296,42 @@ export function LoginForm() {
                   value={gofoSite}
                   onChange={(e) => setGofoSite(e.target.value)}
                   required={isGofoEmployee}
+                  disabled={mode === "verify"}
                   placeholder="例如：上海站 / 广州站"
                   className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 outline-none focus:border-blue-500"
                 />
               </label>
             </>
           ) : null}
-          <label className="block">
-            <span className="text-sm font-medium text-slate-700">{t("login.password")}</span>
-            <input
-              type="password"
-              required
-              autoComplete={mode === "login" ? "current-password" : "new-password"}
-              minLength={6}
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 outline-none focus:border-blue-500"
-            />
-          </label>
+          {mode === "login" ? (
+            <label className="block">
+              <span className="text-sm font-medium text-slate-700">{t("login.password")}</span>
+              <input
+                type="password"
+                required
+                autoComplete="current-password"
+                minLength={6}
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 outline-none focus:border-blue-500"
+              />
+            </label>
+          ) : null}
+
+          {mode === "verify" ? (
+            <label className="block">
+              <span className="text-sm font-medium text-slate-700">邮箱验证码</span>
+              <input
+                type="text"
+                inputMode="numeric"
+                autoComplete="one-time-code"
+                value={otp}
+                onChange={(e) => setOtp(e.target.value)}
+                placeholder="6 位数字"
+                className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 outline-none focus:border-blue-500"
+              />
+            </label>
+          ) : null}
 
           {message ? (
             <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
@@ -244,13 +339,41 @@ export function LoginForm() {
             </div>
           ) : null}
 
+          {mode === "login" ? (
+            <button
+              type="button"
+              disabled={loading}
+              onClick={() => void handleGoogleLogin()}
+              className="w-full rounded-xl border border-slate-300 bg-white py-3 text-sm font-medium text-slate-800 hover:bg-slate-50 disabled:opacity-60"
+            >
+              使用 Google 登录
+            </button>
+          ) : null}
+
           <button
             type="submit"
             disabled={loading}
             className="w-full rounded-xl bg-slate-900 py-3 text-sm font-medium text-white hover:bg-slate-800 disabled:bg-slate-400"
           >
-            {loading ? t("login.wait") : mode === "login" ? t("login.loginBtn") : t("login.registerBtn")}
+            {loading
+              ? t("login.wait")
+              : mode === "login"
+                ? t("login.loginBtn")
+                : mode === "register"
+                  ? "发送邮箱验证码"
+                  : "验证并完成注册"}
           </button>
+
+          {mode === "verify" ? (
+            <button
+              type="button"
+              disabled={loading}
+              onClick={() => void handleResendOtp()}
+              className="w-full rounded-xl border border-slate-300 bg-white py-2.5 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-60"
+            >
+              重新发送验证码
+            </button>
+          ) : null}
         </form>
 
         <div className="mt-6 flex justify-center gap-2 text-sm">
@@ -263,6 +386,7 @@ export function LoginForm() {
               onClick={() => {
                 setMode("register");
                 setMessage("");
+                setOtp("");
                 setIsGofoEmployee(false);
                 setGofoSite("");
               }}
@@ -276,6 +400,7 @@ export function LoginForm() {
               onClick={() => {
                 setMode("login");
                 setMessage("");
+                setOtp("");
                 setIsGofoEmployee(false);
                 setGofoSite("");
               }}

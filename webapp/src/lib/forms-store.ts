@@ -6,6 +6,7 @@ import {
   FORMS_MANIFEST_KEY,
   FORM_RECYCLE_RETENTION_MS,
   buildBlankTableFields,
+  buildTenantStarterForms,
   cloneTableFields,
   createDefaultFormDefinition,
   createFormId,
@@ -13,6 +14,8 @@ import {
   normalizeForms,
   type FormDefinition,
 } from "@/lib/forms";
+import { scopeTrainingExamplesImageName, tenantActive } from "@/lib/storage-tenant";
+import { DEFAULT_TABLE_FIELDS } from "@/lib/table-fields";
 import { loadTableFields, saveTableFields } from "@/lib/table-fields-store";
 import {
   getManagedImageDataUrl,
@@ -60,24 +63,57 @@ function saveLocalForms(forms: FormDefinition[]) {
   return normalized;
 }
 
+function formsManifestImageName() {
+  return scopeTrainingExamplesImageName(FORMS_MANIFEST_KEY);
+}
+
+async function seedStarterTableAndRules(forms: FormDefinition[]) {
+  const fields = DEFAULT_TABLE_FIELDS.map((field) => ({ ...field }));
+  for (const form of forms) {
+    await saveGlobalRules(
+      {
+        instructions: "",
+        documents: [],
+        guidanceHistory: [],
+        agentThread: [],
+        workingRules: "",
+        tableFields: fields.map((field) => ({ ...field })),
+      },
+      form.id,
+    );
+  }
+}
+
 async function loadRemoteForms() {
   const admin = getSupabaseAdmin();
   if (!isSupabaseConfigured() || !admin) {
     return loadLocalForms();
   }
 
-  const { data, error } = await admin
-    .from("training_examples")
-    .select("data")
-    .eq("image_name", FORMS_MANIFEST_KEY)
-    .single();
+  const manifestKey = formsManifestImageName();
+  const { data, error } = await admin.from("training_examples").select("data").eq("image_name", manifestKey).single();
 
   if (error || !data) {
+    if (tenantActive()) {
+      const starter = normalizeForms(buildTenantStarterForms(), { injectBuiltinDefault: false });
+      const { error: seedErr } = await admin.from("training_examples").upsert(
+        {
+          image_name: manifestKey,
+          data: { forms: starter },
+        },
+        { onConflict: "image_name" },
+      );
+      if (seedErr) {
+        throw new Error(`Failed to seed forms manifest: ${seedErr.message}`);
+      }
+      await seedStarterTableAndRules(starter);
+      return starter;
+    }
     return normalizeForms([createDefaultFormDefinition()]);
   }
 
   const row = data.data as { forms?: unknown };
-  return normalizeForms(row.forms);
+  return normalizeForms(row.forms, { injectBuiltinDefault: !tenantActive() });
 }
 
 async function saveRemoteForms(forms: FormDefinition[]) {
@@ -87,12 +123,12 @@ async function saveRemoteForms(forms: FormDefinition[]) {
     return normalizeForms(forms);
   }
 
-  const normalized = normalizeForms(forms);
+  const normalized = normalizeForms(forms, { injectBuiltinDefault: !tenantActive() });
   const { error } = await admin
     .from("training_examples")
     .upsert(
       {
-        image_name: FORMS_MANIFEST_KEY,
+        image_name: formsManifestImageName(),
         data: {
           forms: normalized,
         },
@@ -176,7 +212,7 @@ export async function updateForm(formId: string, patch: Partial<FormDefinition>)
 }
 
 export async function softDeleteForm(formId: string) {
-  if (normalizeFormId(formId) === DEFAULT_FORM_ID) {
+  if (!tenantActive() && normalizeFormId(formId) === DEFAULT_FORM_ID) {
     throw new Error("默认填表不能删除。");
   }
   return updateForm(formId, { deletedAt: Date.now() });
@@ -187,7 +223,7 @@ export async function restoreForm(formId: string) {
 }
 
 export async function permanentlyDeleteForm(formId: string) {
-  if (normalizeFormId(formId) === DEFAULT_FORM_ID) {
+  if (!tenantActive() && normalizeFormId(formId) === DEFAULT_FORM_ID) {
     throw new Error("默认填表不能删除。");
   }
   const forms = await loadForms();

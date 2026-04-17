@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { getAuthUserOrSkip } from "@/lib/auth-server";
+import { withAuthedStorageTenant } from "@/lib/storage-tenant";
 import { getFormIdFromRequest } from "@/lib/form-request";
 import { getActiveTableFields, type TableFieldDefinition } from "@/lib/table-fields";
 import { loadTableFields } from "@/lib/table-fields-store";
@@ -224,13 +224,13 @@ function hasTableFieldValues(fieldValues: Record<string, TrainingScalarValue[]> 
 }
 
 export async function POST(request: Request) {
-  try {
-    const { user, skipAuth } = await getAuthUserOrSkip();
-    if (!skipAuth && !user) {
-      return NextResponse.json({ error: "请先登录。" }, { status: 401 });
-    }
+  return withAuthedStorageTenant(async ({ user, skipAuth }) => {
+    try {
+      if (!skipAuth && !user) {
+        return NextResponse.json({ error: "请先登录。" }, { status: 401 });
+      }
 
-    const formId = getFormIdFromRequest(request);
+      const formId = getFormIdFromRequest(request);
     const payload = (await request.json()) as SaveTrainingPayload;
     const imageName = normalizeText(payload.imageName);
     const imageDataUrl = normalizeText(payload.imageDataUrl);
@@ -317,12 +317,13 @@ export async function POST(request: Request) {
       saved: example,
       totalExamples: nextExamples.length,
     });
-  } catch (error) {
-    return NextResponse.json(
-      {
-        error: error instanceof Error ? error.message : "Failed to save training example.",
-      },
-      { status: 500 },
-    );
-  }
+    } catch (error) {
+      return NextResponse.json(
+        {
+          error: error instanceof Error ? error.message : "Failed to save training example.",
+        },
+        { status: 500 },
+      );
+    }
+  });
 }

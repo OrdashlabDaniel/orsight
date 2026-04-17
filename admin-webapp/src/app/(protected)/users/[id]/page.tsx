@@ -3,6 +3,7 @@ import { format } from "date-fns";
 import { ArrowLeft } from "lucide-react";
 
 import { VizIdentityBadges } from "@/components/VizIdentityBadges";
+import { getRegisteredUserById } from "@/lib/viz-auth-user-rpc";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { TOKEN_PRICING } from "@/lib/usage-metrics";
 import { createAdminClient } from "@/lib/supabase/server";
@@ -35,9 +36,8 @@ export default async function UserDetailsPage({
   const noticeMsg = typeof sp.notice === "string" ? sp.notice : null;
   const errMsg = typeof sp.err === "string" ? sp.err : null;
 
-  // Fetch user details
-  const { data: userData } = await supabase.auth.admin.getUserById(userId);
-  const user = userData?.user;
+  // Fetch user details via SQL RPC to avoid admin API failures on broken auth rows.
+  const user = await getRegisteredUserById(supabase, userId);
 
   // Fetch user's usage logs
   const { data: logs } = await supabase

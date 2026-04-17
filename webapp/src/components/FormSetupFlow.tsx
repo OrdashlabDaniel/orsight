@@ -1040,7 +1040,7 @@ export function FormSetupFlow({ initialForm }: { initialForm: FormDefinition }) 
 
   return (
     <main className="flex min-h-0 flex-1 flex-col overflow-y-auto bg-[var(--background)] px-3 py-6 text-[var(--foreground)]">
-      <div className="mx-auto flex max-w-[1700px] flex-col gap-6">
+      <div className="mx-auto flex w-[80%] max-w-full flex-col gap-6">
         <header className="border-b border-[var(--border)] pb-6">
           <div className="flex flex-wrap items-center justify-between gap-3 text-sm">
             <Link href="/forms" className="text-[var(--muted-foreground)] hover:text-[var(--foreground)]">

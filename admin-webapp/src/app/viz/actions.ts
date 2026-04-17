@@ -3,24 +3,39 @@
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 
+import { assertAdminLoginPassword, requireVizAdminActor } from "@/lib/viz-admin-verify";
+import { purgeExpiredRecycledUsers } from "@/lib/viz-recycle-purge";
 import { createServiceRoleClient } from "@/lib/supabase/service";
+import { softDeleteUserToRecycle } from "@/lib/viz-user-soft-delete";
 
 function vizRedirect(path: string) {
   revalidatePath("/viz");
-  redirect(path);
+  const sep = path.includes("?") ? "&" : "?";
+  redirect(`${path}${sep}_r=${Date.now()}`);
 }
 
 export async function grantAdminAction(formData: FormData) {
   const userId = String(formData.get("userId") ?? "").trim();
   const email = String(formData.get("email") ?? "").trim();
   const returnView = String(formData.get("returnView") ?? "users").trim();
+  const adminPassword = String(formData.get("adminPassword") ?? "");
 
   if (!userId) {
     vizRedirect(`/viz?view=${encodeURIComponent(returnView)}&err=${encodeURIComponent("缺少 userId")}`);
     return;
   }
 
+  const actor = await requireVizAdminActor();
+  try {
+    await assertAdminLoginPassword(actor.email, adminPassword);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "密码校验失败";
+    vizRedirect(`/viz?view=${encodeURIComponent(returnView)}&err=${encodeURIComponent(msg)}`);
+    return;
+  }
+
   const sb = createServiceRoleClient();
+  await purgeExpiredRecycledUsers(sb);
 
   const { error } = await sb.from("admin_users").insert({
     id: userId,
@@ -54,6 +69,8 @@ export async function revokeAdminAction(formData: FormData) {
     vizRedirect(`/viz?view=${encodeURIComponent(returnView)}&err=${encodeURIComponent("缺少 userId")}`);
     return;
   }
+
+  await requireVizAdminActor("/viz");
 
   const sb = createServiceRoleClient();
 
@@ -90,42 +107,29 @@ export async function revokeAdminAction(formData: FormData) {
 export async function deleteUserAction(formData: FormData) {
   const userId = String(formData.get("userId") ?? "").trim();
   const label = String(formData.get("label") ?? "").trim() || userId;
+  const email = String(formData.get("email") ?? "").trim();
+  const returnView = String(formData.get("returnView") ?? "users").trim();
+  const adminPassword = String(formData.get("adminPassword") ?? "");
 
   if (!userId) {
-    redirect("/viz?err=missing_user");
+    vizRedirect(`/viz?view=${encodeURIComponent(returnView)}&err=${encodeURIComponent("缺少 userId")}`);
+    return;
   }
 
-  const returnView = String(formData.get("returnView") ?? "users").trim();
-
-  const sb = createServiceRoleClient();
-
-  const { error: usageDeleteError } = await sb
-    .from("usage_logs")
-    .delete()
-    .eq("user_id", userId);
-  if (usageDeleteError) {
-    redirect(
-      `/viz?view=${encodeURIComponent(returnView)}&err=${encodeURIComponent(`delete_usage:${usageDeleteError.message}`)}`,
-    );
+  const actor = await requireVizAdminActor();
+  try {
+    await assertAdminLoginPassword(actor.email, adminPassword);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "密码校验失败";
+    vizRedirect(`/viz?view=${encodeURIComponent(returnView)}&err=${encodeURIComponent(msg)}`);
+    return;
   }
 
-  const { error: adminDeleteError } = await sb
-    .from("admin_users")
-    .delete()
-    .eq("id", userId);
-  if (adminDeleteError) {
-    redirect(
-      `/viz?view=${encodeURIComponent(returnView)}&err=${encodeURIComponent(`delete_admin:${adminDeleteError.message}`)}`,
-    );
+  const result = await softDeleteUserToRecycle(userId, actor, label || email);
+  if ("err" in result) {
+    vizRedirect(`/viz?view=${encodeURIComponent(returnView)}&err=${encodeURIComponent(result.err)}`);
+    return;
   }
 
-  const { error: authDeleteError } = await sb.auth.admin.deleteUser(userId);
-  if (authDeleteError) {
-    redirect(
-      `/viz?view=${encodeURIComponent(returnView)}&err=${encodeURIComponent(`delete_auth:${authDeleteError.message}`)}`,
-    );
-  }
-
-  revalidatePath("/viz");
-  redirect(`/viz?view=${encodeURIComponent(returnView)}&ok=${encodeURIComponent(label)}`);
+  vizRedirect(`/viz?view=${encodeURIComponent(returnView)}&notice=${encodeURIComponent(result.ok || label)}`);
 }

@@ -190,7 +190,7 @@ export default function FormsPoolClient() {
 
   return (
     <main className="flex min-h-0 flex-1 flex-col overflow-y-auto bg-slate-100 px-4 py-6 text-slate-900">
-      <div className="mx-auto max-w-6xl space-y-4">
+      <div className="mx-auto w-[80%] max-w-full space-y-4">
         <header className="rounded-2xl border border-slate-200 bg-white px-6 py-5 shadow-sm">
           <h1 className="text-2xl font-semibold">首页</h1>
           <p className="mt-2 text-sm text-slate-600">

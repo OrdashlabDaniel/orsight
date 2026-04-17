@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 
+import { hardDeleteAuthUser } from "@/lib/viz-auth-user-rpc";
 import { createAdminClient } from "@/lib/supabase/server";
 
 function redirectBack(userId: string, qs: Record<string, string>) {
@@ -89,9 +90,10 @@ export async function deleteUserFromUserPageAction(formData: FormData) {
     return;
   }
 
-  const { error: authDeleteError } = await sb.auth.admin.deleteUser(userId);
-  if (authDeleteError) {
-    redirectBack(userId, { err: `delete_auth:${authDeleteError.message}` });
+  try {
+    await hardDeleteAuthUser(sb, userId);
+  } catch (e) {
+    redirectBack(userId, { err: `delete_auth:${e instanceof Error ? e.message : "unknown"}` });
     return;
   }
 

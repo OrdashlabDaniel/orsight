@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import sharp from "sharp";
 
-import { getAuthUserOrSkip } from "@/lib/auth-server";
+import { withAuthedStorageTenant } from "@/lib/storage-tenant";
 import { getFormIdFromFormData } from "@/lib/form-request";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import {
@@ -54,6 +54,11 @@ const OPENAI_PRIMARY_MODEL = process.env.OPENAI_PRIMARY_MODEL || process.env.OPE
 const OPENAI_REVIEW_MODEL = process.env.OPENAI_REVIEW_MODEL || "gpt-5";
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_REASONING_EFFORT = process.env.OPENAI_REASONING_EFFORT || "minimal";
+// Coordinate-guided refinement is unstable for camera framing; keep it opt-in.
+const COORD_GUIDED_REFINE_ENABLED = process.env.EXTRACT_COORD_GUIDED_REFINE === "1";
+const RECOVERY_UPSCALE_MIN_EDGE = 1600;
+const RECOVERY_UPSCALE_TARGET_EDGE = 2000;
+const RECOVERY_UPSCALE_MAX_SCALE = 2.5;
 
 const SIMPLE_EXTRACTION_PROMPT = `你是 OrSight。你会先看到几张人工标注参考图，再看到最后一张当前待识别图片。请严格遵守：
 1. 参考图只用于理解界面布局、字段标签和示例，不得抄参考图中的任何数字或文字。
@@ -1072,6 +1077,34 @@ function parseDataUrlToBuffer(dataUrl: string): Buffer | null {
   }
 }
 
+async function buildUpscaledImageDataUrl(bytes: Buffer): Promise<string | null> {
+  try {
+    const meta = await sharp(bytes).metadata();
+    const width = meta.width ?? 0;
+    const height = meta.height ?? 0;
+    if (!width || !height) {
+      return null;
+    }
+    const minEdge = Math.min(width, height);
+    if (minEdge >= RECOVERY_UPSCALE_MIN_EDGE) {
+      return null;
+    }
+    const scale = Math.min(RECOVERY_UPSCALE_MAX_SCALE, RECOVERY_UPSCALE_TARGET_EDGE / minEdge);
+    if (scale <= 1) {
+      return null;
+    }
+    const targetWidth = Math.max(1, Math.round(width * scale));
+    const targetHeight = Math.max(1, Math.round(height * scale));
+    const resized = await sharp(bytes)
+      .resize({ width: targetWidth, height: targetHeight, fit: "inside", withoutEnlargement: false })
+      .png()
+      .toBuffer();
+    return `data:image/png;base64,${resized.toString("base64")}`;
+  } catch {
+    return null;
+  }
+}
+
 async function imageFingerprintFromBuffer(bytes: Buffer): Promise<number[]> {
   const raw = await sharp(bytes)
     .rotate()
@@ -1188,6 +1221,9 @@ async function runLiveAggregationRefine(
   records: PodRecord[],
   model: string,
 ): Promise<{ records: PodRecord[]; usage?: OpenAIUsage; collapsed: boolean }> {
+  if (!COORD_GUIDED_REFINE_ENABLED) {
+    return { records, collapsed: false };
+  }
   if (!OPENAI_API_KEY || records.length === 0) {
     return { records, collapsed: false };
   }
@@ -2989,7 +3025,7 @@ function buildRecoveryPrompt(records: PodRecord[], plans: RecoveryPlan[], tableF
     lines.push("- unscanned：只能来自「未领取 / 未收」直接对应的数字；不能从已领、应领件数、实领件数、任务编码或时间中截取。");
   }
   if (requestedBuiltIns.has("exceptions")) {
-    lines.push("- exceptions：只能来自「错扫 / 错分 / 误扫」直接对应的数字；若没有该字段列/标签，一律返回 null，不要默认填 0。");
+    lines.push("- exceptions：只能来自「错扫 / 错分 / 误扫」直接对应的数字；在 POD 界面里它常是同一卡片中、靠近该标签右侧的较小数字。若没有该字段列/标签，一律返回 null，不要默认填 0。");
   }
   if (needsCustomRecovery) {
     lines.push("- customFieldValues：只补当前 need 里列出的自定义字段，键必须严格使用字段 id。");
@@ -3191,11 +3227,29 @@ async function recoverMissingFieldsFromVision(
     userContent.push({ type: "image_url", image_url: { url: ref.dataUrl } });
   }
 
+  const needsUpscale = plans.some((plan) =>
+    plan.missingBuiltIns.some(
+      (field) =>
+        field === "taskCode" ||
+        field === "route" ||
+        field === "driver" ||
+        field === "total" ||
+        field === "unscanned" ||
+        field === "exceptions",
+    ),
+  );
+  const upscaledDataUrl = needsUpscale ? await buildUpscaledImageDataUrl(bytes) : null;
+
   userContent.push({
     type: "text",
-    text: "\n【当前待补全图片】请只根据下面这一张当前图片补全缺失字段；上面的参考图只用于理解界面，不得抄写其中的文字或数字。\n",
+    text: upscaledDataUrl
+      ? "\n【当前待补全图片】下面先给原图，再给同一张图的放大版（更易读小字）。请仅依据它们补全缺失字段。\n"
+      : "\n【当前待补全图片】请只根据下面这一张当前图片补全缺失字段；上面的参考图只用于理解界面，不得抄写其中的文字或数字。\n",
   });
   userContent.push({ type: "image_url", image_url: { url: dataUrl } });
+  if (upscaledDataUrl) {
+    userContent.push({ type: "image_url", image_url: { url: upscaledDataUrl } });
+  }
 
   const response = await fetch(`${OPENAI_BASE_URL}/chat/completions`, {
     method: "POST",
@@ -3945,14 +3999,14 @@ async function runConsistencyCheck(file: File, model: string, ctx: ExtractVision
 }
 
 export async function POST(request: Request) {
-  return withTrainingImageRequestCache(async () => {
-    try {
-      const { user, skipAuth } = await getAuthUserOrSkip();
-      if (!skipAuth && !user) {
-        return NextResponse.json({ error: "请先登录后再使用识别功能。" }, { status: 401 });
-      }
+  return withAuthedStorageTenant(async ({ user, skipAuth }) => {
+    return withTrainingImageRequestCache(async () => {
+      try {
+        if (!skipAuth && !user) {
+          return NextResponse.json({ error: "请先登录后再使用识别功能。" }, { status: 401 });
+        }
 
-      const formData = await request.formData();
+        const formData = await request.formData();
       const formId = getFormIdFromFormData(formData);
       const mode = String(formData.get("mode") || "primary");
       const files = formData
@@ -4314,13 +4368,14 @@ export async function POST(request: Request) {
       mode,
       trainingExamplesLoaded: examples.length,
     });
-    } catch (error) {
-      return NextResponse.json(
-        {
-          error: error instanceof Error ? error.message : "Unknown extraction error.",
-        },
-        { status: 500 },
-      );
-    }
+      } catch (error) {
+        return NextResponse.json(
+          {
+            error: error instanceof Error ? error.message : "Unknown extraction error.",
+          },
+          { status: 500 },
+        );
+      }
+    });
   });
 }

@@ -12,9 +12,11 @@ const PRICING = {
 export default async function UsersPage() {
   const supabase = await createAdminClient();
 
-  // Fetch all users using admin API
-  const { data: usersData, error: usersError } = await supabase.auth.admin.listUsers();
-  const users = usersData?.users || [];
+  // Fetch all users via SQL RPC so a single broken auth row does not break the whole page.
+  const { data: usersData } = await supabase.rpc("list_registered_users");
+  const users =
+    ((usersData ?? []) as Array<{ id: string; email: string | null; created_at: string | null; pod_username?: string | null }>) ||
+    [];
 
   // Fetch all usage logs
   const { data: logs } = await supabase.from("usage_logs").select("*");
@@ -64,9 +66,9 @@ export default async function UsersPage() {
                 const usage = userUsage.get(user.id) || { images: 0, tokens: 0, cost: 0 };
                 return (
                   <tr key={user.id} className="hover:bg-slate-50 transition-colors">
-                    <td className="px-6 py-4 font-medium text-slate-900">{user.email}</td>
+                    <td className="px-6 py-4 font-medium text-slate-900">{user.email || user.id}</td>
                     <td className="px-6 py-4 text-slate-500">
-                      {format(new Date(user.created_at), "MMM d, yyyy")}
+                      {user.created_at ? format(new Date(user.created_at), "MMM d, yyyy") : "-"}
                     </td>
                     <td className="px-6 py-4 text-right text-slate-600">{usage.images.toLocaleString()}</td>
                     <td className="px-6 py-4 text-right text-slate-600">{usage.tokens.toLocaleString()}</td>

@@ -1,25 +1,22 @@
 import Link from "next/link";
 import { format } from "date-fns";
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, FileSpreadsheet } from "lucide-react";
 
+import { HydrationSafeMount } from "@/components/HydrationSafeMount";
 import { VizIdentityBadges } from "@/components/VizIdentityBadges";
+import { getRegisteredUserById } from "@/lib/viz-auth-user-rpc";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { dailyTokenBuckets, modelTokenShares, TOKEN_PRICING } from "@/lib/usage-metrics";
+import { dailyTokenBuckets, estimateLogCostUsd, modelTokenShares } from "@/lib/usage-metrics";
 import { createServiceRoleClient } from "@/lib/supabase/service";
 
 import { VizCharts } from "../../VizCharts";
-import {
-  grantAdminFromVizUserDetailAction,
-  revokeAdminFromVizUserDetailAction,
-} from "./actions";
 import { UserTimeRangeControls } from "./UserTimeRangeControls";
+import { VizUserDetailIdentityPanel } from "./VizUserDetailIdentityPanel";
 
 export const dynamic = "force-dynamic";
 
-function costForLog(log: any) {
-  const model = (log.model_used || "gpt-4o-mini") as keyof typeof TOKEN_PRICING;
-  const rates = TOKEN_PRICING[model] || TOKEN_PRICING["gpt-4o-mini"];
-  return (log.prompt_tokens || 0) * rates.prompt + (log.completion_tokens || 0) * rates.completion;
+function costForLog(log: { model_used?: string | null; prompt_tokens?: number | null; completion_tokens?: number | null }) {
+  return estimateLogCostUsd(log);
 }
 
 type SearchParams = Record<string, string | string[] | undefined>;
@@ -97,13 +94,11 @@ export default async function VizUserDetailsPage({
           .lte("created_at", toDay ? utcEndOfDay(toDay) : utcEndOfDay(today))
       : logsQuery;
 
-  const [{ data: userData }, { data: logs }, { data: admins }] = await Promise.all([
-    sb.auth.admin.getUserById(userId),
+  const [user, { data: logs }, { data: admins }] = await Promise.all([
+    getRegisteredUserById(sb, userId),
     logsQueryRanged,
     sb.from("admin_users").select("id").order("created_at", { ascending: false }),
   ]);
-
-  const user = userData?.user;
   const isAdmin = Boolean(admins?.some((a) => a.id === userId));
   const soleAdmin = (admins?.length ?? 0) === 1;
   const canRevokeAdmin = !(soleAdmin && isAdmin);
@@ -114,12 +109,20 @@ export default async function VizUserDetailsPage({
   if (toQ) returnParams.set("to", toQ);
   const returnSearch = returnParams.toString();
 
+  const exportUsageQs = new URLSearchParams();
+  exportUsageQs.set("scope", "user");
+  exportUsageQs.set("userId", userId);
+  exportUsageQs.set("range", range);
+  if (fromQ) exportUsageQs.set("from", fromQ);
+  if (toQ) exportUsageQs.set("to", toQ);
+  const exportUsageHref = `/api/viz/export-usage-logs?${exportUsageQs.toString()}`;
+
   const noticeMsg = typeof sp.notice === "string" ? sp.notice : null;
   const errMsg = typeof sp.err === "string" ? sp.err : null;
 
   if (!user) {
     return (
-      <div className="mx-auto max-w-5xl space-y-6 px-4 py-6">
+      <div className="mx-auto w-[80%] max-w-full space-y-6 px-4 py-6">
         <div className="rounded-xl border border-rose-200 bg-rose-50 p-4 text-rose-700">User not found.</div>
         <Link
           href="/viz"
@@ -138,9 +141,12 @@ export default async function VizUserDetailsPage({
   const modelShares = modelTokenShares(logs ?? []);
 
   return (
-    <div className="min-h-full bg-gradient-to-b from-slate-100 to-slate-200/80">
+    <HydrationSafeMount
+      fallback={<div suppressHydrationWarning className="min-h-screen bg-gradient-to-b from-slate-100 to-slate-200/80" />}
+    >
+      <div className="min-h-full bg-gradient-to-b from-slate-100 to-slate-200/80">
       <header className="border-b border-slate-200/80 bg-white/90 backdrop-blur">
-        <div className="mx-auto flex max-w-5xl items-start gap-3 px-4 py-5">
+        <div className="mx-auto flex w-[80%] max-w-full items-start gap-3 px-4 py-5">
           <Link
             href="/viz"
             className="mt-0.5 inline-flex items-center justify-center rounded-lg p-2 text-slate-500 transition-all duration-150 hover:-translate-y-px hover:bg-slate-200 hover:text-slate-900 active:translate-y-0 active:scale-[0.98]"
@@ -156,7 +162,7 @@ export default async function VizUserDetailsPage({
         </div>
       </header>
 
-      <div className="mx-auto max-w-5xl space-y-6 px-4 py-6">
+      <div className="mx-auto w-[80%] max-w-full space-y-6 px-4 py-6">
         {noticeMsg ? (
           <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-900">
             {noticeMsg}
@@ -206,63 +212,34 @@ export default async function VizUserDetailsPage({
             </CardHeader>
             <CardContent className="space-y-3">
               <VizIdentityBadges isRegisteredUser={true} isAdmin={isAdmin} />
-              {!isAdmin ? (
-                <form action={grantAdminFromVizUserDetailAction}>
-                  <input type="hidden" name="userId" value={userId} />
-                  <input type="hidden" name="email" value={user.email || ""} />
-                  <input type="hidden" name="returnSearch" value={returnSearch} />
-                  <button
-                    type="submit"
-                    className="w-full cursor-pointer rounded-lg bg-blue-600 px-3 py-2.5 text-sm font-medium text-white shadow-sm transition-all duration-150 hover:bg-blue-700 hover:shadow-md hover:shadow-blue-600/25 active:scale-[0.98]"
-                  >
-                    设为管理员
-                  </button>
-                  <p className="mt-2 text-xs text-slate-500">
-                    写入 <code className="rounded bg-slate-100 px-1">public.admin_users</code>，不删除登录账号。
-                  </p>
-                </form>
-              ) : (
-                <form action={revokeAdminFromVizUserDetailAction}>
-                  <input type="hidden" name="userId" value={userId} />
-                  <input type="hidden" name="label" value={user.email || userId} />
-                  <input type="hidden" name="returnSearch" value={returnSearch} />
-                  <button
-                    type="submit"
-                    disabled={!canRevokeAdmin}
-                    title={
-                      !canRevokeAdmin
-                        ? "至少需要保留一位管理员"
-                        : "仅从 admin_users 移除，不删除登录账号"
-                    }
-                    className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm font-medium text-slate-800 shadow-sm transition-all duration-150 enabled:cursor-pointer enabled:hover:border-slate-400 enabled:hover:bg-slate-50 enabled:hover:shadow-md enabled:active:scale-[0.98] disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-400"
-                  >
-                    移除管理员权限
-                  </button>
-                  {!canRevokeAdmin ? (
-                    <p className="mt-2 text-xs text-amber-800">
-                      当前为最后一位管理员，请先为其他账号赋予管理员权限后再移除此权限。
-                    </p>
-                  ) : (
-                    <p className="mt-2 text-xs text-slate-500">
-                      仅从 <code className="rounded bg-slate-100 px-1">admin_users</code> 移除，登录账号保留。
-                    </p>
-                  )}
-                </form>
-              )}
+              <VizUserDetailIdentityPanel
+                userId={userId}
+                userEmail={user.email || userId}
+                returnSearch={returnSearch}
+                isAdmin={isAdmin}
+                canRevokeAdmin={canRevokeAdmin}
+              />
             </CardContent>
           </Card>
         </div>
 
         <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
-          <div className="flex items-center justify-between gap-3 border-b border-slate-100 bg-slate-50 px-5 py-4">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 bg-slate-50 px-5 py-4">
             <div>
               <h2 className="text-base font-semibold text-slate-900">用量明细</h2>
-              <p className="mt-1 text-xs text-slate-600">按时间倒序展示该用户的 usage_logs</p>
+              <p className="mt-1 text-xs text-slate-600">按时间倒序展示该用户的 usage_logs（与上方时间筛选一致）</p>
             </div>
+            <a
+              href={exportUsageHref}
+              className="inline-flex shrink-0 items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm font-medium text-emerald-900 shadow-sm transition-all duration-150 hover:border-emerald-300 hover:bg-emerald-100 active:scale-[0.98]"
+            >
+              <FileSpreadsheet className="h-4 w-4" aria-hidden />
+              导出 Excel（当前筛选）
+            </a>
           </div>
-          <div className="overflow-x-auto">
+          <div className="max-h-[min(70vh,560px)] overflow-y-auto overflow-x-auto">
             <table className="min-w-full text-sm">
-              <thead className="border-b border-slate-200 text-slate-600">
+              <thead className="sticky top-0 z-10 border-b border-slate-200 bg-slate-50 text-slate-600 shadow-sm">
                 <tr>
                   <th className="px-5 py-3 text-left">时间</th>
                   <th className="px-5 py-3 text-left">动作</th>
@@ -309,7 +286,8 @@ export default async function VizUserDetailsPage({
           </div>
         </div>
       </div>
-    </div>
+      </div>
+    </HydrationSafeMount>
   );
 }
 

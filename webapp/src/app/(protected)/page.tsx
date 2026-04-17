@@ -2085,7 +2085,7 @@ function HomeContent() {
 
   return (
     <main className="flex min-h-0 flex-1 flex-col bg-[var(--background)] px-3 py-6 text-[var(--foreground)]">
-      <div className="mx-auto flex min-h-0 w-full max-w-[1600px] flex-1 flex-col gap-6">
+      <div className="mx-auto flex min-h-0 w-[80%] max-w-full flex-1 flex-col gap-6">
         <header className="shrink-0 pb-2">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex items-center gap-4">
@@ -2378,6 +2378,15 @@ function HomeContent() {
                 </button>
               </div>
 
+              <button
+                type="button"
+                className="w-full rounded-md border border-[var(--border)] px-3 py-2 text-sm hover:bg-[var(--background)] disabled:cursor-not-allowed disabled:opacity-40"
+                onClick={openFieldManager}
+                disabled={isSavingFieldConfig}
+              >
+                {t("home.manageColumns")}
+              </button>
+
               {progress ? (
                 <div className="rounded-lg border border-[var(--border)] px-3 py-3">
                   <div className="mb-1.5 flex items-center justify-between text-xs text-[var(--muted-foreground)]">
@@ -2495,6 +2504,14 @@ function HomeContent() {
                     {t("home.clearFilters")}
                   </button>
                 ) : null}
+                <button
+                  type="button"
+                  className="rounded-md border border-[var(--border)] px-3 py-1.5 text-sm hover:bg-[var(--background)] disabled:cursor-not-allowed disabled:opacity-40"
+                  onClick={openFieldManager}
+                  disabled={isSavingFieldConfig}
+                >
+                  {t("home.manageColumns")}
+                </button>
                 <div className="flex flex-wrap gap-2">
                   <button
                     className="rounded-md border border-[var(--border)] px-3 py-1.5 text-sm hover:bg-[var(--background)] disabled:cursor-not-allowed disabled:opacity-40"
