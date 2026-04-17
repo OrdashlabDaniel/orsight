@@ -10,6 +10,7 @@ import {
   cloneTableFields,
   createDefaultFormDefinition,
   createFormId,
+  isUnmodifiedTenantGiftStub,
   normalizeFormId,
   normalizeForms,
   type FormDefinition,
@@ -17,6 +18,8 @@ import {
 import { scopeTrainingExamplesImageName, tenantActive } from "@/lib/storage-tenant";
 import { DEFAULT_TABLE_FIELDS } from "@/lib/table-fields";
 import { loadTableFields, saveTableFields } from "@/lib/table-fields-store";
+import { cloneFormFilePools } from "@/lib/form-file-pools";
+import { hasTenantDbAccess, requireTenantDbAccess } from "@/lib/tenant-db";
 import {
   getManagedImageDataUrl,
   getTrainingImageDataUrl,
@@ -28,7 +31,7 @@ import {
   saveTrainingImageDataUrl,
   upsertTrainingExample,
 } from "@/lib/training";
-import { getSupabaseAdmin, isSupabaseConfigured } from "@/lib/supabase";
+import { getSupabaseAdmin } from "@/lib/supabase";
 
 function formsCandidatePaths() {
   return [
@@ -67,6 +70,156 @@ function formsManifestImageName() {
   return scopeTrainingExamplesImageName(FORMS_MANIFEST_KEY);
 }
 
+const FORMS_TABLE = "app_forms";
+
+type FormRow = {
+  owner_id: string;
+  form_id: string;
+  name: string;
+  description: string;
+  status: "draft" | "ready";
+  ready: boolean;
+  created_at: string;
+  updated_at: string;
+  deleted_at: string | null;
+  template_source: FormDefinition["templateSource"];
+  source_form_id: string | null;
+};
+
+function mapFormRow(row: FormRow): FormDefinition {
+  return {
+    id: normalizeFormId(row.form_id),
+    name: row.name,
+    description: row.description,
+    status: row.status,
+    ready: row.ready,
+    createdAt: Date.parse(row.created_at) || Date.now(),
+    updatedAt: Date.parse(row.updated_at) || Date.now(),
+    deletedAt: row.deleted_at ? Date.parse(row.deleted_at) || null : null,
+    templateSource: row.template_source,
+    sourceFormId: row.source_form_id,
+  };
+}
+
+function buildFormRow(ownerId: string, form: FormDefinition): FormRow {
+  return {
+    owner_id: ownerId,
+    form_id: normalizeFormId(form.id),
+    name: form.name,
+    description: form.description,
+    status: form.status,
+    ready: form.ready,
+    created_at: new Date(form.createdAt).toISOString(),
+    updated_at: new Date(form.updatedAt).toISOString(),
+    deleted_at: form.deletedAt ? new Date(form.deletedAt).toISOString() : null,
+    template_source: form.templateSource ?? "blank",
+    source_form_id: form.sourceFormId ?? null,
+  };
+}
+
+function mergeLegacyForms(currentForms: FormDefinition[], legacyForms: FormDefinition[]) {
+  const currentById = new Map(currentForms.map((form) => [form.id, form] as const));
+  const merged: FormDefinition[] = [];
+  const used = new Set<string>();
+
+  for (const legacyForm of legacyForms) {
+    const current = currentById.get(legacyForm.id);
+    merged.push(current && !isUnmodifiedTenantGiftStub(current) ? current : legacyForm);
+    used.add(legacyForm.id);
+  }
+
+  for (const current of currentForms) {
+    if (!used.has(current.id)) {
+      merged.push(current);
+    }
+  }
+
+  return normalizeForms(merged, { injectBuiltinDefault: false });
+}
+
+async function loadRemoteManifestByKey(imageName: string) {
+  const admin = getSupabaseAdmin();
+  if (!admin) {
+    return null;
+  }
+
+  const { data, error } = await admin
+    .from("training_examples")
+    .select("data")
+    .eq("image_name", imageName)
+    .single();
+
+  if (error || !data?.data || typeof data.data !== "object") {
+    return null;
+  }
+
+  return data.data as Record<string, unknown>;
+}
+
+async function fetchRemoteFormsRows(): Promise<FormDefinition[]> {
+  const { ownerId, client } = requireTenantDbAccess();
+  const { data, error } = await client
+    .from(FORMS_TABLE)
+    .select(
+      "owner_id,form_id,name,description,status,ready,created_at,updated_at,deleted_at,template_source,source_form_id",
+    )
+    .eq("owner_id", ownerId)
+    .order("created_at", { ascending: true });
+
+  if (error || !data) {
+    throw new Error(`Failed to load forms: ${error?.message || "unknown error"}`);
+  }
+
+  return normalizeForms((data as FormRow[]).map((row) => mapFormRow(row)), { injectBuiltinDefault: false });
+}
+
+async function persistRemoteForms(forms: FormDefinition[]) {
+  const normalized = normalizeForms(forms, { injectBuiltinDefault: false });
+  const { ownerId, client } = requireTenantDbAccess();
+  const nextIds = new Set(normalized.map((form) => form.id));
+
+  if (normalized.length > 0) {
+    const { error } = await client
+      .from(FORMS_TABLE)
+      .upsert(normalized.map((form) => buildFormRow(ownerId, form)), { onConflict: "owner_id,form_id" });
+
+    if (error) {
+      throw new Error(`Failed to save forms: ${error.message}`);
+    }
+  }
+
+  const existing = await fetchRemoteFormsRows();
+  const deleteIds = existing.map((form) => form.id).filter((formId) => !nextIds.has(formId));
+  for (const formId of deleteIds) {
+    const { error } = await client.from(FORMS_TABLE).delete().eq("owner_id", ownerId).eq("form_id", formId);
+    if (error) {
+      throw new Error(`Failed to delete removed form: ${error.message}`);
+    }
+  }
+
+  return normalized;
+}
+
+async function maybeRestoreLegacyFormsIntoTenant(currentForms: FormDefinition[]) {
+  if (!tenantActive()) {
+    return null;
+  }
+
+  const legacyManifest = await loadRemoteManifestByKey(FORMS_MANIFEST_KEY);
+  if (!legacyManifest) {
+    return null;
+  }
+
+  const legacyForms = normalizeForms(legacyManifest.forms, { injectBuiltinDefault: true });
+  if (legacyForms.length === 0) {
+    return null;
+  }
+
+  const mergedForms = mergeLegacyForms(currentForms, legacyForms);
+  await persistRemoteForms(mergedForms);
+  return mergedForms;
+}
+
 async function seedStarterTableAndRules(forms: FormDefinition[]) {
   const fields = DEFAULT_TABLE_FIELDS.map((field) => ({ ...field }));
   for (const form of forms) {
@@ -84,71 +237,50 @@ async function seedStarterTableAndRules(forms: FormDefinition[]) {
   }
 }
 
+/**
+ * 从发布版租户表读取用户自己的填表清单。用户数据按 owner_id + form_id 存储，
+ * 代码发布（git push）不会覆盖；仅在该租户尚无任何行时才会写入两份赠送模板。
+ */
 async function loadRemoteForms() {
-  const admin = getSupabaseAdmin();
-  if (!isSupabaseConfigured() || !admin) {
+  if (!hasTenantDbAccess()) {
     return loadLocalForms();
   }
 
-  const manifestKey = formsManifestImageName();
-  const { data, error } = await admin.from("training_examples").select("data").eq("image_name", manifestKey).single();
+  const current = await fetchRemoteFormsRows();
+  if (current.length > 0) {
+    return current;
+  }
 
-  if (error || !data) {
-    if (tenantActive()) {
-      const starter = normalizeForms(buildTenantStarterForms(), { injectBuiltinDefault: false });
-      const { error: seedErr } = await admin.from("training_examples").upsert(
-        {
-          image_name: manifestKey,
-          data: { forms: starter },
-        },
-        { onConflict: "image_name" },
-      );
-      if (seedErr) {
-        throw new Error(`Failed to seed forms manifest: ${seedErr.message}`);
-      }
-      await seedStarterTableAndRules(starter);
-      return starter;
-    }
+  if (!tenantActive()) {
     return normalizeForms([createDefaultFormDefinition()]);
   }
 
-  const row = data.data as { forms?: unknown };
-  return normalizeForms(row.forms, { injectBuiltinDefault: !tenantActive() });
+  const starter = normalizeForms(buildTenantStarterForms(), { injectBuiltinDefault: false });
+  const restored = await maybeRestoreLegacyFormsIntoTenant(starter);
+  if (restored) {
+    return restored;
+  }
+  await persistRemoteForms(starter);
+  await seedStarterTableAndRules(starter);
+  return starter;
 }
 
+/** 写回时直接写租户表，不再依赖单行 manifest blob；缺失项会被安全删除，不会碰到其他用户数据。 */
 async function saveRemoteForms(forms: FormDefinition[]) {
-  const admin = getSupabaseAdmin();
-  if (!isSupabaseConfigured() || !admin) {
+  if (!hasTenantDbAccess()) {
     saveLocalForms(forms);
     return normalizeForms(forms);
   }
 
-  const normalized = normalizeForms(forms, { injectBuiltinDefault: !tenantActive() });
-  const { error } = await admin
-    .from("training_examples")
-    .upsert(
-      {
-        image_name: formsManifestImageName(),
-        data: {
-          forms: normalized,
-        },
-      },
-      { onConflict: "image_name" },
-    );
-
-  if (error) {
-    throw new Error(`Failed to save forms manifest: ${error.message}`);
-  }
-
-  return normalized;
+  return await persistRemoteForms(forms);
 }
 
 export async function loadForms() {
-  return isSupabaseConfigured() ? loadRemoteForms() : loadLocalForms();
+  return hasTenantDbAccess() ? loadRemoteForms() : loadLocalForms();
 }
 
 export async function saveForms(forms: FormDefinition[]) {
-  return isSupabaseConfigured() ? saveRemoteForms(forms) : saveLocalForms(forms);
+  return hasTenantDbAccess() ? saveRemoteForms(forms) : saveLocalForms(forms);
 }
 
 export async function getFormById(formId: string) {
@@ -306,6 +438,8 @@ export async function cloneFormSpace(sourceFormId: string, targetFormId: string)
       copiedImages.add(asset.imageName);
     }
   }
+
+  await cloneFormFilePools(sourceFormId, targetFormId);
 }
 
 export async function duplicateForm(sourceFormId: string) {

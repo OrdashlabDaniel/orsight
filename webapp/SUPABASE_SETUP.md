@@ -1,7 +1,7 @@
 # Supabase 搭建指南（OrSight / webapp）
 
-本应用用 Supabase 做三件事：**登录（Auth）**、**训练元数据（Postgres）**、**训练图片（Storage）**。  
-业务上的「抽查表格」数据主要在浏览器里处理，**默认不落库**；云端持久化的是 **训练池**。
+本应用用 Supabase 做三件事：**登录（Auth）**、**用户/填表数据（Postgres）**、**训练图片与模板原件（Storage）**。  
+发布版的核心业务数据会落到带 `owner_id + form_id` 的租户表，并配合 RLS 与私有桶策略强制隔离。
 
 ---
 
@@ -39,26 +39,31 @@ SUPABASE_SERVICE_ROLE_KEY=你的_service_role_密钥
 
 ---
 
-## 三、数据库 + Storage（训练池）
+## 三、数据库 + Storage（发布版租户隔离）
 
-应用代码约定：
+应用代码约定（发布版）：
 
-- **表名**：`public.training_examples`  
-  - `image_name`（主键，与图片文件名一致）  
-  - `data`（`jsonb`，整份训练样本 JSON）  
-  - `updated_at`（可选维护字段）
-- **Storage 桶名**：`training-images`（私有桶，服务端用 Service Role 上传/下载）
+- **核心表**：
+  - `public.app_forms`
+  - `public.app_form_configs`
+  - `public.app_form_training_examples`
+  - `public.app_form_files`
+- **兼容旧数据的 legacy 表**：`public.training_examples`
+- **Storage 桶**：
+  - `training-images`（训练图片 / Agent 上下文图片）
+  - `form-files`（模板文件、训练原件、Excel/PDF/文档）
 
 ### 操作步骤
 
 1. Supabase 控制台 → **SQL Editor** → **New query**。
-2. 打开本仓库文件 **`webapp/supabase/schema.sql`**，**全选复制**到编辑器。
-3. 点击 **Run**（成功即可，可重复执行：使用了 `if not exists` / `on conflict`）。
+2. 新环境：打开 **`webapp/supabase/schema.sql`**，**全选复制**到编辑器后执行。
+3. 已有环境升级到发布版：再执行 **`webapp/supabase/migrations/20260417_release_tenant_isolation.sql`**。
+4. 点击 **Run**（以上 SQL 都可重复执行：使用了 `if not exists` / `on conflict` / `drop policy if exists`）。
 
 ### 可选自检
 
-- **Table Editor**：应能看到表 `training_examples`。
-- **Storage**：应能看到桶 **`training-images`**（Private）。
+- **Table Editor**：应能看到表 `app_forms`、`app_form_configs`、`app_form_training_examples`、`app_form_files`。
+- **Storage**：应能看到桶 **`training-images`** 与 **`form-files`**（都为 Private）。
 
 未配置或表/桶不存在时，应用会**自动退回本地文件**训练池（不影响主流程试跑）；配置正确后，训练数据会读写 Supabase。
 
@@ -69,15 +74,15 @@ SUPABASE_SERVICE_ROLE_KEY=你的_service_role_密钥
 1. **`SUPABASE_SERVICE_ROLE_KEY` 仅放在服务端环境变量**（如 Vercel 仅 Server，不要 `NEXT_PUBLIC_`）。
 2. **不要把 `service_role` 写进浏览器或 Git。**
 3. 生产环境在 Supabase 把 **Site URL**、**Redirect URLs** 改成你的正式域名。
-4. 若团队扩大，可再为 `training_examples` / `storage.objects` 增加基于 `auth.uid()` 的 RLS 策略；当前设计是 **仅 Next 服务端用 Service Role 访问**，与现有 API 一致。
+4. 发布版已为 `app_*` 表和 `storage.objects` 加了基于 `auth.uid()` 的 RLS / Storage policy；普通用户请求应优先走用户会话，不要再把业务数据读写建立在 service role 上。
 
 ---
 
 ## 五、完成后自测清单
 
 - [ ] 本地能注册/登录（非假登录）
-- [ ] 工作台「训练池」相关操作无报错（保存标注后刷新仍在）
-- [ ] Supabase **Table Editor** 中 `training_examples` 有新增行（保存过训练样本后）
-- [ ] **Storage → training-images** 中有对应图片文件（若本地上传了训练图）
+- [ ] 工作台「训练池 / 模板文件池 / 填表列表」相关操作无报错
+- [ ] Supabase **Table Editor** 中 `app_forms` / `app_form_configs` / `app_form_training_examples` / `app_form_files` 有对应数据
+- [ ] **Storage → training-images** 与 **Storage → form-files** 中有对应对象
 
 更详细的登录说明见 **`AUTH.md`**。

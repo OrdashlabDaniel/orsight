@@ -1,14 +1,19 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 
-import type { User } from "@supabase/supabase-js";
+import type { SupabaseClient, User } from "@supabase/supabase-js";
 
-import { getAuthUserOrSkip } from "@/lib/auth-server";
+import { getAuthContextOrSkip } from "@/lib/auth-server";
 import { isSupabaseConfigured } from "@/lib/supabase";
 
 const storageTenantAls = new AsyncLocalStorage<string | null>();
+const storageSupabaseAls = new AsyncLocalStorage<SupabaseClient | null>();
 
 export function getStorageTenantId(): string | null {
   return storageTenantAls.getStore() ?? null;
+}
+
+export function getStorageSupabaseClient(): SupabaseClient | null {
+  return storageSupabaseAls.getStore() ?? null;
 }
 
 /** 已登录且使用 Supabase 时，对 training_examples 与 training-images 做租户隔离。 */
@@ -66,7 +71,7 @@ export function scopeTrainingBucketPath(relPath: string): string {
 }
 
 export async function resolveStorageTenantId(): Promise<string | null> {
-  const { user, skipAuth } = await getAuthUserOrSkip();
+  const { user, skipAuth } = await getAuthContextOrSkip();
   if (skipAuth || !user) {
     return null;
   }
@@ -85,7 +90,15 @@ export type AuthedStorageTenantContext = {
 export async function withAuthedStorageTenant(
   handler: (ctx: AuthedStorageTenantContext) => Promise<Response>,
 ): Promise<Response> {
-  const { user, skipAuth } = await getAuthUserOrSkip();
+  return await runWithResolvedStorageContext(handler);
+}
+
+export async function runWithResolvedStorageContext<T>(
+  callback: (ctx: AuthedStorageTenantContext) => Promise<T>,
+): Promise<T> {
+  const { user, skipAuth, supabase } = await getAuthContextOrSkip();
   const tenantId = skipAuth || !user ? null : user.id;
-  return await runWithStorageTenant(tenantId, async () => handler({ user, skipAuth }));
+  return await runWithStorageTenant(tenantId, async () =>
+    storageSupabaseAls.run(supabase, async () => callback({ user, skipAuth })),
+  );
 }

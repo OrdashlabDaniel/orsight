@@ -1,8 +1,11 @@
 import { DEFAULT_TABLE_FIELDS, type TableFieldDefinition, type TableFieldType } from "@/lib/table-fields";
 
 export const DEFAULT_FORM_ID = "form-1";
-/** 新租户首页预置的第二个适用模板（与 {@link DEFAULT_FORM_ID} 同为最早一批）。 */
+/** 新租户注册后赠送的第二份体验模板（固定 id，便于与 {@link DEFAULT_FORM_ID} 一起做列默认值与一次性历史合并）。 */
 export const STARTER_FORM_2_ID = "form-starter-2";
+
+/** 注册即赠送的两份模板填表 id（仅元数据种子；用户自建填表使用其它 id）。 */
+export const GIFT_TEMPLATE_FORM_IDS = [DEFAULT_FORM_ID, STARTER_FORM_2_ID] as const;
 export const FORMS_MANIFEST_KEY = "__forms_manifest__";
 export const FORM_META_PREFIX = "__form_meta__:";
 export const FORM_EXAMPLE_PREFIX = "__form_example__:";
@@ -82,8 +85,8 @@ export function createSecondStarterFormDefinition(): FormDefinition {
   const now = Date.now();
   return {
     id: STARTER_FORM_2_ID,
-    name: "派送与签收表",
-    description: "适用模板：可直接使用或按需调整列与训练样本。",
+    name: "财务支出记录",
+    description: "已完成配置，可直接进入填表模式。",
     status: "ready",
     ready: true,
     createdAt: now + 1,
@@ -92,6 +95,49 @@ export function createSecondStarterFormDefinition(): FormDefinition {
     templateSource: "copied",
     sourceFormId: null,
   };
+}
+
+/** 历史版本第二份预置表（仅用于判断「仍是出厂占位」以便一次性 legacy 合并）。 */
+const LEGACY_SECOND_STARTER_NAME = "派送与签收表";
+const LEGACY_SECOND_STARTER_DESCRIPTION = "适用模板：可直接使用或按需调整列与训练样本。";
+
+function giftStubMetaEquals(
+  a: Pick<FormDefinition, "name" | "description" | "status" | "ready" | "templateSource" | "sourceFormId">,
+  b: FormDefinition,
+) {
+  return (
+    a.name === b.name &&
+    a.description === b.description &&
+    a.status === b.status &&
+    a.ready === b.ready &&
+    a.templateSource === b.templateSource &&
+    a.sourceFormId === b.sourceFormId
+  );
+}
+
+/**
+ * 是否为「从未被用户改过元数据」的赠送模板占位（不含时间戳）。
+ * Git 部署不会据此改写数据库；仅 {@link mergeLegacyForms} 等一次性合并用来避免用旧清单覆盖用户已改的模板。
+ */
+export function isUnmodifiedTenantGiftStub(form: FormDefinition): boolean {
+  if (form.templateSource !== "copied" || form.sourceFormId != null) {
+    return false;
+  }
+  if (form.id === DEFAULT_FORM_ID) {
+    return giftStubMetaEquals(createDefaultFormDefinition(), form);
+  }
+  if (form.id === STARTER_FORM_2_ID) {
+    if (giftStubMetaEquals(createSecondStarterFormDefinition(), form)) {
+      return true;
+    }
+    return (
+      form.name === LEGACY_SECOND_STARTER_NAME &&
+      form.description === LEGACY_SECOND_STARTER_DESCRIPTION &&
+      form.status === "ready" &&
+      form.ready === true
+    );
+  }
+  return false;
 }
 
 export function buildTenantStarterForms(): FormDefinition[] {
@@ -130,7 +176,7 @@ export function normalizeForms(raw: unknown, options?: NormalizeFormsOptions): F
             : id === DEFAULT_FORM_ID
               ? "抽擦路线表"
               : id === STARTER_FORM_2_ID
-                ? "派送与签收表"
+                ? "财务支出记录"
                 : "未命名填表",
         description:
           typeof record.description === "string"

@@ -1,4 +1,4 @@
-import type { User } from "@supabase/supabase-js";
+import type { SupabaseClient, User } from "@supabase/supabase-js";
 import { cookies } from "next/headers";
 
 import {
@@ -23,11 +23,13 @@ async function getDevMockAuthUser(): Promise<User | null> {
   return createDevMockUser(username);
 }
 
-/** 未启用 Supabase 登录时跳过校验（本地纯离线） */
-export async function getAuthUserOrSkip(): Promise<{ user: User | null; skipAuth: boolean }> {
-  /** 与中间件一致：默认要登录；仅当显式关闭 REQUIRE_LOGIN 且未启用 Supabase 时跳过 */
+export async function getAuthContextOrSkip(): Promise<{
+  user: User | null;
+  skipAuth: boolean;
+  supabase: SupabaseClient | null;
+}> {
   if (!isLoginStrictlyRequired() && !isSupabaseAuthEnabled()) {
-    return { user: null, skipAuth: true };
+    return { user: null, skipAuth: true, supabase: null };
   }
 
   if (isSupabaseAuthEnabled()) {
@@ -35,13 +37,19 @@ export async function getAuthUserOrSkip(): Promise<{ user: User | null; skipAuth
     const {
       data: { user },
     } = await supabase.auth.getUser();
-    return { user, skipAuth: false };
+    return { user, skipAuth: false, supabase };
   }
 
   if (isDevMockLoginEnabled()) {
     const user = await getDevMockAuthUser();
-    return { user, skipAuth: false };
+    return { user, skipAuth: false, supabase: null };
   }
 
-  return { user: null, skipAuth: false };
+  return { user: null, skipAuth: false, supabase: null };
+}
+
+/** 未启用 Supabase 登录时跳过校验（本地纯离线） */
+export async function getAuthUserOrSkip(): Promise<{ user: User | null; skipAuth: boolean }> {
+  const { user, skipAuth } = await getAuthContextOrSkip();
+  return { user, skipAuth };
 }

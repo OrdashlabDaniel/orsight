@@ -23,6 +23,6 @@ as $$
 $$;
 
 revoke all on function public.list_registered_users() from public;
--- We will call via service role on the server, but granting to anon/authenticated is harmless for localhost.
-grant execute on function public.list_registered_users() to anon, authenticated, service_role;
+revoke execute on function public.list_registered_users() from anon, authenticated;
+grant execute on function public.list_registered_users() to service_role;
 

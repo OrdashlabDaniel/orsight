@@ -1,28 +1,13 @@
--- OrSight / webapp — Supabase 数据库与 Storage 初始化
--- 在 Supabase 控制台 → SQL Editor → New query → 粘贴全文 → Run
+-- OrSight release hardening:
+-- 1) move user/form data to tenant-owned relational tables
+-- 2) enable authenticated RLS for per-user rows
+-- 3) split raw document/template files into a dedicated bucket
+-- 4) tighten storage object access and privileged RPC exposure
+
+create extension if not exists pgcrypto;
 
 -- ---------------------------------------------------------------------------
--- 1. 训练样本元数据（与代码中 training_examples 表一致）
--- ---------------------------------------------------------------------------
-create table if not exists public.training_examples (
-  image_name text primary key,
-  data jsonb not null,
-  updated_at timestamptz not null default now()
-);
-
-comment on table public.training_examples is 'POD 训练池：每张图的标注与结构化输出，整包存在 data 里';
-comment on column public.training_examples.image_name is '与 Storage 中文件名一致，用于 upsert 去重';
-comment on column public.training_examples.data is 'TrainingExample JSON（含 output、boxes 等）';
-
-create index if not exists training_examples_updated_at_idx
-  on public.training_examples (updated_at desc);
-
-alter table public.training_examples enable row level security;
-
--- 不添加 anon/authenticated 策略：禁止浏览器直连表；仅服务端用 Service Role 访问（绕过 RLS）。
-
--- ---------------------------------------------------------------------------
--- 2. Storage：训练图片桶（与代码中 bucket 名 training-images 一致）
+-- 1. Buckets
 -- ---------------------------------------------------------------------------
 insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
 values (
@@ -73,10 +58,8 @@ on conflict (id) do update set
   allowed_mime_types = excluded.allowed_mime_types;
 
 -- ---------------------------------------------------------------------------
--- 3. 发布版租户隔离表（owner_id + form_id）
+-- 2. Tenant-owned tables
 -- ---------------------------------------------------------------------------
-create extension if not exists pgcrypto;
-
 create table if not exists public.app_forms (
   owner_id uuid not null references auth.users(id) on delete cascade,
   form_id text not null,
@@ -134,6 +117,15 @@ create table if not exists public.app_form_files (
   foreign key (owner_id, form_id) references public.app_forms(owner_id, form_id) on delete cascade
 );
 
+create index if not exists app_forms_owner_updated_idx
+  on public.app_forms (owner_id, updated_at desc);
+
+create index if not exists app_form_training_examples_owner_form_idx
+  on public.app_form_training_examples (owner_id, form_id);
+
+create index if not exists app_form_files_owner_form_pool_idx
+  on public.app_form_files (owner_id, form_id, pool, uploaded_at desc);
+
 grant select, insert, update, delete on public.app_forms to authenticated;
 grant select, insert, update, delete on public.app_form_configs to authenticated;
 grant select, insert, update, delete on public.app_form_training_examples to authenticated;
@@ -176,6 +168,15 @@ to authenticated
 using (auth.uid() = owner_id)
 with check (auth.uid() = owner_id);
 
+comment on table public.app_forms is 'Per-user form metadata. Release-safe replacement for the forms manifest blob.';
+comment on table public.app_form_configs is 'Per-user/per-form instructions, rules, table field config, and agent thread.';
+comment on table public.app_form_training_examples is 'Per-user/per-form labeled training annotations.';
+comment on table public.app_form_files is 'Per-user/per-form raw training/template file metadata.';
+
+-- ---------------------------------------------------------------------------
+-- 3. Storage object policies
+-- Path convention: tnt_<auth.uid()>/...
+-- ---------------------------------------------------------------------------
 drop policy if exists "training_images_tenant_select" on storage.objects;
 create policy "training_images_tenant_select"
 on storage.objects
@@ -264,4 +265,8 @@ using (
   and (storage.foldername(name))[1] = ('tnt_' || auth.uid()::text)
 );
 
--- Storage 不再默认依赖全局 Service Role。发布版 API 会优先使用用户会话 + RLS/Storage policy 访问自己的数据。
+-- ---------------------------------------------------------------------------
+-- 4. Tighten privileged RPC exposure
+-- ---------------------------------------------------------------------------
+revoke execute on function public.list_registered_users() from anon, authenticated;
+grant execute on function public.list_registered_users() to service_role;

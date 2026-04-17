@@ -32,7 +32,17 @@ function isPlaceholderSupabaseEnv(url: string, key: string): boolean {
 /** 训练池等服务端写存储：需要 URL +（优先 service role，否则 anon） */
 export const isSupabaseConfigured = () => {
   const url = supabaseUrl();
-  const key = serviceKey() || anonKey();
+  const key = anonKey() || serviceKey();
+  if (!/^https?:\/\//.test(url) || !key) {
+    return false;
+  }
+  return !isPlaceholderSupabaseEnv(url, key);
+};
+
+/** 服务端全权限能力：仅限后台/迁移/计费等受控用途。 */
+export const isSupabaseServiceRoleConfigured = () => {
+  const url = supabaseUrl();
+  const key = serviceKey();
   if (!/^https?:\/\//.test(url) || !key) {
     return false;
   }
@@ -65,12 +75,12 @@ let adminClient: SupabaseClient | null = null;
 
 /** 服务端 API 用：访问 Storage / 表（本地未配 Supabase 时返回 null） */
 export function getSupabaseAdmin(): SupabaseClient | null {
-  if (!isSupabaseConfigured()) {
+  if (!isSupabaseServiceRoleConfigured()) {
     return null;
   }
   if (!adminClient) {
     const url = supabaseUrl();
-    const key = serviceKey() || anonKey();
+    const key = serviceKey();
     adminClient = createClient(url, key);
   }
   return adminClient;

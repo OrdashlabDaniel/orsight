@@ -37,7 +37,7 @@ NEXT_PUBLIC_DEV_MOCK_LOGIN=true
 
 1. **`NEXT_PUBLIC_SUPABASE_URL`**：必须是 `https://xxxx.supabase.co` 这种地址（复制 Supabase 控制台里的 Project URL）。
 2. **`NEXT_PUBLIC_SUPABASE_ANON_KEY`**：anon public 密钥。
-3. **`SUPABASE_SERVICE_ROLE_KEY`**：service_role（仅服务端；训练池写 Postgres/Storage 需要，见 **`SUPABASE_SETUP.md`**）。
+3. **`SUPABASE_SERVICE_ROLE_KEY`**：service_role（仅服务端；用于后台/兼容迁移/计量日志等受控能力，见 **`SUPABASE_SETUP.md`**）。
 4. **Authentication → Providers → Email**：关闭 **Confirm email**（无需邮箱验证）。
 5. **Authentication → URL**：Site URL = `http://localhost:3000`；Redirect URLs 增加 `http://localhost:3000/auth/callback`。
 6. **管理员子域入口（可选）**：在用户端 `.env.local` / 生产环境设置 `NEXT_PUBLIC_ADMIN_APP_URL`（无末尾斜杠），例如本地 `http://localhost:3002`、生产 `https://admin.你的域名.com`。登录页会显示「进入管理员登录」。管理员站部署与 Supabase Redirect 说明见 **`admin-webapp/README.md`**。
@@ -46,7 +46,7 @@ NEXT_PUBLIC_DEV_MOCK_LOGIN=true
 
 ## 数据库与训练池
 
-登录只依赖 URL + anon；**训练样本云端持久化**需要执行 SQL 创建表与 Storage 桶，请按 **`SUPABASE_SETUP.md`** 操作（可复制 **`supabase/schema.sql`**）。
+登录只依赖 URL + anon；发布版的**用户表单、训练样本、模板文件**云端持久化需要执行 **`supabase/schema.sql`**，老环境升级还要执行 **`supabase/migrations/20260417_release_tenant_isolation.sql`**。请按 **`SUPABASE_SETUP.md`** 操作。
 
 ## 用户名登录
 

@@ -1,12 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { DEFAULT_FORM_ID, STARTER_FORM_2_ID, getFormGlobalRulesStorageKey, normalizeFormId } from "@/lib/forms";
-import { scopeTrainingExamplesImageName } from "@/lib/storage-tenant";
-import { getSupabaseAdmin, isSupabaseConfigured } from "@/lib/supabase";
+import { DEFAULT_FORM_ID, STARTER_FORM_2_ID, normalizeFormId } from "@/lib/forms";
+import { loadRemoteFormConfig, saveRemoteFormConfig } from "@/lib/form-config-db";
+import { hasTenantDbAccess } from "@/lib/tenant-db";
 import { DEFAULT_TABLE_FIELDS, normalizeTableFields, type TableFieldDefinition } from "@/lib/table-fields";
-
-const GLOBAL_RULES_KEY = "__global_rules__";
 
 function localFieldConfigCandidatePaths(formId = DEFAULT_FORM_ID) {
   if (normalizeFormId(formId) !== DEFAULT_FORM_ID) {
@@ -62,27 +60,16 @@ function saveLocalTableFields(fields: TableFieldDefinition[], formId = DEFAULT_F
 
 export async function loadTableFields(formId = DEFAULT_FORM_ID): Promise<TableFieldDefinition[]> {
   const normalizedFormId = normalizeFormId(formId);
-  const storageKey = scopeTrainingExamplesImageName(
-    normalizedFormId === DEFAULT_FORM_ID ? GLOBAL_RULES_KEY : getFormGlobalRulesStorageKey(normalizedFormId),
-  );
-  const admin = getSupabaseAdmin();
-  if (!isSupabaseConfigured() || !admin) {
+  if (!hasTenantDbAccess()) {
     return loadLocalTableFields(normalizedFormId);
   }
 
   try {
-    const { data, error } = await admin
-      .from("training_examples")
-      .select("data")
-      .eq("image_name", storageKey)
-      .single();
-
-    if (error || !data) {
+    const config = await loadRemoteFormConfig(normalizedFormId);
+    if (!config) {
       return shouldUseBlankFieldConfig(normalizedFormId) ? [] : cloneDefaultTableFields();
     }
-
-    const row = data.data as { tableFields?: unknown };
-    return normalizeTableFields(row.tableFields, {
+    return normalizeTableFields(config.tableFields, {
       preserveEmpty: shouldUseBlankFieldConfig(normalizedFormId),
       appendMissingBuiltIns: !shouldUseBlankFieldConfig(normalizedFormId),
     });
@@ -98,39 +85,11 @@ export async function saveTableFields(fields: TableFieldDefinition[], formId = D
     preserveEmpty: blankFieldConfig,
     appendMissingBuiltIns: !blankFieldConfig,
   });
-  const storageKey = scopeTrainingExamplesImageName(
-    normalizedFormId === DEFAULT_FORM_ID ? GLOBAL_RULES_KEY : getFormGlobalRulesStorageKey(normalizedFormId),
-  );
-  const admin = getSupabaseAdmin();
-  if (!isSupabaseConfigured() || !admin) {
+  if (!hasTenantDbAccess()) {
     saveLocalTableFields(normalized, normalizedFormId);
     return normalized;
   }
 
-  const { data } = await admin
-    .from("training_examples")
-    .select("data")
-    .eq("image_name", storageKey)
-    .single();
-
-  const current = data?.data && typeof data.data === "object" ? (data.data as Record<string, unknown>) : {};
-
-  const { error } = await admin
-    .from("training_examples")
-    .upsert(
-      {
-        image_name: storageKey,
-        data: {
-          ...current,
-          tableFields: normalized,
-        },
-      },
-      { onConflict: "image_name" },
-    );
-
-  if (error) {
-    throw new Error(`Failed to save table fields: ${error.message}`);
-  }
-
+  await saveRemoteFormConfig({ tableFields: normalized }, normalizedFormId);
   return normalized;
 }
