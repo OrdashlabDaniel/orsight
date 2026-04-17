@@ -16,6 +16,7 @@ export async function updateSession(request: NextRequest) {
   const pathname = request.nextUrl.pathname;
   const isLogin = pathname === "/login";
   const isAuthCallback = pathname.startsWith("/auth/callback");
+  const isPublicLegal = pathname === "/privacy" || pathname === "/terms";
 
   /**
    * 开发环境假登录：不配 Supabase 也可测登录页与会话。
@@ -34,7 +35,7 @@ export async function updateSession(request: NextRequest) {
       url.search = "";
       return NextResponse.redirect(url);
     }
-    if (!mockUser && !isLogin && !isAuthCallback) {
+    if (!mockUser && !isLogin && !isAuthCallback && !isPublicLegal) {
       const url = request.nextUrl.clone();
       url.pathname = "/login";
       url.searchParams.delete("reason");
@@ -49,7 +50,7 @@ export async function updateSession(request: NextRequest) {
 
   /** 要求登录但未配置 Supabase → 只能进登录页看说明 */
   if (isLoginStrictlyRequired() && !isSupabaseAuthEnabled()) {
-    if (!isLogin && !isAuthCallback) {
+    if (!isLogin && !isAuthCallback && !isPublicLegal) {
       const url = request.nextUrl.clone();
       url.pathname = "/login";
       url.searchParams.set("reason", "config");
@@ -87,7 +88,7 @@ export async function updateSession(request: NextRequest) {
     data: { user },
   } = await supabase.auth.getUser();
 
-  if (!user && !isLogin && !isAuthCallback) {
+  if (!user && !isLogin && !isAuthCallback && !isPublicLegal) {
     const url = request.nextUrl.clone();
     url.pathname = "/login";
     url.searchParams.set("next", pathname);
