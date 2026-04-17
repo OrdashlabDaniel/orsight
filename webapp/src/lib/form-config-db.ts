@@ -1,5 +1,10 @@
 import { DEFAULT_FORM_ID, getFormGlobalRulesStorageKey, normalizeFormId } from "@/lib/forms";
 import { scopeTrainingExamplesImageName, tenantActive } from "@/lib/storage-tenant";
+import {
+  isMissingSupabaseTableError,
+  isSupabaseTableMarkedUnavailable,
+  markSupabaseTableUnavailable,
+} from "@/lib/supabase-compat";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { hasTenantDbAccess, requireTenantDbAccess } from "@/lib/tenant-db";
 
@@ -63,6 +68,9 @@ function buildRemoteFormConfigRow(ownerId: string, formId: string, config: Store
 }
 
 async function loadRemoteFormConfigFromTable(formId = DEFAULT_FORM_ID): Promise<StoredFormConfig | null> {
+  if (isSupabaseTableMarkedUnavailable(FORM_CONFIGS_TABLE)) {
+    return null;
+  }
   const normalizedFormId = normalizeFormId(formId);
   const { ownerId, client } = requireTenantDbAccess();
   const { data, error } = await client
@@ -72,13 +80,23 @@ async function loadRemoteFormConfigFromTable(formId = DEFAULT_FORM_ID): Promise<
     .eq("form_id", normalizedFormId)
     .maybeSingle();
 
-  if (error || !data) {
+  if (error) {
+    if (isMissingSupabaseTableError(error, FORM_CONFIGS_TABLE)) {
+      markSupabaseTableUnavailable(FORM_CONFIGS_TABLE);
+      return null;
+    }
+    return null;
+  }
+  if (!data) {
     return null;
   }
   return mapRemoteFormConfigRow(data as RemoteFormConfigRow);
 }
 
 async function upsertRemoteFormConfigRaw(config: StoredFormConfig, formId = DEFAULT_FORM_ID) {
+  if (isSupabaseTableMarkedUnavailable(FORM_CONFIGS_TABLE)) {
+    return false;
+  }
   const normalizedFormId = normalizeFormId(formId);
   const { ownerId, client } = requireTenantDbAccess();
   const { error } = await client
@@ -86,8 +104,13 @@ async function upsertRemoteFormConfigRaw(config: StoredFormConfig, formId = DEFA
     .upsert(buildRemoteFormConfigRow(ownerId, normalizedFormId, config), { onConflict: "owner_id,form_id" });
 
   if (error) {
+    if (isMissingSupabaseTableError(error, FORM_CONFIGS_TABLE)) {
+      markSupabaseTableUnavailable(FORM_CONFIGS_TABLE);
+      return false;
+    }
     throw new Error(`Failed to save form config: ${error.message}`);
   }
+  return true;
 }
 
 async function loadLegacyFormConfig(formId: string): Promise<StoredFormConfig | null> {
@@ -124,6 +147,29 @@ async function loadLegacyFormConfig(formId: string): Promise<StoredFormConfig | 
     workingRules: typeof legacy.workingRules === "string" ? legacy.workingRules : "",
     tableFields: legacy.tableFields,
   });
+}
+
+async function saveLegacyFormConfig(config: StoredFormConfig, formId = DEFAULT_FORM_ID) {
+  const admin = getSupabaseAdmin();
+  if (!admin) {
+    return;
+  }
+  const normalizedFormId = normalizeFormId(formId);
+  const storageKey = scopeTrainingExamplesImageName(
+    normalizedFormId === DEFAULT_FORM_ID ? GLOBAL_RULES_KEY : getFormGlobalRulesStorageKey(normalizedFormId),
+  );
+  const { error } = await admin
+    .from("training_examples")
+    .upsert(
+      {
+        image_name: storageKey,
+        data: config,
+      },
+      { onConflict: "image_name" },
+    );
+  if (error) {
+    throw new Error(`Failed to save legacy form config: ${error.message}`);
+  }
 }
 
 export async function loadRemoteFormConfig(formId = DEFAULT_FORM_ID): Promise<StoredFormConfig | null> {
@@ -165,6 +211,9 @@ export async function saveRemoteFormConfig(
     tableFields: Object.prototype.hasOwnProperty.call(patch, "tableFields") ? patch.tableFields : current.tableFields,
   });
 
-  await upsertRemoteFormConfigRaw(next, normalizedFormId);
+  const savedToTable = await upsertRemoteFormConfigRaw(next, normalizedFormId);
+  if (!savedToTable) {
+    await saveLegacyFormConfig(next, normalizedFormId);
+  }
   return next;
 }

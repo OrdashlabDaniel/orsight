@@ -188,6 +188,21 @@ export function LoginForm() {
     setMessage("");
     setLoading(true);
     try {
+      const checkRes = await fetch(`/api/auth/google/status?next=${encodeURIComponent(nextPath)}`, {
+        method: "GET",
+      });
+      const check = (await checkRes.json().catch(() => null)) as
+        | { ok?: boolean; reason?: string; message?: string }
+        | null;
+      if (!check?.ok) {
+        if (check?.reason === "provider_disabled") {
+          setMessage(t("login.errGoogleNotEnabled"));
+        } else {
+          setMessage(check?.message || t("login.errGoogleStart"));
+        }
+        return;
+      }
+
       const supabase = createClient();
       const { data, error } = await supabase.auth.signInWithOAuth({
         provider: "google",
@@ -200,7 +215,7 @@ export function LoginForm() {
         if (raw.includes("provider is not enabled") || raw.includes("unsupported provider")) {
           setMessage(t("login.errGoogleNotEnabled"));
         } else {
-          setMessage(error.message);
+          setMessage(error.message || t("login.errGoogleStart"));
         }
         return;
       }

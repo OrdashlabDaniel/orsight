@@ -232,6 +232,7 @@ export const en = {
     adminLoginEntry: "Admin sign-in",
     googleBtn: "Continue with Google",
     googleHint: "First Google sign-in creates your account in Supabase Auth automatically.",
+    errGoogleStart: "Unable to start Google sign-in. Please try again.",
     errGoogleNotEnabled:
       "Google sign-in is not enabled: turn on the Google provider under Supabase → Authentication → Providers and add your Google OAuth Client ID/Secret; add this site’s /auth/callback to Redirect URLs. See AUTH.md.",
   },

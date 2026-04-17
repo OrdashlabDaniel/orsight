@@ -233,6 +233,7 @@ export const zh = {
     adminLoginEntry: "进入管理员登录",
     googleBtn: "使用 Google 登录",
     googleHint: "首次用 Google 登录即自动注册（写入 Supabase Auth 用户表）。",
+    errGoogleStart: "无法发起 Google 登录，请稍后重试。",
     errGoogleNotEnabled:
       "Google 登录未启用：请在 Supabase 控制台 → Authentication → Providers 中打开 Google，并填写 Google Cloud 的 Client ID / Secret；同时在 URL Configuration 的 Redirect URLs 中加入本站 /auth/callback。详见 AUTH.md。",
   },

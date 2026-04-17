@@ -31,6 +31,11 @@ import {
   saveTrainingImageDataUrl,
   upsertTrainingExample,
 } from "@/lib/training";
+import {
+  isMissingSupabaseTableError,
+  isSupabaseTableMarkedUnavailable,
+  markSupabaseTableUnavailable,
+} from "@/lib/supabase-compat";
 import { getSupabaseAdmin } from "@/lib/supabase";
 
 function formsCandidatePaths() {
@@ -156,7 +161,10 @@ async function loadRemoteManifestByKey(imageName: string) {
   return data.data as Record<string, unknown>;
 }
 
-async function fetchRemoteFormsRows(): Promise<FormDefinition[]> {
+async function fetchRemoteFormsRows(): Promise<FormDefinition[] | null> {
+  if (isSupabaseTableMarkedUnavailable(FORMS_TABLE)) {
+    return null;
+  }
   const { ownerId, client } = requireTenantDbAccess();
   const { data, error } = await client
     .from(FORMS_TABLE)
@@ -166,14 +174,24 @@ async function fetchRemoteFormsRows(): Promise<FormDefinition[]> {
     .eq("owner_id", ownerId)
     .order("created_at", { ascending: true });
 
-  if (error || !data) {
+  if (error) {
+    if (isMissingSupabaseTableError(error, FORMS_TABLE)) {
+      markSupabaseTableUnavailable(FORMS_TABLE);
+      return null;
+    }
     throw new Error(`Failed to load forms: ${error?.message || "unknown error"}`);
+  }
+  if (!data) {
+    return [];
   }
 
   return normalizeForms((data as FormRow[]).map((row) => mapFormRow(row)), { injectBuiltinDefault: false });
 }
 
 async function persistRemoteForms(forms: FormDefinition[]) {
+  if (isSupabaseTableMarkedUnavailable(FORMS_TABLE)) {
+    return null;
+  }
   const normalized = normalizeForms(forms, { injectBuiltinDefault: false });
   const { ownerId, client } = requireTenantDbAccess();
   const nextIds = new Set(normalized.map((form) => form.id));
@@ -184,20 +202,108 @@ async function persistRemoteForms(forms: FormDefinition[]) {
       .upsert(normalized.map((form) => buildFormRow(ownerId, form)), { onConflict: "owner_id,form_id" });
 
     if (error) {
+      if (isMissingSupabaseTableError(error, FORMS_TABLE)) {
+        markSupabaseTableUnavailable(FORMS_TABLE);
+        return null;
+      }
       throw new Error(`Failed to save forms: ${error.message}`);
     }
   }
 
   const existing = await fetchRemoteFormsRows();
+  if (existing == null) {
+    return null;
+  }
   const deleteIds = existing.map((form) => form.id).filter((formId) => !nextIds.has(formId));
   for (const formId of deleteIds) {
     const { error } = await client.from(FORMS_TABLE).delete().eq("owner_id", ownerId).eq("form_id", formId);
     if (error) {
+      if (isMissingSupabaseTableError(error, FORMS_TABLE)) {
+        markSupabaseTableUnavailable(FORMS_TABLE);
+        return null;
+      }
       throw new Error(`Failed to delete removed form: ${error.message}`);
     }
   }
 
   return normalized;
+}
+
+async function saveLegacyRemoteForms(
+  forms: FormDefinition[],
+  extraData?: Record<string, unknown> | null,
+): Promise<FormDefinition[]> {
+  const admin = getSupabaseAdmin();
+  if (!admin) {
+    return saveLocalForms(forms);
+  }
+  const normalized = normalizeForms(forms, { injectBuiltinDefault: !tenantActive() });
+  const currentManifest = await loadRemoteManifestByKey(formsManifestImageName());
+  const { error } = await admin.from("training_examples").upsert(
+    {
+      image_name: formsManifestImageName(),
+      data: {
+        ...(currentManifest || {}),
+        ...(extraData || {}),
+        forms: normalized,
+      },
+    },
+    { onConflict: "image_name" },
+  );
+
+  if (error) {
+    throw new Error(`Failed to save legacy forms manifest: ${error.message}`);
+  }
+
+  return normalized;
+}
+
+async function maybeRestoreLegacyFormsIntoLegacyManifest(
+  currentManifestData: Record<string, unknown> | null,
+  currentForms: FormDefinition[],
+) {
+  if (!tenantActive() || typeof currentManifestData?.legacyMigratedAt === "number") {
+    return null;
+  }
+
+  const legacyManifest = await loadRemoteManifestByKey(FORMS_MANIFEST_KEY);
+  if (!legacyManifest) {
+    return null;
+  }
+
+  const legacyForms = normalizeForms(legacyManifest.forms, { injectBuiltinDefault: true });
+  if (legacyForms.length === 0) {
+    return null;
+  }
+
+  const mergedForms = mergeLegacyForms(currentForms, legacyForms);
+  await saveLegacyRemoteForms(mergedForms, {
+    ...(currentManifestData || {}),
+    legacyMigratedAt: Date.now(),
+  });
+  return mergedForms;
+}
+
+async function loadLegacyRemoteForms() {
+  const currentManifest = await loadRemoteManifestByKey(formsManifestImageName());
+  if (currentManifest) {
+    const forms = normalizeForms(currentManifest.forms, { injectBuiltinDefault: !tenantActive() });
+    const restored = await maybeRestoreLegacyFormsIntoLegacyManifest(currentManifest, forms);
+    return restored || forms;
+  }
+
+  if (!tenantActive()) {
+    return normalizeForms([createDefaultFormDefinition()]);
+  }
+
+  const starter = normalizeForms(buildTenantStarterForms(), { injectBuiltinDefault: false });
+  const restored = await maybeRestoreLegacyFormsIntoLegacyManifest(null, starter);
+  if (restored) {
+    return restored;
+  }
+  await saveLegacyRemoteForms(starter);
+  await seedStarterTableAndRules(starter);
+  return starter;
 }
 
 async function maybeRestoreLegacyFormsIntoTenant(currentForms: FormDefinition[]) {
@@ -216,7 +322,10 @@ async function maybeRestoreLegacyFormsIntoTenant(currentForms: FormDefinition[])
   }
 
   const mergedForms = mergeLegacyForms(currentForms, legacyForms);
-  await persistRemoteForms(mergedForms);
+  const persisted = await persistRemoteForms(mergedForms);
+  if (!persisted) {
+    return null;
+  }
   return mergedForms;
 }
 
@@ -247,6 +356,9 @@ async function loadRemoteForms() {
   }
 
   const current = await fetchRemoteFormsRows();
+  if (current == null) {
+    return await loadLegacyRemoteForms();
+  }
   if (current.length > 0) {
     return current;
   }
@@ -260,7 +372,10 @@ async function loadRemoteForms() {
   if (restored) {
     return restored;
   }
-  await persistRemoteForms(starter);
+  const persisted = await persistRemoteForms(starter);
+  if (!persisted) {
+    return await loadLegacyRemoteForms();
+  }
   await seedStarterTableAndRules(starter);
   return starter;
 }
@@ -272,7 +387,11 @@ async function saveRemoteForms(forms: FormDefinition[]) {
     return normalizeForms(forms);
   }
 
-  return await persistRemoteForms(forms);
+  const persisted = await persistRemoteForms(forms);
+  if (persisted) {
+    return persisted;
+  }
+  return await saveLegacyRemoteForms(forms);
 }
 
 export async function loadForms() {

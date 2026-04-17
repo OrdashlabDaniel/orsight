@@ -1,8 +1,17 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { DEFAULT_FORM_ID, normalizeFormId } from "@/lib/forms";
-import { scopeTrainingBucketPath } from "@/lib/storage-tenant";
+import { DEFAULT_FORM_ID, FORM_META_PREFIX, normalizeFormId } from "@/lib/forms";
+import { scopeTrainingBucketPath, scopeTrainingExamplesImageName } from "@/lib/storage-tenant";
+import {
+  isMissingSupabaseBucketError,
+  isMissingSupabaseTableError,
+  isSupabaseBucketMarkedUnavailable,
+  isSupabaseTableMarkedUnavailable,
+  markSupabaseBucketUnavailable,
+  markSupabaseTableUnavailable,
+} from "@/lib/supabase-compat";
+import { getSupabaseAdmin } from "@/lib/supabase";
 import { hasTenantDbAccess, requireTenantDbAccess } from "@/lib/tenant-db";
 
 export const FORM_FILE_POOLS = ["training", "templates"] as const;
@@ -31,6 +40,7 @@ export type FormFilePoolBinary = {
 const FORM_FILE_POOL_ROOT = "form-file-pools";
 const FORM_FILES_BUCKET = "form-files";
 const FORM_FILES_TABLE = "app_form_files";
+const LEGACY_FORM_FILES_BUCKET = "training-images";
 
 function normalizePoolName(value: string | null | undefined): FormFilePoolName | null {
   return value === "training" || value === "templates" ? value : null;
@@ -46,6 +56,10 @@ export function parseFormFilePoolName(value: string | null | undefined): FormFil
 
 function formFilePoolStoragePath(formId: string, pool: FormFilePoolName, storageName: string) {
   return `${FORM_FILE_POOL_ROOT}/${normalizeFormId(formId)}/${pool}/${storageName}`;
+}
+
+function formFilePoolManifestStorageKey(formId: string, pool: FormFilePoolName) {
+  return scopeTrainingExamplesImageName(`${FORM_META_PREFIX}${normalizeFormId(formId)}:file_pool:${pool}`);
 }
 
 type FormFileRow = {
@@ -259,7 +273,69 @@ function saveLocalPoolItems(formId: string, pool: FormFilePoolName, files: FormF
   fs.writeFileSync(filePath, JSON.stringify({ files }, null, 2), "utf8");
 }
 
+async function loadLegacyRemotePoolItems(formId: string, pool: FormFilePoolName): Promise<FormFilePoolItem[]> {
+  const admin = getSupabaseAdmin();
+  if (!admin) {
+    return [];
+  }
+  const { data, error } = await admin
+    .from("training_examples")
+    .select("data")
+    .eq("image_name", formFilePoolManifestStorageKey(formId, pool))
+    .single();
+  if (error || !data?.data || typeof data.data !== "object") {
+    return [];
+  }
+  return normalizePoolItems((data.data as { files?: unknown }).files, pool);
+}
+
+async function saveLegacyRemotePoolItems(formId: string, pool: FormFilePoolName, files: FormFilePoolItem[]) {
+  const admin = getSupabaseAdmin();
+  if (!admin) {
+    saveLocalPoolItems(formId, pool, files);
+    return;
+  }
+  const { error } = await admin.from("training_examples").upsert(
+    {
+      image_name: formFilePoolManifestStorageKey(formId, pool),
+      data: { files },
+    },
+    { onConflict: "image_name" },
+  );
+  if (error) {
+    throw new Error(`Failed to save legacy ${pool} pool manifest: ${error.message}`);
+  }
+}
+
+async function saveLegacyRemotePoolFile(record: FormFilePoolItem, buffer: Buffer, formId: string) {
+  const admin = getSupabaseAdmin();
+  if (!admin) {
+    const dirPath = resolveLocalFileDir(formId, record.pool);
+    fs.mkdirSync(dirPath, { recursive: true });
+    fs.writeFileSync(path.join(dirPath, record.storageName), buffer);
+    const current = loadLocalPoolItems(formId, record.pool);
+    saveLocalPoolItems(formId, record.pool, [record, ...current]);
+    return record;
+  }
+
+  const storagePath = scopeTrainingBucketPath(formFilePoolStoragePath(formId, record.pool, record.storageName));
+  const { error: uploadError } = await admin.storage.from(LEGACY_FORM_FILES_BUCKET).upload(storagePath, buffer, {
+    contentType: record.mimeType,
+    upsert: true,
+  });
+  if (uploadError) {
+    throw new Error(`Failed to upload legacy ${record.pool} pool file: ${uploadError.message}`);
+  }
+
+  const current = await loadLegacyRemotePoolItems(formId, record.pool);
+  await saveLegacyRemotePoolItems(formId, record.pool, [record, ...current]);
+  return record;
+}
+
 async function loadRemotePoolItems(formId: string, pool: FormFilePoolName): Promise<FormFilePoolItem[]> {
+  if (isSupabaseTableMarkedUnavailable(FORM_FILES_TABLE)) {
+    return await loadLegacyRemotePoolItems(formId, pool);
+  }
   const { ownerId, client } = requireTenantDbAccess();
   const { data, error } = await client
     .from(FORM_FILES_TABLE)
@@ -268,7 +344,14 @@ async function loadRemotePoolItems(formId: string, pool: FormFilePoolName): Prom
     .eq("form_id", normalizeFormId(formId))
     .eq("pool", pool)
     .order("uploaded_at", { ascending: false });
-  if (error || !data) {
+  if (error) {
+    if (isMissingSupabaseTableError(error, FORM_FILES_TABLE)) {
+      markSupabaseTableUnavailable(FORM_FILES_TABLE);
+      return await loadLegacyRemotePoolItems(formId, pool);
+    }
+    return [];
+  }
+  if (!data) {
     return [];
   }
   return data.map((row) => mapFormFileRow(row as FormFileRow));
@@ -313,20 +396,39 @@ export async function saveFormFileToPool(
     return record;
   }
 
+  if (isSupabaseTableMarkedUnavailable(FORM_FILES_TABLE) || isSupabaseBucketMarkedUnavailable(FORM_FILES_BUCKET)) {
+    return await saveLegacyRemotePoolFile(record, input.buffer, normalizedFormId);
+  }
+
   const { ownerId, client } = requireTenantDbAccess();
   const storagePath = scopeTrainingBucketPath(formFilePoolStoragePath(normalizedFormId, input.pool, storageName));
-  const { error } = await client.storage.from(FORM_FILES_BUCKET).upload(storagePath, input.buffer, {
+  const admin = getSupabaseAdmin();
+  let uploadResult = await client.storage.from(FORM_FILES_BUCKET).upload(storagePath, input.buffer, {
     contentType: mimeType,
     upsert: true,
   });
-  if (error) {
-    throw new Error(`Failed to upload ${input.pool} pool file: ${error.message}`);
+  if (uploadResult.error && admin && admin !== client && !isSupabaseBucketMarkedUnavailable(FORM_FILES_BUCKET)) {
+    uploadResult = await admin.storage.from(FORM_FILES_BUCKET).upload(storagePath, input.buffer, {
+      contentType: mimeType,
+      upsert: true,
+    });
+  }
+  if (uploadResult.error) {
+    if (isMissingSupabaseBucketError(uploadResult.error, FORM_FILES_BUCKET)) {
+      markSupabaseBucketUnavailable(FORM_FILES_BUCKET);
+      return await saveLegacyRemotePoolFile(record, input.buffer, normalizedFormId);
+    }
+    throw new Error(`Failed to upload ${input.pool} pool file: ${uploadResult.error.message}`);
   }
 
   const { error: rowError } = await client
     .from(FORM_FILES_TABLE)
     .upsert(buildFormFileRow(ownerId, normalizedFormId, record), { onConflict: "owner_id,form_id,id" });
   if (rowError) {
+    if (isMissingSupabaseTableError(rowError, FORM_FILES_TABLE)) {
+      markSupabaseTableUnavailable(FORM_FILES_TABLE);
+      return await saveLegacyRemotePoolFile(record, input.buffer, normalizedFormId);
+    }
     throw new Error(`Failed to save ${input.pool} pool metadata: ${rowError.message}`);
   }
   return record;
@@ -356,9 +458,43 @@ export async function getFormFileFromPool(
     };
   }
 
+  if (isSupabaseTableMarkedUnavailable(FORM_FILES_TABLE)) {
+    const admin = getSupabaseAdmin();
+    if (!admin) {
+      return null;
+    }
+    const storagePath = scopeTrainingBucketPath(formFilePoolStoragePath(normalizedFormId, pool, record.storageName));
+    const { data, error } = await admin.storage.from(LEGACY_FORM_FILES_BUCKET).download(storagePath);
+    if (error || !data) {
+      return null;
+    }
+    return {
+      buffer: Buffer.from(await data.arrayBuffer()),
+      fileName: record.fileName,
+      mimeType: record.mimeType || data.type || inferMimeTypeFromName(record.fileName),
+    };
+  }
+
   const { client } = requireTenantDbAccess();
   const storagePath = scopeTrainingBucketPath(formFilePoolStoragePath(normalizedFormId, pool, record.storageName));
-  const { data, error } = await client.storage.from(FORM_FILES_BUCKET).download(storagePath);
+  const admin = getSupabaseAdmin();
+  let downloadResult = await client.storage.from(FORM_FILES_BUCKET).download(storagePath);
+  if (downloadResult.error && admin && admin !== client && !isSupabaseBucketMarkedUnavailable(FORM_FILES_BUCKET)) {
+    downloadResult = await admin.storage.from(FORM_FILES_BUCKET).download(storagePath);
+  }
+  if (downloadResult.error && isMissingSupabaseBucketError(downloadResult.error, FORM_FILES_BUCKET)) {
+    markSupabaseBucketUnavailable(FORM_FILES_BUCKET);
+    const legacyResult = await admin?.storage.from(LEGACY_FORM_FILES_BUCKET).download(storagePath);
+    if (!legacyResult || legacyResult.error || !legacyResult.data) {
+      return null;
+    }
+    return {
+      buffer: Buffer.from(await legacyResult.data.arrayBuffer()),
+      fileName: record.fileName,
+      mimeType: record.mimeType || legacyResult.data.type || inferMimeTypeFromName(record.fileName),
+    };
+  }
+  const { data, error } = downloadResult;
   if (error || !data) {
     return null;
   }
@@ -390,9 +526,49 @@ export async function deleteFormFileFromPool(pool: FormFilePoolName, fileId: str
     return true;
   }
 
+  if (isSupabaseTableMarkedUnavailable(FORM_FILES_TABLE)) {
+    const admin = getSupabaseAdmin();
+    if (!admin) {
+      return false;
+    }
+    const storagePath = scopeTrainingBucketPath(formFilePoolStoragePath(normalizedFormId, pool, record.storageName));
+    const { error } = await admin.storage.from(LEGACY_FORM_FILES_BUCKET).remove([storagePath]);
+    if (error && !/not[\s-]?found/i.test(error.message || "")) {
+      throw new Error(`Failed to delete legacy ${pool} pool file: ${error.message}`);
+    }
+    await saveLegacyRemotePoolItems(
+      normalizedFormId,
+      pool,
+      files.filter((item) => item.id !== fileId),
+    );
+    return true;
+  }
+
   const { ownerId, client } = requireTenantDbAccess();
   const storagePath = scopeTrainingBucketPath(formFilePoolStoragePath(normalizedFormId, pool, record.storageName));
-  const { error } = await client.storage.from(FORM_FILES_BUCKET).remove([storagePath]);
+  const admin = getSupabaseAdmin();
+  let removeResult = await client.storage.from(FORM_FILES_BUCKET).remove([storagePath]);
+  if (removeResult.error && admin && admin !== client && !isSupabaseBucketMarkedUnavailable(FORM_FILES_BUCKET)) {
+    removeResult = await admin.storage.from(FORM_FILES_BUCKET).remove([storagePath]);
+  }
+  if (removeResult.error && isMissingSupabaseBucketError(removeResult.error, FORM_FILES_BUCKET)) {
+    markSupabaseBucketUnavailable(FORM_FILES_BUCKET);
+    const legacyAdmin = getSupabaseAdmin();
+    if (!legacyAdmin) {
+      throw new Error(`Failed to delete ${pool} pool file: ${removeResult.error.message}`);
+    }
+    const { error: legacyRemoveError } = await legacyAdmin.storage.from(LEGACY_FORM_FILES_BUCKET).remove([storagePath]);
+    if (legacyRemoveError && !/not[\s-]?found/i.test(legacyRemoveError.message || "")) {
+      throw new Error(`Failed to delete legacy ${pool} pool file: ${legacyRemoveError.message}`);
+    }
+    await saveLegacyRemotePoolItems(
+      normalizedFormId,
+      pool,
+      files.filter((item) => item.id !== fileId),
+    );
+    return true;
+  }
+  const { error } = removeResult;
   if (error && !/not[\s-]?found/i.test(error.message || "")) {
     throw new Error(`Failed to delete ${pool} pool file: ${error.message}`);
   }
@@ -403,6 +579,15 @@ export async function deleteFormFileFromPool(pool: FormFilePoolName, fileId: str
     .eq("form_id", normalizedFormId)
     .eq("id", fileId);
   if (deleteError) {
+    if (isMissingSupabaseTableError(deleteError, FORM_FILES_TABLE)) {
+      markSupabaseTableUnavailable(FORM_FILES_TABLE);
+      await saveLegacyRemotePoolItems(
+        normalizedFormId,
+        pool,
+        files.filter((item) => item.id !== fileId),
+      );
+      return true;
+    }
     throw new Error(`Failed to delete ${pool} pool metadata: ${deleteError.message}`);
   }
   return true;
