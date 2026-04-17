@@ -230,6 +230,10 @@ export const en = {
     okRegister: "Signed up. Check your email to verify, then sign in.",
     loading: "Loading…",
     adminLoginEntry: "Admin sign-in",
+    googleBtn: "Continue with Google",
+    googleHint: "First Google sign-in creates your account in Supabase Auth automatically.",
+    errGoogleNotEnabled:
+      "Google sign-in is not enabled: turn on the Google provider under Supabase → Authentication → Providers and add your Google OAuth Client ID/Secret; add this site’s /auth/callback to Redirect URLs. See AUTH.md.",
   },
   account: {
     title: "Account",

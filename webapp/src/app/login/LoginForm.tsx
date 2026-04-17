@@ -189,14 +189,23 @@ export function LoginForm() {
     setLoading(true);
     try {
       const supabase = createClient();
-      const { error } = await supabase.auth.signInWithOAuth({
+      const { data, error } = await supabase.auth.signInWithOAuth({
         provider: "google",
         options: {
           redirectTo: `${window.location.origin}/auth/callback?next=${encodeURIComponent(nextPath)}`,
         },
       });
       if (error) {
-        setMessage(error.message);
+        const raw = error.message.toLowerCase();
+        if (raw.includes("provider is not enabled") || raw.includes("unsupported provider")) {
+          setMessage(t("login.errGoogleNotEnabled"));
+        } else {
+          setMessage(error.message);
+        }
+        return;
+      }
+      if (data.url) {
+        window.location.assign(data.url);
       }
     } finally {
       setLoading(false);
@@ -340,14 +349,17 @@ export function LoginForm() {
           ) : null}
 
           {mode === "login" ? (
-            <button
-              type="button"
-              disabled={loading}
-              onClick={() => void handleGoogleLogin()}
-              className="w-full rounded-xl border border-slate-300 bg-white py-3 text-sm font-medium text-slate-800 hover:bg-slate-50 disabled:opacity-60"
-            >
-              使用 Google 登录
-            </button>
+            <div className="space-y-2">
+              <button
+                type="button"
+                disabled={loading}
+                onClick={() => void handleGoogleLogin()}
+                className="w-full rounded-xl border border-slate-300 bg-white py-3 text-sm font-medium text-slate-800 hover:bg-slate-50 disabled:opacity-60"
+              >
+                {t("login.googleBtn")}
+              </button>
+              <p className="text-center text-xs text-slate-500">{t("login.googleHint")}</p>
+            </div>
           ) : null}
 
           <button

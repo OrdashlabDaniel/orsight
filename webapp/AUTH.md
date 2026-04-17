@@ -40,7 +40,13 @@ NEXT_PUBLIC_DEV_MOCK_LOGIN=true
 3. **`SUPABASE_SERVICE_ROLE_KEY`**：service_role（仅服务端；用于后台/兼容迁移/计量日志等受控能力，见 **`SUPABASE_SETUP.md`**）。
 4. **Authentication → Providers → Email**：关闭 **Confirm email**（无需邮箱验证）。
 5. **Authentication → URL**：Site URL = `http://localhost:3000`；Redirect URLs 增加 `http://localhost:3000/auth/callback`。
-6. **管理员子域入口（可选）**：在用户端 `.env.local` / 生产环境设置 `NEXT_PUBLIC_ADMIN_APP_URL`（无末尾斜杠），例如本地 `http://localhost:3002`、生产 `https://admin.你的域名.com`。登录页会显示「进入管理员登录」。管理员站部署与 Supabase Redirect 说明见 **`admin-webapp/README.md`**。
+6. **Google 登录（可选但推荐生产开启）**  
+   - 若点击「使用 Google 登录」后浏览器出现 JSON：`Unsupported provider: provider is not enabled`，表示 **Supabase 尚未启用 Google 提供商**，与应用代码无关。  
+   - 在 **Authentication → Providers → Google**：打开开关，填写 **Google Cloud Console** 里 OAuth 2.0 客户端的 **Client ID** 与 **Client Secret**（同意屏幕、已授权重定向 URI等按 Google 文档配置）。  
+   - **Redirect URLs** 必须为「你的站点 origin + `/auth/callback`」。例如生产：`https://你的域名/auth/callback`；Vercel 预览：`https://xxx.vercel.app/auth/callback`（每个常用部署 URL 都要加一条，或临时用通配规则若项目允许）。  
+   - **首次 Google 登录成功** 时，Supabase 会在 **`auth.users`** 中 **自动创建该用户**（等同于注册）；业务上的 `app_forms` 等数据在用户首次进入工作台时会按现有逻辑初始化，无需再填密码注册。  
+   - 应用在 **`/auth/callback`** 中会为 OAuth 用户补写 `user_metadata.pod_username`（展示名），与邮箱/用户名体系对齐。
+7. **管理员子域入口（可选）**：在用户端 `.env.local` / 生产环境设置 `NEXT_PUBLIC_ADMIN_APP_URL`（无末尾斜杠），例如本地 `http://localhost:3002`、生产 `https://admin.你的域名.com`。登录页会显示「进入管理员登录」。管理员站部署与 Supabase Redirect 说明见 **`admin-webapp/README.md`**。
 
 改完 `.env.local` 后务必 **重启开发服务器**。
 
