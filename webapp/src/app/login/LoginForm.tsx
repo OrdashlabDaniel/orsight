@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import {
   GOFO_EMPLOYEE_METADATA_KEY,
@@ -22,6 +22,7 @@ export function LoginForm() {
   const searchParams = useSearchParams();
   const nextPath = searchParams.get("next") || "/";
   const configReason = searchParams.get("reason") === "config";
+  const authCode = searchParams.get("code");
 
   const [mode, setMode] = useState<"login" | "register" | "verify">("login");
   const [account, setAccount] = useState("");
@@ -31,10 +32,67 @@ export function LoginForm() {
   const [gofoSite, setGofoSite] = useState("");
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(false);
+  const [handledAuthCode, setHandledAuthCode] = useState<string | null>(null);
 
   const devMock = isDevMockLoginEnabled();
   const supabaseOn = isSupabaseAuthEnabled();
   const adminLoginUrl = getAdminAppLoginUrl();
+
+  useEffect(() => {
+    if (!supabaseOn || !authCode || handledAuthCode === authCode) {
+      return;
+    }
+
+    let cancelled = false;
+    setHandledAuthCode(authCode);
+    setLoading(true);
+    setMessage("");
+
+    (async () => {
+      try {
+        const supabase = createClient();
+        const { error } = await supabase.auth.exchangeCodeForSession(authCode);
+        if (error) {
+          throw error;
+        }
+
+        const {
+          data: { user },
+        } = await supabase.auth.getUser();
+        if (user) {
+          const meta = user.user_metadata ?? {};
+          const existing = meta[POD_USERNAME_METADATA_KEY];
+          if (typeof existing !== "string" || !existing.trim()) {
+            const fullName = typeof meta.full_name === "string" ? meta.full_name.trim() : "";
+            const name = typeof meta.name === "string" ? meta.name.trim() : "";
+            const emailLocal =
+              user.email && user.email.includes("@") ? user.email.split("@")[0]!.trim() : "";
+            const podUsername = fullName || name || emailLocal || "user";
+            await supabase.auth.updateUser({
+              data: { [POD_USERNAME_METADATA_KEY]: podUsername },
+            });
+          }
+        }
+
+        if (!cancelled) {
+          router.replace(nextPath);
+          router.refresh();
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setMessage(error instanceof Error ? error.message : t("login.errGoogleStart"));
+        }
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [authCode, handledAuthCode, nextPath, router, supabaseOn, t]);
 
   if (!supabaseOn && !devMock) {
     return (
