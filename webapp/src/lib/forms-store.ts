@@ -9,12 +9,14 @@ import {
   buildTenantStarterForms,
   cloneTableFields,
   createDefaultFormDefinition,
+  createSecondStarterFormDefinition,
   createFormId,
   isUnmodifiedTenantGiftStub,
   normalizeFormId,
   normalizeForms,
   type FormDefinition,
 } from "@/lib/forms";
+import { getAuthUserOrSkip } from "@/lib/auth-server";
 import { scopeTrainingExamplesImageName, tenantActive } from "@/lib/storage-tenant";
 import { DEFAULT_TABLE_FIELDS } from "@/lib/table-fields";
 import { loadTableFields, saveTableFields } from "@/lib/table-fields-store";
@@ -120,6 +122,130 @@ function buildFormRow(ownerId: string, form: FormDefinition): FormRow {
     template_source: form.templateSource ?? "blank",
     source_form_id: form.sourceFormId ?? null,
   };
+}
+
+const SHARED_LEGACY_MANIFEST_CUTOFF_MS = Date.parse("2026-04-17T00:00:00Z");
+
+function buildTenantStarterFormsFromSharedManifest(manifest: Record<string, unknown> | null): FormDefinition[] | null {
+  const active = manifest
+    ? normalizeForms(manifest.forms, { injectBuiltinDefault: true }).filter((form) => !form.deletedAt)
+    : [];
+  if (active.length < 2) {
+    return null;
+  }
+
+  const [first, second] = active;
+  const starter1 = createDefaultFormDefinition();
+  const starter2 = createSecondStarterFormDefinition();
+  return normalizeForms(
+    [
+      {
+        ...starter1,
+        name: first?.name || starter1.name,
+        description: first?.description || starter1.description,
+        status: first?.status || starter1.status,
+        ready: first?.ready ?? starter1.ready,
+        templateSource: first?.templateSource || starter1.templateSource,
+      },
+      {
+        ...starter2,
+        name: second?.name || starter2.name,
+        description: second?.description || starter2.description,
+        status: second?.status || starter2.status,
+        ready: second?.ready ?? starter2.ready,
+        templateSource: second?.templateSource || starter2.templateSource,
+      },
+    ],
+    { injectBuiltinDefault: false },
+  );
+}
+
+async function buildPreferredTenantStarterForms() {
+  const sharedManifest = await loadRemoteManifestByKey(FORMS_MANIFEST_KEY);
+  return (
+    buildTenantStarterFormsFromSharedManifest(sharedManifest) ||
+    normalizeForms(buildTenantStarterForms(), { injectBuiltinDefault: false })
+  );
+}
+
+async function shouldRestoreSharedLegacyManifestIntoTenant() {
+  if (!tenantActive()) {
+    return false;
+  }
+  const { user, skipAuth } = await getAuthUserOrSkip();
+  if (skipAuth || !user) {
+    return true;
+  }
+  const createdAt = typeof user.created_at === "string" ? Date.parse(user.created_at) : Number.NaN;
+  if (!Number.isFinite(createdAt)) {
+    return true;
+  }
+  return createdAt < SHARED_LEGACY_MANIFEST_CUTOFF_MS;
+}
+
+function syncUnmodifiedGiftStarterForms(currentForms: FormDefinition[], starterForms: FormDefinition[]) {
+  const starterById = new Map(starterForms.map((form) => [form.id, form] as const));
+  let changed = false;
+  const next = currentForms.map((form) => {
+    if (form.deletedAt || !isUnmodifiedTenantGiftStub(form)) {
+      return form;
+    }
+    const desired = starterById.get(form.id);
+    if (!desired) {
+      return form;
+    }
+    if (
+      form.name === desired.name &&
+      form.description === desired.description &&
+      form.status === desired.status &&
+      form.ready === desired.ready &&
+      form.templateSource === desired.templateSource &&
+      form.sourceFormId === desired.sourceFormId
+    ) {
+      return form;
+    }
+    changed = true;
+    return {
+      ...form,
+      name: desired.name,
+      description: desired.description,
+      status: desired.status,
+      ready: desired.ready,
+      templateSource: desired.templateSource,
+      sourceFormId: desired.sourceFormId ?? null,
+      updatedAt: Date.now(),
+    };
+  });
+  return {
+    forms: normalizeForms(next, { injectBuiltinDefault: false }),
+    changed,
+  };
+}
+
+async function maybeSyncLegacyGiftStarterForms(
+  currentForms: FormDefinition[],
+  currentManifestData: Record<string, unknown> | null,
+) {
+  const starter = await buildPreferredTenantStarterForms();
+  const synced = syncUnmodifiedGiftStarterForms(currentForms, starter);
+  if (!synced.changed) {
+    return currentForms;
+  }
+  await saveLegacyRemoteForms(synced.forms, {
+    ...(currentManifestData || {}),
+    starterTemplatesSyncedAt: Date.now(),
+  });
+  return synced.forms;
+}
+
+async function maybeSyncRemoteGiftStarterForms(currentForms: FormDefinition[]) {
+  const starter = await buildPreferredTenantStarterForms();
+  const synced = syncUnmodifiedGiftStarterForms(currentForms, starter);
+  if (!synced.changed) {
+    return currentForms;
+  }
+  const persisted = await persistRemoteForms(synced.forms);
+  return persisted || synced.forms;
 }
 
 function mergeLegacyForms(currentForms: FormDefinition[], legacyForms: FormDefinition[]) {
@@ -265,6 +391,9 @@ async function maybeRestoreLegacyFormsIntoLegacyManifest(
   if (!tenantActive() || typeof currentManifestData?.legacyMigratedAt === "number") {
     return null;
   }
+  if (!(await shouldRestoreSharedLegacyManifestIntoTenant())) {
+    return null;
+  }
 
   const legacyManifest = await loadRemoteManifestByKey(FORMS_MANIFEST_KEY);
   if (!legacyManifest) {
@@ -289,14 +418,14 @@ async function loadLegacyRemoteForms() {
   if (currentManifest) {
     const forms = normalizeForms(currentManifest.forms, { injectBuiltinDefault: !tenantActive() });
     const restored = await maybeRestoreLegacyFormsIntoLegacyManifest(currentManifest, forms);
-    return restored || forms;
+    return await maybeSyncLegacyGiftStarterForms(restored || forms, currentManifest);
   }
 
   if (!tenantActive()) {
     return normalizeForms([createDefaultFormDefinition()]);
   }
 
-  const starter = normalizeForms(buildTenantStarterForms(), { injectBuiltinDefault: false });
+  const starter = await buildPreferredTenantStarterForms();
   const restored = await maybeRestoreLegacyFormsIntoLegacyManifest(null, starter);
   if (restored) {
     return restored;
@@ -308,6 +437,9 @@ async function loadLegacyRemoteForms() {
 
 async function maybeRestoreLegacyFormsIntoTenant(currentForms: FormDefinition[]) {
   if (!tenantActive()) {
+    return null;
+  }
+  if (!(await shouldRestoreSharedLegacyManifestIntoTenant())) {
     return null;
   }
 
@@ -360,14 +492,14 @@ async function loadRemoteForms() {
     return await loadLegacyRemoteForms();
   }
   if (current.length > 0) {
-    return current;
+    return await maybeSyncRemoteGiftStarterForms(current);
   }
 
   if (!tenantActive()) {
     return normalizeForms([createDefaultFormDefinition()]);
   }
 
-  const starter = normalizeForms(buildTenantStarterForms(), { injectBuiltinDefault: false });
+  const starter = await buildPreferredTenantStarterForms();
   const restored = await maybeRestoreLegacyFormsIntoTenant(starter);
   if (restored) {
     return restored;
