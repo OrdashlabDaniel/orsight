@@ -25,6 +25,14 @@ export function runWithStorageTenant<T>(tenantId: string | null, fn: () => T | P
   return storageTenantAls.run(tenantId, fn);
 }
 
+export function runWithStorageContext<T>(
+  tenantId: string | null,
+  supabase: SupabaseClient | null,
+  fn: () => T | Promise<T>,
+): T | Promise<T> {
+  return runWithStorageTenant(tenantId, () => storageSupabaseAls.run(supabase, fn));
+}
+
 function sanitizeTenantSlug(id: string) {
   return id.replace(/[^a-zA-Z0-9_-]/g, "_");
 }

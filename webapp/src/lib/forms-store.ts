@@ -5,20 +5,22 @@ import {
   DEFAULT_FORM_ID,
   FORMS_MANIFEST_KEY,
   FORM_RECYCLE_RETENTION_MS,
+  STARTER_FORM_2_ID,
   buildBlankTableFields,
   buildTenantStarterForms,
   cloneTableFields,
   createDefaultFormDefinition,
-  createSecondStarterFormDefinition,
   createFormId,
+  getFormGlobalRulesStorageKey,
   isUnmodifiedTenantGiftStub,
   normalizeFormId,
   normalizeForms,
+  STANDARD_FINANCE_STARTER_TABLE_FIELDS,
   type FormDefinition,
 } from "@/lib/forms";
 import { getAuthUserOrSkip } from "@/lib/auth-server";
 import { scopeTrainingExamplesImageName, tenantActive } from "@/lib/storage-tenant";
-import { DEFAULT_TABLE_FIELDS } from "@/lib/table-fields";
+import { DEFAULT_TABLE_FIELDS, normalizeTableFields, type TableFieldDefinition } from "@/lib/table-fields";
 import { loadTableFields, saveTableFields } from "@/lib/table-fields-store";
 import { cloneFormFilePools } from "@/lib/form-file-pools";
 import { hasTenantDbAccess, requireTenantDbAccess } from "@/lib/tenant-db";
@@ -31,6 +33,7 @@ import {
   saveAgentContextImageDataUrl,
   saveGlobalRules,
   saveTrainingImageDataUrl,
+  type GlobalRules,
   upsertTrainingExample,
 } from "@/lib/training";
 import {
@@ -126,45 +129,230 @@ function buildFormRow(ownerId: string, form: FormDefinition): FormRow {
 
 const SHARED_LEGACY_MANIFEST_CUTOFF_MS = Date.parse("2026-04-17T00:00:00Z");
 
+const IAH_ROUTE_STARTER_FIELDS: TableFieldDefinition[] = [
+  { id: "date", type: "text", label: "日期", active: true, builtIn: true },
+  { id: "route", type: "text", label: "抽查路线", active: true, builtIn: true },
+  { id: "driver", type: "text", label: "抽查司机", active: true, builtIn: true },
+  { id: "total", type: "number", label: "运单数量", active: true, builtIn: true },
+  { id: "unscanned", type: "number", label: "未收数量", active: true, builtIn: true },
+  { id: "exceptions", type: "number", label: "错扫数量", active: true, builtIn: true },
+  { id: "waybillStatus", type: "text", label: "响应更新状态", active: true, builtIn: true },
+  { id: "custom_iah_waybill_number", type: "text", label: "运单号", active: true, builtIn: false },
+  { id: "taskCode", type: "text", label: "任务编码", active: true, builtIn: true },
+  { id: "stationTeam", type: "text", label: "站点车队", active: false, builtIn: true },
+];
+
+const SHARED_ROUTE_STARTER_FIELDS: TableFieldDefinition[] = [
+  { id: "date", type: "text", label: "日期", active: true, builtIn: true },
+  { id: "route", type: "text", label: "抽查路线", active: true, builtIn: true },
+  { id: "driver", type: "text", label: "抽查司机", active: true, builtIn: true },
+  { id: "total", type: "number", label: "运单数量", active: true, builtIn: true },
+  { id: "unscanned", type: "number", label: "未收数量", active: true, builtIn: true },
+  { id: "exceptions", type: "number", label: "错扫数量", active: true, builtIn: true },
+  { id: "waybillStatus", type: "text", label: "响应更新状态", active: true, builtIn: true },
+  { id: "taskCode", type: "text", label: "任务编码", active: true, builtIn: true },
+  { id: "stationTeam", type: "text", label: "站点车队", active: false, builtIn: true },
+];
+
+/** 旧版财务种子「Reimbursement Status」文案，用于识别未改元数据的赠送模板并同步到当前标准列。 */
+const LEGACY_FINANCE_STARTER_V1_FIELDS: TableFieldDefinition[] = STANDARD_FINANCE_STARTER_TABLE_FIELDS.map((field) =>
+  field.id === "custom_reimbursement_status"
+    ? { ...field, label: "Reimbursement Status" }
+    : field,
+);
+
+type StarterSeed = {
+  forms: FormDefinition[];
+  rulesByFormId: Map<string, GlobalRules>;
+};
+
+function cloneGlobalRules(rules: GlobalRules): GlobalRules {
+  return JSON.parse(JSON.stringify(rules)) as GlobalRules;
+}
+
+function normalizeStarterFieldSet(raw: unknown) {
+  return normalizeTableFields(raw, {
+    preserveEmpty: true,
+    appendMissingBuiltIns: false,
+  });
+}
+
+function tableFieldSetsEqual(left: TableFieldDefinition[], right: TableFieldDefinition[]) {
+  if (left.length !== right.length) {
+    return false;
+  }
+  return left.every((field, index) => {
+    const other = right[index];
+    return (
+      other != null &&
+      field.id === other.id &&
+      field.label === other.label &&
+      field.type === other.type &&
+      field.active === other.active &&
+      field.builtIn === other.builtIn
+    );
+  });
+}
+
+function buildBlankStarterRules(tableFields: TableFieldDefinition[]): GlobalRules {
+  return {
+    instructions: "",
+    documents: [],
+    guidanceHistory: [],
+    agentThread: [],
+    workingRules: "",
+    tableFields: cloneTableFields(tableFields),
+  };
+}
+
+function normalizeStarterRulesPayload(raw: unknown): GlobalRules | null {
+  if (!raw || typeof raw !== "object") {
+    return null;
+  }
+  const record = raw as Record<string, unknown>;
+  return {
+    instructions: typeof record.instructions === "string" ? record.instructions : "",
+    documents: Array.isArray(record.documents)
+      ? (JSON.parse(JSON.stringify(record.documents)) as GlobalRules["documents"])
+      : [],
+    guidanceHistory: Array.isArray(record.guidanceHistory)
+      ? (JSON.parse(JSON.stringify(record.guidanceHistory)) as GlobalRules["guidanceHistory"])
+      : [],
+    agentThread: Array.isArray(record.agentThread)
+      ? (JSON.parse(JSON.stringify(record.agentThread)) as GlobalRules["agentThread"])
+      : [],
+    workingRules: typeof record.workingRules === "string" ? record.workingRules : "",
+    tableFields: normalizeStarterFieldSet(record.tableFields),
+  };
+}
+
+function hasStarterRuleCustomizations(rules: GlobalRules) {
+  return Boolean(
+    rules.instructions.trim() ||
+      rules.workingRules?.trim() ||
+      (rules.documents?.length ?? 0) > 0 ||
+      (rules.guidanceHistory?.length ?? 0) > 0 ||
+      (rules.agentThread?.length ?? 0) > 0,
+  );
+}
+
+function getLegacyStarterFieldSets(formId: string) {
+  const normalizedId = normalizeFormId(formId);
+  const financeV1 = normalizeStarterFieldSet(LEGACY_FINANCE_STARTER_V1_FIELDS);
+  if (normalizedId === DEFAULT_FORM_ID) {
+    return [
+      normalizeStarterFieldSet(DEFAULT_TABLE_FIELDS),
+      normalizeStarterFieldSet(SHARED_ROUTE_STARTER_FIELDS),
+      normalizeStarterFieldSet(IAH_ROUTE_STARTER_FIELDS),
+      financeV1,
+    ];
+  }
+  if (normalizedId === STARTER_FORM_2_ID) {
+    return [
+      normalizeStarterFieldSet(DEFAULT_TABLE_FIELDS),
+      normalizeStarterFieldSet(SHARED_ROUTE_STARTER_FIELDS),
+      normalizeStarterFieldSet(IAH_ROUTE_STARTER_FIELDS),
+      financeV1,
+    ];
+  }
+  return [];
+}
+
+const ROUTE_AUDIT_FIELD_IDS = new Set([
+  "route",
+  "driver",
+  "taskCode",
+  "total",
+  "unscanned",
+  "exceptions",
+  "waybillStatus",
+  "stationTeam",
+]);
+
+function shouldForceFinanceGiftColumnResync(
+  formId: string,
+  currentFields: TableFieldDefinition[],
+  desiredFields: TableFieldDefinition[],
+): boolean {
+  if (formId !== DEFAULT_FORM_ID && formId !== STARTER_FORM_2_ID) {
+    return false;
+  }
+  const desiredNorm = normalizeStarterFieldSet(desiredFields);
+  const standardFinance = normalizeStarterFieldSet(STANDARD_FINANCE_STARTER_TABLE_FIELDS);
+  if (!tableFieldSetsEqual(desiredNorm, standardFinance)) {
+    return false;
+  }
+  if (currentFields.some((field) => field.active && ROUTE_AUDIT_FIELD_IDS.has(field.id))) {
+    return true;
+  }
+  if (formId === STARTER_FORM_2_ID && currentFields.length > standardFinance.length) {
+    return true;
+  }
+  return false;
+}
+
+function shouldAutoSyncStarterRules(form: FormDefinition, currentRules: GlobalRules, desiredRules: GlobalRules) {
+  if (form.deletedAt || !isUnmodifiedTenantGiftStub(form) || hasStarterRuleCustomizations(currentRules)) {
+    return false;
+  }
+
+  const currentFields = normalizeStarterFieldSet(currentRules.tableFields);
+  const desiredFields = normalizeStarterFieldSet(desiredRules.tableFields);
+  if (tableFieldSetsEqual(currentFields, desiredFields)) {
+    return false;
+  }
+  if (currentFields.length === 0) {
+    return true;
+  }
+  if (getLegacyStarterFieldSets(form.id).some((legacyFields) => tableFieldSetsEqual(currentFields, legacyFields))) {
+    return true;
+  }
+  return shouldForceFinanceGiftColumnResync(form.id, currentFields, desiredFields);
+}
+
+async function buildPreferredTenantStarterSeed(): Promise<StarterSeed> {
+  const sharedManifest = await loadRemoteManifestByKey(FORMS_MANIFEST_KEY);
+  const forms =
+    buildTenantStarterFormsFromSharedManifest(sharedManifest) ||
+    normalizeForms(buildTenantStarterForms(), { injectBuiltinDefault: false });
+  const financeRules = buildBlankStarterRules(STANDARD_FINANCE_STARTER_TABLE_FIELDS);
+
+  return {
+    forms,
+    rulesByFormId: new Map<string, GlobalRules>([[DEFAULT_FORM_ID, cloneGlobalRules(financeRules)]]),
+  };
+}
+
+async function syncGiftStarterRuleConfigs(currentForms: FormDefinition[], rulesByFormId: Map<string, GlobalRules>) {
+  for (const form of currentForms) {
+    const desiredRules = rulesByFormId.get(form.id);
+    if (!desiredRules) {
+      continue;
+    }
+    const currentRules = await loadGlobalRules(form.id);
+    if (!shouldAutoSyncStarterRules(form, currentRules, desiredRules)) {
+      continue;
+    }
+    await saveGlobalRules(cloneGlobalRules(desiredRules), form.id);
+  }
+}
+
 function buildTenantStarterFormsFromSharedManifest(manifest: Record<string, unknown> | null): FormDefinition[] | null {
   const active = manifest
     ? normalizeForms(manifest.forms, { injectBuiltinDefault: true }).filter((form) => !form.deletedAt)
     : [];
-  if (active.length < 2) {
+  if (active.length < 1) {
     return null;
   }
 
-  const [first, second] = active;
   const starter1 = createDefaultFormDefinition();
-  const starter2 = createSecondStarterFormDefinition();
   return normalizeForms(
     [
       {
         ...starter1,
-        name: first?.name || starter1.name,
-        description: first?.description || starter1.description,
-        status: first?.status || starter1.status,
-        ready: first?.ready ?? starter1.ready,
-        templateSource: first?.templateSource || starter1.templateSource,
-      },
-      {
-        ...starter2,
-        name: second?.name || starter2.name,
-        description: second?.description || starter2.description,
-        status: second?.status || starter2.status,
-        ready: second?.ready ?? starter2.ready,
-        templateSource: second?.templateSource || starter2.templateSource,
       },
     ],
     { injectBuiltinDefault: false },
-  );
-}
-
-async function buildPreferredTenantStarterForms() {
-  const sharedManifest = await loadRemoteManifestByKey(FORMS_MANIFEST_KEY);
-  return (
-    buildTenantStarterFormsFromSharedManifest(sharedManifest) ||
-    normalizeForms(buildTenantStarterForms(), { injectBuiltinDefault: false })
   );
 }
 
@@ -226,26 +414,32 @@ async function maybeSyncLegacyGiftStarterForms(
   currentForms: FormDefinition[],
   currentManifestData: Record<string, unknown> | null,
 ) {
-  const starter = await buildPreferredTenantStarterForms();
-  const synced = syncUnmodifiedGiftStarterForms(currentForms, starter);
-  if (!synced.changed) {
-    return currentForms;
+  const starterSeed = await buildPreferredTenantStarterSeed();
+  const synced = syncUnmodifiedGiftStarterForms(currentForms, starterSeed.forms);
+  const nextForms = synced.changed ? synced.forms : currentForms;
+  if (synced.changed) {
+    await saveLegacyRemoteForms(nextForms, {
+      ...(currentManifestData || {}),
+      starterTemplatesSyncedAt: Date.now(),
+    });
   }
-  await saveLegacyRemoteForms(synced.forms, {
-    ...(currentManifestData || {}),
-    starterTemplatesSyncedAt: Date.now(),
-  });
-  return synced.forms;
+  await syncGiftStarterRuleConfigs(nextForms, starterSeed.rulesByFormId);
+  return nextForms;
 }
 
 async function maybeSyncRemoteGiftStarterForms(currentForms: FormDefinition[]) {
-  const starter = await buildPreferredTenantStarterForms();
-  const synced = syncUnmodifiedGiftStarterForms(currentForms, starter);
-  if (!synced.changed) {
-    return currentForms;
+  const starterSeed = await buildPreferredTenantStarterSeed();
+  const synced = syncUnmodifiedGiftStarterForms(currentForms, starterSeed.forms);
+  const nextForms = synced.changed ? synced.forms : currentForms;
+  if (synced.changed) {
+    const persisted = await persistRemoteForms(nextForms);
+    if (persisted) {
+      await syncGiftStarterRuleConfigs(persisted, starterSeed.rulesByFormId);
+      return persisted;
+    }
   }
-  const persisted = await persistRemoteForms(synced.forms);
-  return persisted || synced.forms;
+  await syncGiftStarterRuleConfigs(nextForms, starterSeed.rulesByFormId);
+  return nextForms;
 }
 
 function mergeLegacyForms(currentForms: FormDefinition[], legacyForms: FormDefinition[]) {
@@ -418,20 +612,21 @@ async function loadLegacyRemoteForms() {
   if (currentManifest) {
     const forms = normalizeForms(currentManifest.forms, { injectBuiltinDefault: !tenantActive() });
     const restored = await maybeRestoreLegacyFormsIntoLegacyManifest(currentManifest, forms);
-    return await maybeSyncLegacyGiftStarterForms(restored || forms, currentManifest);
+    return restored || forms;
   }
 
   if (!tenantActive()) {
     return normalizeForms([createDefaultFormDefinition()]);
   }
 
-  const starter = await buildPreferredTenantStarterForms();
+  const starterSeed = await buildPreferredTenantStarterSeed();
+  const starter = starterSeed.forms;
   const restored = await maybeRestoreLegacyFormsIntoLegacyManifest(null, starter);
   if (restored) {
     return restored;
   }
   await saveLegacyRemoteForms(starter);
-  await seedStarterTableAndRules(starter);
+  await seedStarterTableAndRules(starter, starterSeed.rulesByFormId);
   return starter;
 }
 
@@ -461,26 +656,16 @@ async function maybeRestoreLegacyFormsIntoTenant(currentForms: FormDefinition[])
   return mergedForms;
 }
 
-async function seedStarterTableAndRules(forms: FormDefinition[]) {
-  const fields = DEFAULT_TABLE_FIELDS.map((field) => ({ ...field }));
+async function seedStarterTableAndRules(forms: FormDefinition[], rulesByFormId: Map<string, GlobalRules>) {
   for (const form of forms) {
-    await saveGlobalRules(
-      {
-        instructions: "",
-        documents: [],
-        guidanceHistory: [],
-        agentThread: [],
-        workingRules: "",
-        tableFields: fields.map((field) => ({ ...field })),
-      },
-      form.id,
-    );
+    const starterRules = rulesByFormId.get(form.id) || buildBlankStarterRules(STANDARD_FINANCE_STARTER_TABLE_FIELDS);
+    await saveGlobalRules(cloneGlobalRules(starterRules), form.id);
   }
 }
 
 /**
  * 从发布版租户表读取用户自己的填表清单。用户数据按 owner_id + form_id 存储，
- * 代码发布（git push）不会覆盖；仅在该租户尚无任何行时才会写入两份赠送模板。
+ * 代码发布（git push）不会覆盖；仅在该租户尚无任何行时才会写入一份赠送模板。
  */
 async function loadRemoteForms() {
   if (!hasTenantDbAccess()) {
@@ -492,14 +677,15 @@ async function loadRemoteForms() {
     return await loadLegacyRemoteForms();
   }
   if (current.length > 0) {
-    return await maybeSyncRemoteGiftStarterForms(current);
+    return current;
   }
 
   if (!tenantActive()) {
     return normalizeForms([createDefaultFormDefinition()]);
   }
 
-  const starter = await buildPreferredTenantStarterForms();
+  const starterSeed = await buildPreferredTenantStarterSeed();
+  const starter = starterSeed.forms;
   const restored = await maybeRestoreLegacyFormsIntoTenant(starter);
   if (restored) {
     return restored;
@@ -508,7 +694,7 @@ async function loadRemoteForms() {
   if (!persisted) {
     return await loadLegacyRemoteForms();
   }
-  await seedStarterTableAndRules(starter);
+  await seedStarterTableAndRules(starter, starterSeed.rulesByFormId);
   return starter;
 }
 

@@ -1,11 +1,11 @@
 import { DEFAULT_TABLE_FIELDS, type TableFieldDefinition, type TableFieldType } from "@/lib/table-fields";
 
 export const DEFAULT_FORM_ID = "form-1";
-/** 新租户注册后赠送的第二份体验模板（固定 id，便于与 {@link DEFAULT_FORM_ID} 一起做列默认值与一次性历史合并）。 */
+/** 历史第二份赠送模板 id；仅为兼容旧用户已有数据而保留。 */
 export const STARTER_FORM_2_ID = "form-starter-2";
 
-/** 注册即赠送的两份模板填表 id（仅元数据种子；用户自建填表使用其它 id）。 */
-export const GIFT_TEMPLATE_FORM_IDS = [DEFAULT_FORM_ID, STARTER_FORM_2_ID] as const;
+/** 新用户首次进入时赠送的模板填表 id（用户自建填表使用其它 id）。 */
+export const GIFT_TEMPLATE_FORM_IDS = [DEFAULT_FORM_ID] as const;
 export const FORMS_MANIFEST_KEY = "__forms_manifest__";
 export const FORM_META_PREFIX = "__form_meta__:";
 export const FORM_EXAMPLE_PREFIX = "__form_example__:";
@@ -65,12 +65,41 @@ export function createFormId() {
   return `form-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+/** 财务支出类赠送模板的标准列（与产品默认示例一致；`date` 为唯一内置列，其余为自定义列）。 */
+export const STANDARD_FINANCE_STARTER_TABLE_FIELDS: TableFieldDefinition[] = [
+  { id: "date", type: "text", label: "date", active: true, builtIn: true },
+  { id: "custom_vendor", type: "text", label: "Vendor", active: true, builtIn: false },
+  { id: "custom_description", type: "text", label: "Description", active: true, builtIn: false },
+  { id: "custom_category", type: "text", label: "Category", active: true, builtIn: false },
+  { id: "custom_amount", type: "text", label: "Amount", active: true, builtIn: false },
+  { id: "custom_payment_method", type: "text", label: "Payment Method", active: true, builtIn: false },
+  { id: "custom_reimbursement_status", type: "text", label: "Reimbursement", active: true, builtIn: false },
+  { id: "custom_notes", type: "text", label: "Notes", active: true, builtIn: false },
+  { id: "custom_link", type: "text", label: "Link", active: true, builtIn: false },
+];
+
+/** 历史出厂名：仍视为「未改元数据的赠送模板」，以便一次性把列同步到标准财务列。 */
+export function isLegacyRouteGiftStub(form: FormDefinition): boolean {
+  if (form.id !== DEFAULT_FORM_ID) {
+    return false;
+  }
+  if (form.templateSource !== "copied" || form.sourceFormId != null) {
+    return false;
+  }
+  return (
+    form.name === "抽擦路线表" &&
+    form.description === "已完成：沿用当前线上填表与训练能力。" &&
+    form.status === "ready" &&
+    form.ready === true
+  );
+}
+
 export function createDefaultFormDefinition(): FormDefinition {
   const now = Date.now();
   return {
     id: DEFAULT_FORM_ID,
-    name: "抽擦路线表",
-    description: "已完成：沿用当前线上填表与训练能力。",
+    name: "财务支出表",
+    description: "标准列布局（日期、Vendor、Description 等），可直接填表或按需调整。",
     status: "ready",
     ready: true,
     createdAt: now,
@@ -124,7 +153,7 @@ export function isUnmodifiedTenantGiftStub(form: FormDefinition): boolean {
     return false;
   }
   if (form.id === DEFAULT_FORM_ID) {
-    return giftStubMetaEquals(createDefaultFormDefinition(), form);
+    return giftStubMetaEquals(createDefaultFormDefinition(), form) || isLegacyRouteGiftStub(form);
   }
   if (form.id === STARTER_FORM_2_ID) {
     if (giftStubMetaEquals(createSecondStarterFormDefinition(), form)) {
@@ -141,7 +170,7 @@ export function isUnmodifiedTenantGiftStub(form: FormDefinition): boolean {
 }
 
 export function buildTenantStarterForms(): FormDefinition[] {
-  return [createDefaultFormDefinition(), createSecondStarterFormDefinition()];
+  return [createDefaultFormDefinition()];
 }
 
 export type NormalizeFormsOptions = {
@@ -174,7 +203,7 @@ export function normalizeForms(raw: unknown, options?: NormalizeFormsOptions): F
           typeof record.name === "string" && record.name.trim()
             ? record.name.trim().slice(0, 48)
             : id === DEFAULT_FORM_ID
-              ? "抽擦路线表"
+              ? "财务支出表"
               : id === STARTER_FORM_2_ID
                 ? "财务支出记录"
                 : "未命名填表",

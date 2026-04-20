@@ -1,6 +1,7 @@
 import { createBrowserClient } from "@supabase/ssr";
 
 import { getPublicSupabaseAnonKey, getPublicSupabaseUrl } from "@/lib/supabase";
+import { webappSupabaseCookieOptions } from "@/lib/supabase/cookies";
 
 export function createClient() {
   const url = getPublicSupabaseUrl();
@@ -8,5 +9,7 @@ export function createClient() {
   if (!url || !key) {
     throw new Error("Missing NEXT_PUBLIC_SUPABASE_URL or NEXT_PUBLIC_SUPABASE_ANON_KEY");
   }
-  return createBrowserClient(url, key);
+  return createBrowserClient(url, key, {
+    cookieOptions: webappSupabaseCookieOptions,
+  });
 }

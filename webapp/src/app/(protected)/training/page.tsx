@@ -20,7 +20,6 @@ import { LoginLoadingFallback } from "@/app/login/LoginLoadingFallback";
 import { useLocale } from "@/i18n/LocaleProvider";
 import type { FormFilePoolItem, FormFilePoolName } from "@/lib/form-file-pools";
 import {
-  DEFAULT_TABLE_FIELDS,
   getActiveTableFields,
   TABLE_FIELDS_SYNC_EVENT,
   TABLE_FIELDS_SYNC_STORAGE_KEY,
@@ -112,7 +111,7 @@ function TrainingModeContent() {
     [currentFormId],
   );
   const [setupField, setSetupField] = useState("");
-  const [tableFields, setTableFields] = useState<TableFieldDefinition[]>(DEFAULT_TABLE_FIELDS);
+  const [tableFields, setTableFields] = useState<TableFieldDefinition[]>([]);
   const [uploads, setUploads] = useState<UploadItem[]>([]);
   const [selectedUploadId, setSelectedUploadId] = useState<string | null>(null);
   const [trainingThumbnailMap, setTrainingThumbnailMap] = useState<Record<string, string>>({});
@@ -216,12 +215,12 @@ function TrainingModeContent() {
       const res = await fetch(withFormId("/api/table-fields"));
       const data = (await res.json()) as { error?: string; tableFields?: TableFieldDefinition[] };
       if (!res.ok) {
-        setTableFields(DEFAULT_TABLE_FIELDS);
+        setTableFields([]);
         return;
       }
-      setTableFields(data.tableFields?.length ? data.tableFields : DEFAULT_TABLE_FIELDS);
+      setTableFields(Array.isArray(data.tableFields) ? data.tableFields : []);
     } catch {
-      setTableFields(DEFAULT_TABLE_FIELDS);
+      setTableFields([]);
     }
   }
 
