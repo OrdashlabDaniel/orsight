@@ -14,14 +14,15 @@ function redirectRecycle(params: Record<string, string>) {
   redirect(`/viz/recycle?${u.toString()}`);
 }
 
-export async function permanentlyDeleteRecycledUserAction(formData: FormData) {
+export type RecycleActionResult = { ok: string } | { err: string };
+
+async function permanentlyDeleteRecycledUser(formData: FormData): Promise<RecycleActionResult> {
   const userId = String(formData.get("userId") ?? "").trim();
   const label = String(formData.get("label") ?? "").trim() || userId;
   const adminPassword = String(formData.get("adminPassword") ?? "");
 
   if (!userId) {
-    redirectRecycle({ err: "缺少 userId" });
-    return;
+    return { err: "缺少 userId" };
   }
 
   const actor = await requireVizAdminActor("/viz/recycle");
@@ -29,8 +30,7 @@ export async function permanentlyDeleteRecycledUserAction(formData: FormData) {
     await assertAdminLoginPassword(actor.email, adminPassword);
   } catch (e) {
     const msg = e instanceof Error ? e.message : "密码校验失败";
-    redirectRecycle({ err: msg });
-    return;
+    return { err: msg };
   }
 
   const sb = createServiceRoleClient();
@@ -38,19 +38,16 @@ export async function permanentlyDeleteRecycledUserAction(formData: FormData) {
   try {
     row = await getRecycledUserById(sb, userId);
   } catch (e) {
-    redirectRecycle({ err: e instanceof Error ? e.message : "读取回收站失败" });
-    return;
+    return { err: e instanceof Error ? e.message : "读取回收站失败" };
   }
   if (!row) {
     try {
       const authUser = await getRegisteredUserById(sb, userId);
       if (!authUser || (!authUser.banned_until && !authUser.deleted_at)) {
-        redirectRecycle({ err: "记录不存在或已被清除" });
-        return;
+        return { err: "记录不存在或已被清除" };
       }
     } catch (e) {
-      redirectRecycle({ err: e instanceof Error ? e.message : "读取用户失败" });
-      return;
+      return { err: e instanceof Error ? e.message : "读取用户失败" };
     }
   }
 
@@ -58,38 +55,47 @@ export async function permanentlyDeleteRecycledUserAction(formData: FormData) {
   // We MUST delete usage_logs FIRST to avoid foreign key violations when hard-deleting the auth user.
   const { error: usageDeleteError } = await sb.from("usage_logs").delete().eq("user_id", userId);
   if (usageDeleteError) {
-    redirectRecycle({ err: `delete_usage:${usageDeleteError.message}` });
-    return;
+    return { err: `delete_usage:${usageDeleteError.message}` };
   }
 
-  await sb.from("admin_users").delete().eq("id", userId);
+  const { error: adminDeleteError } = await sb.from("admin_users").delete().eq("id", userId);
+  if (adminDeleteError) {
+    return { err: `delete_admin:${adminDeleteError.message}` };
+  }
+
   try {
     await hardDeleteAuthUser(sb, userId);
   } catch (e) {
-    redirectRecycle({ err: `delete_auth:${e instanceof Error ? e.message : "unknown"}` });
-    return;
+    return { err: `delete_auth:${e instanceof Error ? e.message : "unknown"}` };
   }
 
   try {
     await deleteRecycledUser(sb, userId);
   } catch (e) {
-    redirectRecycle({ err: `delete_bin:${e instanceof Error ? e.message : "unknown"}` });
-    return;
+    return { err: `delete_bin:${e instanceof Error ? e.message : "unknown"}` };
+  }
+
+  try {
+    const authUser = await getRegisteredUserById(sb, userId);
+    if (authUser) {
+      return { err: "delete_auth:用户仍存在，页面不会移除该记录，请检查数据库删除权限" };
+    }
+  } catch (e) {
+    return { err: e instanceof Error ? e.message : "删除后校验失败" };
   }
 
   revalidatePath("/viz");
   revalidatePath("/viz/recycle");
-  redirectRecycle({ notice: `已永久删除：${label}` });
+  return { ok: `已永久删除：${label}` };
 }
 
-export async function restoreRecycledUserAction(formData: FormData) {
+async function restoreRecycledUser(formData: FormData): Promise<RecycleActionResult> {
   const userId = String(formData.get("userId") ?? "").trim();
   const label = String(formData.get("label") ?? "").trim() || userId;
   const adminPassword = String(formData.get("adminPassword") ?? "");
 
   if (!userId) {
-    redirectRecycle({ err: "缺少 userId" });
-    return;
+    return { err: "缺少 userId" };
   }
 
   const actor = await requireVizAdminActor("/viz/recycle");
@@ -97,8 +103,7 @@ export async function restoreRecycledUserAction(formData: FormData) {
     await assertAdminLoginPassword(actor.email, adminPassword);
   } catch (e) {
     const msg = e instanceof Error ? e.message : "密码校验失败";
-    redirectRecycle({ err: msg });
-    return;
+    return { err: msg };
   }
 
   const sb = createServiceRoleClient();
@@ -106,19 +111,16 @@ export async function restoreRecycledUserAction(formData: FormData) {
   try {
     row = await getRecycledUserById(sb, userId);
   } catch (e) {
-    redirectRecycle({ err: e instanceof Error ? e.message : "读取回收站失败" });
-    return;
+    return { err: e instanceof Error ? e.message : "读取回收站失败" };
   }
   if (!row) {
     try {
       const authUser = await getRegisteredUserById(sb, userId);
       if (!authUser || (!authUser.banned_until && !authUser.deleted_at)) {
-        redirectRecycle({ err: "记录不存在或已被清除" });
-        return;
+        return { err: "记录不存在或已被清除" };
       }
     } catch (e) {
-      redirectRecycle({ err: e instanceof Error ? e.message : "读取用户失败" });
-      return;
+      return { err: e instanceof Error ? e.message : "读取用户失败" };
     }
   }
 
@@ -126,22 +128,45 @@ export async function restoreRecycledUserAction(formData: FormData) {
   try {
     const restored = await enableAuthUserLogin(sb, userId);
     if (!restored) {
-      redirectRecycle({ err: "restore_auth:用户不存在或已被永久删除" });
-      return;
+      return { err: "restore_auth:用户不存在或已被永久删除" };
     }
   } catch (e) {
-    redirectRecycle({ err: `restore_auth:${e instanceof Error ? e.message : "unknown"}` });
-    return;
+    return { err: `restore_auth:${e instanceof Error ? e.message : "unknown"}` };
   }
 
   try {
     await deleteRecycledUser(sb, userId);
   } catch (e) {
-    redirectRecycle({ err: `delete_bin:${e instanceof Error ? e.message : "unknown"}` });
-    return;
+    return { err: `delete_bin:${e instanceof Error ? e.message : "unknown"}` };
   }
 
   revalidatePath("/viz");
   revalidatePath("/viz/recycle");
-  redirectRecycle({ notice: `已恢复用户登录权限：${label}` });
+  return { ok: `已恢复用户登录权限：${label}` };
+}
+
+export async function permanentlyDeleteRecycledUserMutation(formData: FormData): Promise<RecycleActionResult> {
+  return await permanentlyDeleteRecycledUser(formData);
+}
+
+export async function restoreRecycledUserMutation(formData: FormData): Promise<RecycleActionResult> {
+  return await restoreRecycledUser(formData);
+}
+
+export async function permanentlyDeleteRecycledUserAction(formData: FormData) {
+  const result = await permanentlyDeleteRecycledUser(formData);
+  if ("err" in result) {
+    redirectRecycle({ err: result.err });
+    return;
+  }
+  redirectRecycle({ notice: result.ok });
+}
+
+export async function restoreRecycledUserAction(formData: FormData) {
+  const result = await restoreRecycledUser(formData);
+  if ("err" in result) {
+    redirectRecycle({ err: result.err });
+    return;
+  }
+  redirectRecycle({ notice: result.ok });
 }

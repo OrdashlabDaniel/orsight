@@ -14,11 +14,12 @@ import {
   type TableAnnotationFieldValues,
   type WorkbenchAnnotationBox,
 } from "@/components/TrainingAnnotationWorkbench";
+import { FormFilePoolList } from "@/components/FormFilePoolList";
 import { RecognitionAgentDock } from "@/components/RecognitionAgentDock";
 import { LoginLoadingFallback } from "@/app/login/LoginLoadingFallback";
 import { useLocale } from "@/i18n/LocaleProvider";
+import type { FormFilePoolItem, FormFilePoolName } from "@/lib/form-file-pools";
 import {
-  DEFAULT_TABLE_FIELDS,
   getActiveTableFields,
   TABLE_FIELDS_SYNC_EVENT,
   TABLE_FIELDS_SYNC_STORAGE_KEY,
@@ -30,7 +31,22 @@ import {
   isWorkspaceDocumentFile,
   prepareVisualUpload,
   SUPPORTED_VISUAL_UPLOAD_ACCEPT,
+  SUPPORTED_WORKSPACE_UPLOAD_ACCEPT,
+  TEMPLATE_IMPORT_ACCEPT,
 } from "@/lib/client-visual-upload";
+
+function isPdfLikeFile(file: File) {
+  const type = (file.type || "").toLowerCase();
+  return type.includes("pdf") || /\.pdf$/i.test(file.name);
+}
+
+function isTrainingPoolFile(file: File) {
+  return isWorkspaceDocumentFile(file) || (file.type || "").startsWith("image/") || isPdfLikeFile(file);
+}
+
+function isTemplatePoolFile(file: File) {
+  return isWorkspaceDocumentFile(file) || (file.type || "").startsWith("image/") || isPdfLikeFile(file);
+}
 
 
 type UploadItem = {
@@ -74,6 +90,12 @@ type TrainingStatusResponse = {
   items: TrainingStatusItem[];
 };
 
+type FormFilePoolResponse = {
+  files?: FormFilePoolItem[];
+  file?: FormFilePoolItem;
+  error?: string;
+};
+
 function TrainingModeContent() {
   const { t } = useLocale();
   const searchParams = useSearchParams();
@@ -89,12 +111,16 @@ function TrainingModeContent() {
     [currentFormId],
   );
   const [setupField, setSetupField] = useState("");
-  const [tableFields, setTableFields] = useState<TableFieldDefinition[]>(DEFAULT_TABLE_FIELDS);
+  const [tableFields, setTableFields] = useState<TableFieldDefinition[]>([]);
   const [uploads, setUploads] = useState<UploadItem[]>([]);
   const [selectedUploadId, setSelectedUploadId] = useState<string | null>(null);
   const [trainingThumbnailMap, setTrainingThumbnailMap] = useState<Record<string, string>>({});
   const [trainingThumbnailErrorMap, setTrainingThumbnailErrorMap] = useState<Record<string, boolean>>({});
   const [deletingImageName, setDeletingImageName] = useState<string | null>(null);
+  const [templatePoolFiles, setTemplatePoolFiles] = useState<FormFilePoolItem[]>([]);
+  const [trainingPoolFiles, setTrainingPoolFiles] = useState<FormFilePoolItem[]>([]);
+  const [isUploadingPool, setIsUploadingPool] = useState<FormFilePoolName | null>(null);
+  const [deletingPoolFileId, setDeletingPoolFileId] = useState<string | null>(null);
 
   const [trainingStatus, setTrainingStatus] = useState<TrainingStatusResponse | null>(null);
   const [isDraggingFiles, setIsDraggingFiles] = useState(false);
@@ -189,12 +215,12 @@ function TrainingModeContent() {
       const res = await fetch(withFormId("/api/table-fields"));
       const data = (await res.json()) as { error?: string; tableFields?: TableFieldDefinition[] };
       if (!res.ok) {
-        setTableFields(DEFAULT_TABLE_FIELDS);
+        setTableFields([]);
         return;
       }
-      setTableFields(data.tableFields?.length ? data.tableFields : DEFAULT_TABLE_FIELDS);
+      setTableFields(Array.isArray(data.tableFields) ? data.tableFields : []);
     } catch {
-      setTableFields(DEFAULT_TABLE_FIELDS);
+      setTableFields([]);
     }
   }
 
@@ -212,6 +238,8 @@ function TrainingModeContent() {
 
   useEffect(() => {
     void loadTrainingStatus();
+    void loadPoolFiles("training");
+    void loadPoolFiles("templates");
   }, [currentFormId]);
 
   const handleFilesRef = useRef<((fileList: FileList | File[] | null) => Promise<void>) | null>(null);
@@ -262,6 +290,114 @@ function TrainingModeContent() {
     } catch (error) {
 
     }
+  }
+
+  async function loadPoolFiles(pool: FormFilePoolName) {
+    try {
+      const response = await fetch(withFormId(`/api/form-file-pools?pool=${pool}`));
+      const payload = (await response.json()) as FormFilePoolResponse;
+      if (!response.ok) {
+        throw new Error(payload.error || t("filePool.errLoad"));
+      }
+      const nextFiles = Array.isArray(payload.files) ? payload.files : [];
+      if (pool === "templates") {
+        setTemplatePoolFiles(nextFiles);
+      } else {
+        setTrainingPoolFiles(nextFiles);
+      }
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : t("filePool.errLoad"));
+    }
+  }
+
+  async function uploadFilesToPool(pool: FormFilePoolName, files: File[], source: string) {
+    if (!files.length) {
+      return;
+    }
+    setIsUploadingPool(pool);
+    setErrorMessage("");
+    try {
+      const uploaded: FormFilePoolItem[] = [];
+      for (const file of files) {
+        const formData = new FormData();
+        formData.append("pool", pool);
+        formData.append("formId", currentFormId);
+        formData.append("source", source);
+        formData.append("file", file);
+        const response = await fetch("/api/form-file-pools", {
+          method: "POST",
+          body: formData,
+        });
+        const payload = (await response.json()) as FormFilePoolResponse;
+        if (!response.ok || !payload.file) {
+          throw new Error(payload.error || t("filePool.errUpload"));
+        }
+        uploaded.push(payload.file);
+      }
+      if (pool === "templates") {
+        setTemplatePoolFiles((current) => [...uploaded, ...current.filter((item) => !uploaded.some((next) => next.id === item.id))]);
+      } else {
+        setTrainingPoolFiles((current) => [...uploaded, ...current.filter((item) => !uploaded.some((next) => next.id === item.id))]);
+      }
+      setNoticeMessage(
+        t("filePool.uploadedToPool", {
+          n: uploaded.length,
+          pool: t(pool === "templates" ? "filePool.templateTitle" : "filePool.trainingTitle"),
+        }),
+      );
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : t("filePool.errUpload"));
+    } finally {
+      setIsUploadingPool(null);
+    }
+  }
+
+  function buildPoolFileHref(pool: FormFilePoolName, fileId: string) {
+    return withFormId(`/api/form-file-pools?pool=${pool}&fileId=${encodeURIComponent(fileId)}&raw=1`);
+  }
+
+  async function handleDeletePoolFile(pool: FormFilePoolName, file: FormFilePoolItem) {
+    const confirmed = window.confirm(t("filePool.confirmDelete", { name: file.fileName }));
+    if (!confirmed) {
+      return;
+    }
+    setDeletingPoolFileId(file.id);
+    setErrorMessage("");
+    try {
+      const response = await fetch(
+        withFormId(`/api/form-file-pools?pool=${pool}&fileId=${encodeURIComponent(file.id)}`),
+        { method: "DELETE" },
+      );
+      const payload = (await response.json()) as FormFilePoolResponse;
+      if (!response.ok) {
+        throw new Error(payload.error || t("filePool.errDelete"));
+      }
+      if (pool === "templates") {
+        setTemplatePoolFiles((current) => current.filter((item) => item.id !== file.id));
+      } else {
+        setTrainingPoolFiles((current) => current.filter((item) => item.id !== file.id));
+      }
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : t("filePool.errDelete"));
+    } finally {
+      setDeletingPoolFileId(null);
+    }
+  }
+
+  async function handleTrainingPoolUpload(fileList: FileList | null) {
+    const files = Array.from(fileList || []).filter(isTrainingPoolFile);
+    if (!files.length) {
+      return;
+    }
+    await uploadFilesToPool("training", files, "training-page-file-pool");
+  }
+
+  async function handleTemplatePoolUpload(fileList: FileList | null) {
+    const files = Array.from(fileList || []).filter(isTemplatePoolFile);
+    if (!files.length) {
+      return;
+    }
+    await uploadFilesToPool("templates", files, "training-page-template-pool");
   }
 
   async function handleFiles(fileList: FileList | File[] | null) {
@@ -590,6 +726,78 @@ function TrainingModeContent() {
                 </div>
               </div>
             ) : null}
+
+            <div className="shrink-0 rounded-xl border border-[var(--border)] bg-[var(--surface)] px-4 py-3 text-xs text-[var(--muted-foreground)]">
+              {t("filePool.trainingModeNote")}
+            </div>
+
+            <FormFilePoolList
+              title={t("filePool.trainingTitle")}
+              description={t("filePool.trainingDesc")}
+              files={trainingPoolFiles}
+              emptyText={t("filePool.emptyTraining")}
+              countLabel={t("filePool.count", { n: trainingPoolFiles.length })}
+              openLabel={t("filePool.open")}
+              deleteLabel={t("filePool.delete")}
+              deletingLabel={t("filePool.deleting")}
+              buildFileHref={(file) => buildPoolFileHref("training", file.id)}
+              onDelete={(file) => handleDeletePoolFile("training", file)}
+              deletingFileId={deletingPoolFileId}
+            >
+              <label className="flex cursor-pointer items-center justify-between gap-3 rounded-lg border border-dashed border-[var(--border)] bg-[var(--background)] px-3 py-3">
+                <div>
+                  <div className="text-sm font-medium">{t("filePool.uploadTraining")}</div>
+                  <div className="mt-1 text-xs text-[var(--muted-foreground)]">{t("filePool.uploadTrainingHint")}</div>
+                </div>
+                <span className="rounded-md border border-[var(--border)] px-3 py-1.5 text-xs font-medium">
+                  {isUploadingPool === "training" ? t("filePool.uploading") : t("filePool.uploadTraining")}
+                </span>
+                <input
+                  className="hidden"
+                  type="file"
+                  accept={SUPPORTED_WORKSPACE_UPLOAD_ACCEPT}
+                  multiple
+                  onChange={(event) => {
+                    void handleTrainingPoolUpload(event.target.files);
+                    event.currentTarget.value = "";
+                  }}
+                />
+              </label>
+            </FormFilePoolList>
+
+            <FormFilePoolList
+              title={t("filePool.templateTitle")}
+              description={t("filePool.templateDesc")}
+              files={templatePoolFiles}
+              emptyText={t("filePool.emptyTemplate")}
+              countLabel={t("filePool.count", { n: templatePoolFiles.length })}
+              openLabel={t("filePool.open")}
+              deleteLabel={t("filePool.delete")}
+              deletingLabel={t("filePool.deleting")}
+              buildFileHref={(file) => buildPoolFileHref("templates", file.id)}
+              onDelete={(file) => handleDeletePoolFile("templates", file)}
+              deletingFileId={deletingPoolFileId}
+            >
+              <label className="flex cursor-pointer items-center justify-between gap-3 rounded-lg border border-dashed border-[var(--border)] bg-[var(--background)] px-3 py-3">
+                <div>
+                  <div className="text-sm font-medium">{t("filePool.uploadTemplate")}</div>
+                  <div className="mt-1 text-xs text-[var(--muted-foreground)]">{t("filePool.uploadTemplateHint")}</div>
+                </div>
+                <span className="rounded-md border border-[var(--border)] px-3 py-1.5 text-xs font-medium">
+                  {isUploadingPool === "templates" ? t("filePool.uploading") : t("filePool.uploadTemplate")}
+                </span>
+                <input
+                  className="hidden"
+                  type="file"
+                  accept={TEMPLATE_IMPORT_ACCEPT}
+                  multiple
+                  onChange={(event) => {
+                    void handleTemplatePoolUpload(event.target.files);
+                    event.currentTarget.value = "";
+                  }}
+                />
+              </label>
+            </FormFilePoolList>
 
             <div
               ref={uploadPanelRef}

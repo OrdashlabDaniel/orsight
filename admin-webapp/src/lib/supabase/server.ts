@@ -2,6 +2,7 @@ import "@/lib/supabase/force-ipv4";
 import { createServerClient, type CookieOptions } from "@supabase/ssr";
 import { cookies } from "next/headers";
 
+import { adminSupabaseCookieOptions } from "@/lib/supabase/cookies";
 import { getPublicSupabaseConfig } from "@/lib/supabase/env";
 
 export async function createClient() {
@@ -12,6 +13,7 @@ export async function createClient() {
     url,
     anonKey,
     {
+      cookieOptions: adminSupabaseCookieOptions,
       cookies: {
         getAll() {
           return cookieStore.getAll();
@@ -44,6 +46,7 @@ export async function createAdminClient() {
     url,
     serviceKey,
     {
+      cookieOptions: adminSupabaseCookieOptions,
       cookies: {
         getAll() {
           return cookieStore.getAll();

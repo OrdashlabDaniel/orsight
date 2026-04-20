@@ -6,5 +6,7 @@ select
   u.id,
   coalesce(u.raw_user_meta_data->>'pod_username', u.email::text)
 from auth.users u
-where not exists (select 1 from public.admin_users a where a.id = u.id)
+where
+  u.email_confirmed_at is not null
+  and not exists (select 1 from public.admin_users a where a.id = u.id)
 on conflict (id) do nothing;

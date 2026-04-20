@@ -14,7 +14,9 @@ import {
   type TableAnnotationFieldValues,
   type WorkbenchAnnotationBox,
 } from "@/components/TrainingAnnotationWorkbench";
+import { FormFilePoolList } from "@/components/FormFilePoolList";
 import { getLocalizedFormName } from "@/lib/form-display";
+import type { FormFilePoolItem, FormFilePoolName } from "@/lib/form-file-pools";
 import { getLocalizedTableFieldLabel } from "@/lib/table-field-display";
 import {
   buildFormFillHref,
@@ -104,6 +106,12 @@ type AnnotationDraftState = {
 type TemplateFromImageResponse = {
   tableFields?: TableFieldDefinition[];
   description?: string;
+  error?: string;
+};
+
+type FormFilePoolResponse = {
+  files?: FormFilePoolItem[];
+  file?: FormFilePoolItem;
   error?: string;
 };
 
@@ -262,6 +270,8 @@ export function FormSetupFlow({ initialForm }: { initialForm: FormDefinition }) 
   const [annotationImageSrc, setAnnotationImageSrc] = useState("");
   const [annotationDraft, setAnnotationDraft] = useState<AnnotationDraftState | null>(null);
   const [annotationFieldsForWorkbench, setAnnotationFieldsForWorkbench] = useState<TableFieldDefinition[]>([]);
+  const [templatePoolFiles, setTemplatePoolFiles] = useState<FormFilePoolItem[]>([]);
+  const [trainingPoolFiles, setTrainingPoolFiles] = useState<FormFilePoolItem[]>([]);
   const [noticeMessage, setNoticeMessage] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
   const [isLoading, setIsLoading] = useState(true);
@@ -272,6 +282,7 @@ export function FormSetupFlow({ initialForm }: { initialForm: FormDefinition }) 
   const [templateDropDragging, setTemplateDropDragging] = useState(false);
   const [dataSourceDropDragging, setDataSourceDropDragging] = useState(false);
   const [isCompleting, setIsCompleting] = useState(false);
+  const [deletingPoolFileId, setDeletingPoolFileId] = useState<string | null>(null);
 
   const templateZoneInputRef = useRef<HTMLInputElement | null>(null);
   const dataSourceZoneInputRef = useRef<HTMLInputElement | null>(null);
@@ -331,19 +342,86 @@ export function FormSetupFlow({ initialForm }: { initialForm: FormDefinition }) 
     setTrainingStatus(payload);
   }, [apiPathBuilder, t]);
 
+  const loadPoolFiles = useCallback(
+    async (pool: FormFilePoolName) => {
+      const response = await fetch(apiPathBuilder(`/api/form-file-pools?pool=${pool}`), { cache: "no-store" });
+      const payload = (await response.json()) as FormFilePoolResponse;
+      if (!response.ok) {
+        throw new Error(payload.error || t("filePool.errLoad"));
+      }
+      const nextFiles = Array.isArray(payload.files) ? payload.files : [];
+      if (pool === "templates") {
+        setTemplatePoolFiles(nextFiles);
+      } else {
+        setTrainingPoolFiles(nextFiles);
+      }
+      return nextFiles;
+    },
+    [apiPathBuilder, t],
+  );
+
+  const appendPoolFiles = useCallback((pool: FormFilePoolName, files: FormFilePoolItem[]) => {
+    if (files.length === 0) {
+      return;
+    }
+    const apply = (current: FormFilePoolItem[]) => [...files, ...current.filter((item) => !files.some((next) => next.id === item.id))];
+    if (pool === "templates") {
+      setTemplatePoolFiles(apply);
+    } else {
+      setTrainingPoolFiles(apply);
+    }
+  }, []);
+
+  const uploadFilesToPool = useCallback(
+    async (pool: FormFilePoolName, files: File[], source: string) => {
+      const uploaded: FormFilePoolItem[] = [];
+      for (const file of files) {
+        const formData = new FormData();
+        formData.append("pool", pool);
+        formData.append("formId", formId);
+        formData.append("source", source);
+        formData.append("file", file);
+        const response = await fetch("/api/form-file-pools", {
+          method: "POST",
+          body: formData,
+        });
+        const payload = (await response.json()) as FormFilePoolResponse;
+        if (!response.ok || !payload.file) {
+          throw new Error(payload.error || t("filePool.errUpload"));
+        }
+        uploaded.push(payload.file);
+      }
+      appendPoolFiles(pool, uploaded);
+      return uploaded;
+    },
+    [appendPoolFiles, formId, t],
+  );
+
+  const buildPoolFileHref = useCallback(
+    (pool: FormFilePoolName, fileId: string) =>
+      apiPathBuilder(`/api/form-file-pools?pool=${pool}&fileId=${encodeURIComponent(fileId)}&raw=1`),
+    [apiPathBuilder],
+  );
+
   useEffect(() => {
     void (async () => {
       setIsLoading(true);
       setErrorMessage("");
       try {
-        await Promise.all([loadForm(), loadTableFieldConfig(), loadTrainingStatus()]);
+        await Promise.all([
+          loadForm(),
+          loadTableFieldConfig(),
+          loadTrainingStatus(),
+          loadPoolFiles("templates"),
+          loadPoolFiles("training"),
+        ]);
       } catch (error) {
         setErrorMessage(error instanceof Error ? error.message : t("formSetup.errSetupLoad"));
       } finally {
         setIsLoading(false);
       }
     })();
-  }, [loadForm, loadTableFieldConfig, loadTrainingStatus, t]);
+  }, [loadForm, loadPoolFiles, loadTableFieldConfig, loadTrainingStatus, t]);
 
   useEffect(() => {
     function handleTableFieldsChanged() {
@@ -717,38 +795,71 @@ export function FormSetupFlow({ initialForm }: { initialForm: FormDefinition }) 
     }
   }
 
+  async function handleDeletePoolFile(pool: FormFilePoolName, file: FormFilePoolItem) {
+    const confirmed = window.confirm(t("filePool.confirmDelete", { name: file.fileName }));
+    if (!confirmed) {
+      return;
+    }
+    setDeletingPoolFileId(file.id);
+    setErrorMessage("");
+    try {
+      const response = await fetch(
+        apiPathBuilder(`/api/form-file-pools?pool=${pool}&fileId=${encodeURIComponent(file.id)}`),
+        { method: "DELETE" },
+      );
+      const payload = (await response.json()) as FormFilePoolResponse;
+      if (!response.ok) {
+        throw new Error(payload.error || t("filePool.errDelete"));
+      }
+      if (pool === "templates") {
+        setTemplatePoolFiles((current) => current.filter((item) => item.id !== file.id));
+      } else {
+        setTrainingPoolFiles((current) => current.filter((item) => item.id !== file.id));
+      }
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : t("filePool.errDelete"));
+    } finally {
+      setDeletingPoolFileId(null);
+    }
+  }
+
   async function ingestTemplateZoneFiles(fileList: FileList | null): Promise<void> {
     if (!fileList?.length) {
       return;
     }
-    if (templateZoneInputRef.current) {
-      templateZoneInputRef.current.value = "";
-    }
-    const files = Array.from(fileList);
-    const accepted = files.filter(isTemplateZoneFile);
-    const skippedCount = files.length - accepted.length;
-    if (!accepted.length) {
-      if (files.length) {
-        setNoticeMessage(t("formSetup.errWrongTemplateFiles"));
+    try {
+      if (templateZoneInputRef.current) {
+        templateZoneInputRef.current.value = "";
       }
-      return;
-    }
-    if (skippedCount > 0) {
-      setNoticeMessage(t("formSetup.skipWrongTemplate", { n: skippedCount }));
-    }
-    let hadSuccessfulTemplate = false;
-    for (const f of accepted) {
-      const ok = await processTemplateImportFile(f);
-      if (ok) {
-        hadSuccessfulTemplate = true;
+      const files = Array.from(fileList);
+      const accepted = files.filter(isTemplateZoneFile);
+      const skippedCount = files.length - accepted.length;
+      if (!accepted.length) {
+        if (files.length) {
+          setNoticeMessage(t("formSetup.errWrongTemplateFiles"));
+        }
+        return;
       }
-    }
-    if (hadSuccessfulTemplate) {
-      try {
-        await loadTableFieldConfig();
-      } catch {
-        /* loadTableFieldConfig 已在上层设过 error */
+      if (skippedCount > 0) {
+        setNoticeMessage(t("formSetup.skipWrongTemplate", { n: skippedCount }));
       }
+      await uploadFilesToPool("templates", accepted, "setup-template-zone");
+      let hadSuccessfulTemplate = false;
+      for (const f of accepted) {
+        const ok = await processTemplateImportFile(f);
+        if (ok) {
+          hadSuccessfulTemplate = true;
+        }
+      }
+      if (hadSuccessfulTemplate) {
+        try {
+          await loadTableFieldConfig();
+        } catch {
+          /* loadTableFieldConfig 已在上层设过 error */
+        }
+      }
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : t("filePool.errUpload"));
     }
   }
 
@@ -756,43 +867,49 @@ export function FormSetupFlow({ initialForm }: { initialForm: FormDefinition }) 
     if (!fileList?.length) {
       return;
     }
-    if (dataSourceZoneInputRef.current) {
-      dataSourceZoneInputRef.current.value = "";
-    }
-    const files = Array.from(fileList);
-    const accepted = files.filter(isSetupDataSourceFile);
-    const skippedCount = files.length - accepted.length;
-    if (!accepted.length) {
-      if (files.length) {
-        setNoticeMessage(t("formSetup.dataOnlyVisual"));
+    try {
+      if (dataSourceZoneInputRef.current) {
+        dataSourceZoneInputRef.current.value = "";
       }
-      return;
-    }
-    const documentFiles = accepted.filter((file) => isWorkspaceDocumentFile(file));
-    const visualFiles = accepted.filter((file) => !isWorkspaceDocumentFile(file));
-    const notices: string[] = [];
-    let fieldsHint: TableFieldDefinition[] | undefined;
-
-    if (documentFiles.length) {
-      const documentResult = await handleDocumentDataSources(documentFiles);
-      if (documentResult.message) {
-        notices.push(documentResult.message);
+      const files = Array.from(fileList);
+      const accepted = files.filter(isSetupDataSourceFile);
+      const skippedCount = files.length - accepted.length;
+      if (!accepted.length) {
+        if (files.length) {
+          setNoticeMessage(t("formSetup.dataOnlyVisual"));
+        }
+        return;
       }
-      fieldsHint = documentResult.fieldsHint;
-    }
+      const documentFiles = accepted.filter((file) => isWorkspaceDocumentFile(file));
+      const visualFiles = accepted.filter((file) => !isWorkspaceDocumentFile(file));
+      const notices: string[] = [];
+      let fieldsHint: TableFieldDefinition[] | undefined;
 
-    if (visualFiles.length) {
-      const visualNotice = await appendVisualSourcesFromFiles(visualFiles, fieldsHint);
-      if (visualNotice) {
-        notices.push(visualNotice);
+      await uploadFilesToPool("training", accepted, "setup-data-zone");
+
+      if (documentFiles.length) {
+        const documentResult = await handleDocumentDataSources(documentFiles);
+        if (documentResult.message) {
+          notices.push(documentResult.message);
+        }
+        fieldsHint = documentResult.fieldsHint;
       }
-    }
 
-    if (skippedCount > 0) {
-      notices.unshift(t("formSetup.skipMixedData", { n: skippedCount }));
-    }
-    if (notices.length) {
-      setNoticeMessage(notices.join(" "));
+      if (visualFiles.length) {
+        const visualNotice = await appendVisualSourcesFromFiles(visualFiles, fieldsHint);
+        if (visualNotice) {
+          notices.push(visualNotice);
+        }
+      }
+
+      if (skippedCount > 0) {
+        notices.unshift(t("formSetup.skipMixedData", { n: skippedCount }));
+      }
+      if (notices.length) {
+        setNoticeMessage(notices.join(" "));
+      }
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : t("filePool.errUpload"));
     }
   }
 
@@ -1124,6 +1241,7 @@ export function FormSetupFlow({ initialForm }: { initialForm: FormDefinition }) 
                 {t("formSetup.templatePasteHint", { helper: t("upload.templateHelper") })}
               </span>
             </label>
+            <p className="mt-2 text-xs text-[var(--muted-foreground)]">{t("filePool.setupTemplateArchive")}</p>
             {isTemplateImportBusy ? (
               <p className="mt-2 text-center text-xs text-[var(--muted-foreground)]">{t("formSetup.processing")}</p>
             ) : null}
@@ -1179,7 +1297,37 @@ export function FormSetupFlow({ initialForm }: { initialForm: FormDefinition }) 
                 {t("formSetup.dataPasteHint", { helper: t("upload.workspaceHelper") })}
               </span>
             </label>
+            <p className="mt-2 text-xs text-[var(--muted-foreground)]">{t("filePool.setupTrainingArchive")}</p>
           </div>
+        </div>
+
+        <div className="grid gap-4 md:grid-cols-2">
+          <FormFilePoolList
+            title={t("filePool.templateTitle")}
+            description={t("filePool.templateDesc")}
+            files={templatePoolFiles}
+            emptyText={t("filePool.emptyTemplate")}
+            countLabel={t("filePool.count", { n: templatePoolFiles.length })}
+            openLabel={t("filePool.open")}
+            deleteLabel={t("filePool.delete")}
+            deletingLabel={t("filePool.deleting")}
+            buildFileHref={(file) => buildPoolFileHref("templates", file.id)}
+            onDelete={(file) => handleDeletePoolFile("templates", file)}
+            deletingFileId={deletingPoolFileId}
+          />
+          <FormFilePoolList
+            title={t("filePool.trainingTitle")}
+            description={t("filePool.trainingDesc")}
+            files={trainingPoolFiles}
+            emptyText={t("filePool.emptyTraining")}
+            countLabel={t("filePool.count", { n: trainingPoolFiles.length })}
+            openLabel={t("filePool.open")}
+            deleteLabel={t("filePool.delete")}
+            deletingLabel={t("filePool.deleting")}
+            buildFileHref={(file) => buildPoolFileHref("training", file.id)}
+            onDelete={(file) => handleDeletePoolFile("training", file)}
+            deletingFileId={deletingPoolFileId}
+          />
         </div>
 
         <section className="flex flex-col gap-4">

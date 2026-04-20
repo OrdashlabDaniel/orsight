@@ -25,6 +25,21 @@ type FormMutationResponse = {
   error?: string;
 };
 
+type FormShareResponse = {
+  acceptUrl?: string;
+  emailSent?: boolean;
+  emailError?: string | null;
+  expiresAt?: number;
+  targetEmail?: string | null;
+  error?: string;
+};
+
+type FormShareAcceptResponse = {
+  form?: FormDefinition | null;
+  alreadyAccepted?: boolean;
+  error?: string;
+};
+
 export default function FormsPoolBoard() {
   const { locale, t } = useLocale();
   const formTitle = useCallback((form: FormDefinition) => getLocalizedFormName(form, locale), [locale]);
@@ -51,9 +66,19 @@ export default function FormsPoolBoard() {
   const [isLoading, setIsLoading] = useState(true);
   const [noticeMessage, setNoticeMessage] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
+  const [deleteTarget, setDeleteTarget] = useState<FormDefinition | null>(null);
+  const [deleteError, setDeleteError] = useState("");
   const [purgeTarget, setPurgeTarget] = useState<FormDefinition | null>(null);
   const [purgePassword, setPurgePassword] = useState("");
   const [purgeError, setPurgeError] = useState("");
+  const [shareTarget, setShareTarget] = useState<FormDefinition | null>(null);
+  const [shareRecipientEmail, setShareRecipientEmail] = useState("");
+  const [shareError, setShareError] = useState("");
+  const [shareInfoMessage, setShareInfoMessage] = useState("");
+  const [shareLink, setShareLink] = useState("");
+  const [shareExpiresAt, setShareExpiresAt] = useState<number | null>(null);
+  const [acceptShareInput, setAcceptShareInput] = useState("");
+  const [acceptShareError, setAcceptShareError] = useState("");
 
   const { active, recycleBin } = useMemo(() => splitForms(forms), [forms]);
 
@@ -140,19 +165,50 @@ export default function FormsPoolBoard() {
     }
   }
 
-  async function handleDeleteForm(form: FormDefinition) {
+  function openDeleteConfirm(form: FormDefinition) {
+    setErrorMessage("");
+    setDeleteError("");
+    setDeleteTarget(form);
+  }
+
+  async function handleDeleteForm(form: FormDefinition, fromModal = false) {
     setWorkingKey(`delete:${form.id}`);
     setErrorMessage("");
     setNoticeMessage("");
+    if (fromModal) {
+      setDeleteError("");
+    }
     try {
       await mutateForm(form.id, { action: "delete" });
       await loadForms();
       setNoticeMessage(t("formsPool.trashed", { name: formTitle(form) }));
+      setDeleteTarget(null);
+      setDeleteError("");
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : t("formsPool.errDelete"));
+      const msg = error instanceof Error ? error.message : t("formsPool.errDelete");
+      if (fromModal) {
+        setDeleteError(msg);
+      } else {
+        setErrorMessage(msg);
+      }
     } finally {
       setWorkingKey("");
     }
+  }
+
+  function cancelDeleteConfirm() {
+    if (deleteTarget && workingKey === `delete:${deleteTarget.id}`) {
+      return;
+    }
+    setDeleteTarget(null);
+    setDeleteError("");
+  }
+
+  async function confirmDelete() {
+    if (!deleteTarget) {
+      return;
+    }
+    await handleDeleteForm(deleteTarget, true);
   }
 
   async function handleRestoreForm(form: FormDefinition) {
@@ -225,6 +281,156 @@ export default function FormsPoolBoard() {
     setPurgeTarget(null);
     setPurgePassword("");
     setPurgeError("");
+  }
+
+  function openShareDialog(form: FormDefinition) {
+    setErrorMessage("");
+    setNoticeMessage("");
+    setShareTarget(form);
+    setShareRecipientEmail("");
+    setShareError("");
+    setShareInfoMessage("");
+    setShareLink("");
+    setShareExpiresAt(null);
+  }
+
+  function closeShareDialog() {
+    if (shareTarget && workingKey === `share:${shareTarget.id}`) {
+      return;
+    }
+    setShareTarget(null);
+    setShareRecipientEmail("");
+    setShareError("");
+    setShareInfoMessage("");
+    setShareLink("");
+    setShareExpiresAt(null);
+  }
+
+  async function handleCreateShare(form: FormDefinition, mode: "link" | "email") {
+    const recipientEmail = shareRecipientEmail.trim().toLowerCase();
+    if (mode === "email" && (!recipientEmail || !recipientEmail.includes("@"))) {
+      setShareError(t("login.errEmail"));
+      return;
+    }
+
+    setWorkingKey(`share:${form.id}`);
+    setShareError("");
+    setShareInfoMessage("");
+    try {
+      const response = await fetch(`/api/forms/${encodeURIComponent(form.id)}/share`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ recipientEmail: mode === "email" ? recipientEmail : "" }),
+      });
+      const payload = (await response.json().catch(() => null)) as FormShareResponse | null;
+      if (!response.ok || !payload?.acceptUrl) {
+        throw new Error(payload?.error || t("formsPool.errShare"));
+      }
+      setShareLink(payload.acceptUrl);
+      setShareExpiresAt(typeof payload.expiresAt === "number" ? payload.expiresAt : null);
+      if (payload.emailSent) {
+        setShareInfoMessage(t("formsPool.shareEmailSent"));
+      } else if (mode === "email") {
+        setShareInfoMessage(t("formsPool.shareEmailFallback"));
+      } else {
+        setShareInfoMessage("");
+      }
+    } catch (error) {
+      setShareError(error instanceof Error ? error.message : t("formsPool.errShare"));
+    } finally {
+      setWorkingKey("");
+    }
+  }
+
+  async function handleCopyShareLink() {
+    if (!shareLink) {
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(shareLink);
+      setShareInfoMessage(t("formsPool.shareCopied"));
+    } catch {
+      setShareError(t("formsPool.errShare"));
+    }
+  }
+
+  function openShareMailApp() {
+    if (!shareLink || !shareRecipientEmail.trim()) {
+      return;
+    }
+    const subject = encodeURIComponent(`OrSight: ${shareTarget?.name || "Shared form"}`);
+    const body = encodeURIComponent(`${shareTarget?.name || "Shared form"}\n\n${shareLink}`);
+    window.location.href = `mailto:${encodeURIComponent(shareRecipientEmail.trim())}?subject=${subject}&body=${body}`;
+  }
+
+  function extractShareToken(rawValue: string) {
+    const trimmed = rawValue.trim();
+    if (!trimmed) {
+      return "";
+    }
+
+    const tokenMatch = trimmed.match(/(?:[?&#]|^)token=([^&#\s]+)/i);
+    if (tokenMatch?.[1]) {
+      try {
+        return decodeURIComponent(tokenMatch[1]).trim();
+      } catch {
+        return tokenMatch[1].trim();
+      }
+    }
+
+    try {
+      const base = typeof window !== "undefined" ? window.location.origin : "http://localhost";
+      const url =
+        trimmed.startsWith("http://") || trimmed.startsWith("https://")
+          ? new URL(trimmed)
+          : trimmed.startsWith("/")
+            ? new URL(trimmed, base)
+            : null;
+      const token = url?.searchParams.get("token")?.trim();
+      if (token) {
+        return token;
+      }
+    } catch {
+      // Fall through to token-only input.
+    }
+
+    return /\s/.test(trimmed) ? "" : trimmed;
+  }
+
+  async function handleAcceptSharedForm() {
+    const token = extractShareToken(acceptShareInput);
+    if (!token) {
+      setAcceptShareError(t("formsPool.acceptSharedInvalid"));
+      return;
+    }
+
+    setWorkingKey("accept-share");
+    setAcceptShareError("");
+    setErrorMessage("");
+    setNoticeMessage("");
+    try {
+      const response = await fetch("/api/form-shares/accept", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token }),
+      });
+      const payload = (await response.json().catch(() => null)) as FormShareAcceptResponse | null;
+      if (!response.ok) {
+        throw new Error(payload?.error || t("formShare.errAccept"));
+      }
+
+      setAcceptShareInput("");
+      await loadForms();
+      setNoticeMessage(
+        payload?.alreadyAccepted
+          ? t("formsPool.acceptSharedAcceptedAlready")
+          : t("formsPool.acceptSharedAccepted", { name: payload?.form?.name || t("formsPool.acceptSharedAcceptedShort") }),
+      );
+    } catch (error) {
+      setAcceptShareError(error instanceof Error ? error.message : t("formShare.errAccept"));
+    } finally {
+      setWorkingKey("");
+    }
   }
 
   async function handleRename(formId: string) {
@@ -326,10 +532,18 @@ export default function FormsPoolBoard() {
                           >
                             {t("formsPool.clone")}
                           </button>
+                        <button
+                          type="button"
+                          onClick={() => openShareDialog(form)}
+                          disabled={isBusy}
+                          className="rounded-md border border-slate-300 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50 disabled:opacity-50"
+                        >
+                          {t("formsPool.share")}
+                        </button>
                           {!isDefaultForm ? (
                             <button
                               type="button"
-                              onClick={() => void handleDeleteForm(form)}
+                              onClick={() => openDeleteConfirm(form)}
                               disabled={isBusy}
                               className="rounded-md border border-rose-300 px-2 py-1 text-xs text-rose-700 hover:bg-rose-50 disabled:opacity-50"
                             >
@@ -391,6 +605,47 @@ export default function FormsPoolBoard() {
               </button>
             </div>
           </article>
+
+          <article className="rounded-2xl border border-dashed border-slate-300 bg-white p-5 shadow-sm">
+            <h2 className="text-lg font-semibold text-slate-900">{t("formsPool.acceptSharedTitle")}</h2>
+            <p className="mt-2 text-sm text-slate-600">{t("formsPool.acceptSharedDesc")}</p>
+            <form
+              className="mt-4"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void handleAcceptSharedForm();
+              }}
+            >
+              <label className="block">
+                <span className="text-sm font-medium text-slate-700">{t("formsPool.acceptSharedInputLabel")}</span>
+                <input
+                  type="text"
+                  value={acceptShareInput}
+                  onChange={(event) => {
+                    setAcceptShareInput(event.target.value);
+                    setAcceptShareError("");
+                  }}
+                  placeholder={t("formsPool.acceptSharedPlaceholder")}
+                  className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm outline-none focus:border-blue-500"
+                />
+              </label>
+              <p className="mt-2 text-xs text-slate-500">{t("formsPool.acceptSharedHint")}</p>
+              {acceptShareError ? (
+                <p className="mt-3 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-800">
+                  {acceptShareError}
+                </p>
+              ) : null}
+              <div className="mt-5">
+                <button
+                  type="submit"
+                  disabled={workingKey === "accept-share" || isLoading}
+                  className="inline-flex rounded-lg border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                >
+                  {workingKey === "accept-share" ? t("formsPool.acceptSharedAccepting") : t("formsPool.acceptSharedButton")}
+                </button>
+              </div>
+            </form>
+          </article>
         </section>
 
         <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
@@ -444,6 +699,54 @@ export default function FormsPoolBoard() {
             </ul>
           )}
         </section>
+
+        {deleteTarget ? (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="delete-dialog-title"
+            onMouseDown={(event) => {
+              if (event.target === event.currentTarget) {
+                cancelDeleteConfirm();
+              }
+            }}
+          >
+            <div className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-xl">
+              <h2 id="delete-dialog-title" className="text-lg font-semibold text-slate-900">
+                {t("formsPool.deleteConfirmTitle")}
+              </h2>
+              <p className="mt-2 text-sm text-slate-600">
+                {t("formsPool.deleteConfirmBody", { name: formTitle(deleteTarget) })}
+              </p>
+              {deleteError ? (
+                <p className="mt-3 text-sm text-rose-700" role="alert">
+                  {deleteError}
+                </p>
+              ) : null}
+              <div className="mt-5 flex flex-wrap justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={cancelDeleteConfirm}
+                  disabled={workingKey === `delete:${deleteTarget.id}`}
+                  className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                >
+                  {t("formsPool.cancel")}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void confirmDelete()}
+                  disabled={workingKey === `delete:${deleteTarget.id}`}
+                  className="rounded-xl border border-rose-300 bg-rose-50 px-4 py-2 text-sm font-medium text-rose-800 hover:bg-rose-100 disabled:opacity-50"
+                >
+                  {workingKey === `delete:${deleteTarget.id}`
+                    ? t("formsPool.deleteConfirming")
+                    : t("formsPool.deleteConfirm")}
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : null}
 
         {purgeTarget ? (
           <div
@@ -499,6 +802,122 @@ export default function FormsPoolBoard() {
                   className="rounded-xl border border-rose-300 bg-rose-50 px-4 py-2 text-sm font-medium text-rose-800 hover:bg-rose-100 disabled:opacity-50"
                 >
                   {workingKey === `purge:${purgeTarget.id}` ? t("formsPool.purgeConfirming") : t("formsPool.purgeConfirm")}
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : null}
+
+        {shareTarget ? (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="share-dialog-title"
+            onMouseDown={(event) => {
+              if (event.target === event.currentTarget) {
+                closeShareDialog();
+              }
+            }}
+          >
+            <div className="w-full max-w-lg rounded-2xl border border-slate-200 bg-white p-6 shadow-xl">
+              <h2 id="share-dialog-title" className="text-lg font-semibold text-slate-900">
+                {t("formsPool.shareDialogTitle")}
+              </h2>
+              <p className="mt-2 text-sm text-slate-600">
+                {t("formsPool.shareDialogBody")}
+              </p>
+              <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">
+                {formTitle(shareTarget)}
+              </div>
+
+              <label className="mt-4 block">
+                <span className="text-sm font-medium text-slate-700">{t("formsPool.shareEmailLabel")}</span>
+                <input
+                  type="email"
+                  value={shareRecipientEmail}
+                  onChange={(event) => {
+                    setShareRecipientEmail(event.target.value);
+                    setShareError("");
+                  }}
+                  placeholder={t("formsPool.shareEmailPlaceholder")}
+                  className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm outline-none focus:border-blue-500"
+                />
+              </label>
+              <p className="mt-2 text-xs text-slate-500">{t("formsPool.shareEmailHint")}</p>
+
+              {shareLink ? (
+                <div className="mt-4 space-y-2 rounded-xl border border-slate-200 bg-slate-50 p-3">
+                  <div className="text-xs font-medium uppercase tracking-wide text-slate-500">
+                    {t("formsPool.shareLinkLabel")}
+                  </div>
+                  <div className="break-all text-sm text-slate-700">{shareLink}</div>
+                  {shareExpiresAt ? (
+                    <div className="text-xs text-slate-500">
+                      {t("formsPool.shareExpires", {
+                        time: new Date(shareExpiresAt).toLocaleString(locale === "en" ? "en-US" : "zh-CN"),
+                      })}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+
+              {shareInfoMessage ? (
+                <p className="mt-3 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-900">
+                  {shareInfoMessage}
+                </p>
+              ) : null}
+              {shareError ? (
+                <p className="mt-3 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-800">
+                  {shareError}
+                </p>
+              ) : null}
+
+              <div className="mt-5 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => void handleCreateShare(shareTarget, "email")}
+                  disabled={workingKey === `share:${shareTarget.id}`}
+                  className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50"
+                >
+                  {workingKey === `share:${shareTarget.id}` ? t("formsPool.shareCreating") : t("formsPool.shareSendInvite")}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleCreateShare(shareTarget, "link")}
+                  disabled={workingKey === `share:${shareTarget.id}`}
+                  className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                >
+                  {workingKey === `share:${shareTarget.id}` ? t("formsPool.shareCreating") : t("formsPool.shareCreateLink")}
+                </button>
+                {shareLink ? (
+                  <button
+                    type="button"
+                    onClick={() => void handleCopyShareLink()}
+                    className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
+                  >
+                    {t("formsPool.shareCopyLink")}
+                  </button>
+                ) : null}
+                {shareLink && shareRecipientEmail.trim() ? (
+                  <button
+                    type="button"
+                    onClick={openShareMailApp}
+                    className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
+                  >
+                    {t("formsPool.shareOpenMailApp")}
+                  </button>
+                ) : null}
+              </div>
+
+              <div className="mt-5 flex justify-end">
+                <button
+                  type="button"
+                  onClick={closeShareDialog}
+                  disabled={workingKey === `share:${shareTarget.id}`}
+                  className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                >
+                  {t("formsPool.cancel")}
                 </button>
               </div>
             </div>
