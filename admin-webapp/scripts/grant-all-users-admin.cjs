@@ -66,6 +66,7 @@ async function main() {
 
   let added = 0;
   for (const u of all) {
+    if (!u.email_confirmed_at) continue;
     if (existingIds.has(u.id)) continue;
     const display =
       (typeof u.user_metadata?.pod_username === "string" &&

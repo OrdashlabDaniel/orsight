@@ -522,6 +522,17 @@ export function FormSetupClient({ initialForm }: { initialForm: FormDefinition }
     updateFieldDraft(field.id, (current) => ({ ...current, active: true }));
   }
 
+  function handlePurgeDeletedField(field: TableFieldDefinition) {
+    if (field.active) {
+      return;
+    }
+    const label = getLocalizedTableFieldLabel(field, locale);
+    if (!window.confirm(t("formSetup.confirmPurgeField", { label }))) {
+      return;
+    }
+    setFieldDrafts((current) => current.filter((item) => item.id !== field.id));
+  }
+
   function moveFieldDraft(fieldId: string, direction: -1 | 1) {
     setFieldDrafts((current) => {
       const activeFields = current.filter((field) => field.active);
@@ -970,23 +981,34 @@ export function FormSetupClient({ initialForm }: { initialForm: FormDefinition }
                       {deletedFieldDrafts.map((field) => (
                         <div
                           key={field.id}
-                          className="flex items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-3 py-3"
+                          className="flex flex-col gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-3 py-3 sm:flex-row sm:items-center sm:justify-between"
                         >
                           <div>
                             <div className="text-sm font-medium text-slate-700">
                               {getLocalizedTableFieldLabel(field, locale)}
                             </div>
                             <div className="mt-1 text-xs text-slate-500">
-                              {field.type === "number" ? "数字项目" : "文本项目"}
+                              {field.type === "number"
+                                ? t("formSetup.fieldTypeNumberFull")
+                                : t("formSetup.fieldTypeTextFull")}
                             </div>
                           </div>
-                          <button
-                            type="button"
-                            onClick={() => handleRestoreField(field)}
-                            className="rounded-xl border border-emerald-300 bg-emerald-50 px-3 py-2 text-sm font-medium text-emerald-700 hover:bg-emerald-100"
-                          >
-                            恢复
-                          </button>
+                          <div className="flex shrink-0 flex-col gap-2 sm:flex-row sm:items-center">
+                            <button
+                              type="button"
+                              onClick={() => handleRestoreField(field)}
+                              className="rounded-xl border border-emerald-300 bg-emerald-50 px-3 py-2 text-sm font-medium text-emerald-700 hover:bg-emerald-100"
+                            >
+                              {t("formSetup.restore")}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handlePurgeDeletedField(field)}
+                              className="rounded-xl border border-rose-300 bg-rose-50 px-3 py-2 text-sm font-medium text-rose-700 hover:bg-rose-100"
+                            >
+                              {t("formSetup.purgePermanent")}
+                            </button>
+                          </div>
                         </div>
                       ))}
                     </div>

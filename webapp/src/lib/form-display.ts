@@ -3,6 +3,7 @@ import type { FormDefinition } from "@/lib/forms";
 /** Demo / seed form titles (exact match). User-renamed forms won’t match these strings. */
 const CANONICAL_FORM_NAME_ZH_TO_EN: Record<string, string> = {
   抽擦路线表: "Route inspection (sample)",
+  财务支出表: "Financial expense sheet (sample)",
   财务支持记录: "Finance support log (sample)",
   财务支出记录: "Financial expense records (sample)",
   未命名填表: "Untitled form",
@@ -16,6 +17,8 @@ const DESCRIPTION_ZH_TO_EN: Record<string, string> = {
     "Draft: configure the table template and add training samples.",
   "已完成：沿用当前线上填表与训练能力。":
     "Sample: production-style route inspection and training.",
+  "标准列布局（日期、Vendor、Description 等），可直接填表或按需调整。":
+    "Standard finance-style columns (date, vendor, description, …). Fill as-is or adjust.",
 };
 
 const CLONE_SUFFIX_ZH = " 副本";

@@ -1,6 +1,8 @@
 import type { SupabaseClient, User } from "@supabase/supabase-js";
 import { cookies } from "next/headers";
 
+import { needsEmailConfirmation } from "@/lib/auth-email-confirmation";
+import { getAuthUserDisabledState } from "@/lib/auth-user-status";
 import {
   createDevMockUser,
   decodeDevMockUsername,
@@ -34,9 +36,18 @@ export async function getAuthContextOrSkip(): Promise<{
 
   if (isSupabaseAuthEnabled()) {
     const supabase = await createClient();
-    const {
+    let {
       data: { user },
     } = await supabase.auth.getUser();
+    const disabledState = await getAuthUserDisabledState(user);
+    if (disabledState.disabled || (user && needsEmailConfirmation(user))) {
+      try {
+        await supabase.auth.signOut();
+      } catch {
+        // Ignore cookie clearing failures in server components; downstream should still treat this as signed out.
+      }
+      user = null;
+    }
     return { user, skipAuth: false, supabase };
   }
 

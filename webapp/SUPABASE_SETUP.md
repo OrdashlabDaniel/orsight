@@ -33,9 +33,11 @@ SUPABASE_SERVICE_ROLE_KEY=你的_service_role_密钥
 
 | 位置 | 设置 |
 |------|------|
-| **Authentication → Providers → Email** | 关闭 **Confirm email**（用户名+密码流程无需邮箱验证） |
-| **Authentication → URL Configuration** | **Site URL**：本地填 `http://localhost:3000`；上线后改为正式域名 |
-| **Redirect URLs** | 增加 `http://localhost:3000/auth/callback` 及生产环境 `https://你的域名/auth/callback` |
+| **Authentication → Providers → Email** | 打开 Email provider；不要依赖默认发信服务做真实注册 |
+| **Authentication → Configuration → Custom SMTP** | 配置你自己的 SMTP（默认 SMTP 只发给项目团队成员邮箱，且限流很低） |
+| **Authentication → Email Templates** | 验证码模板里输出 `{{ .Token }}`，不要只保留 `{{ .ConfirmationURL }}` |
+| **Authentication → URL Configuration** | **Site URL**：上线后填正式域名；本地与预览用 Additional Redirect URLs |
+| **Redirect URLs** | 至少加入 `http://localhost:3000/**`、生产环境 `https://你的域名/auth/callback`、以及 `https://*-.vercel.app/**` |
 
 ---
 
@@ -73,7 +75,7 @@ SUPABASE_SERVICE_ROLE_KEY=你的_service_role_密钥
 
 1. **`SUPABASE_SERVICE_ROLE_KEY` 仅放在服务端环境变量**（如 Vercel 仅 Server，不要 `NEXT_PUBLIC_`）。
 2. **不要把 `service_role` 写进浏览器或 Git。**
-3. 生产环境在 Supabase 把 **Site URL**、**Redirect URLs** 改成你的正式域名。
+3. 生产环境在 Supabase 把 **Site URL** 改成你的正式域名，同时保留 localhost 与 preview 的 **Redirect URLs** 以便线下 / 支线 OAuth 可继续使用。
 4. 发布版已为 `app_*` 表和 `storage.objects` 加了基于 `auth.uid()` 的 RLS / Storage policy；普通用户请求应优先走用户会话，不要再把业务数据读写建立在 service role 上。
 
 ---

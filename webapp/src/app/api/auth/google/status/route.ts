@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 
+import { POST_LOGIN_DEFAULT_PATH } from "@/lib/post-login-home";
 import { getPublicSupabaseAnonKey, getPublicSupabaseUrl, isSupabaseAuthEnabled } from "@/lib/supabase";
 
 export async function GET(request: Request) {
@@ -8,7 +9,7 @@ export async function GET(request: Request) {
   }
 
   const { searchParams, origin } = new URL(request.url);
-  const next = searchParams.get("next") ?? "/";
+  const next = searchParams.get("next") ?? POST_LOGIN_DEFAULT_PATH;
   const redirectTo = `${origin}/auth/callback?next=${encodeURIComponent(next)}`;
   const authorizeUrl = new URL("/auth/v1/authorize", getPublicSupabaseUrl());
   authorizeUrl.searchParams.set("provider", "google");

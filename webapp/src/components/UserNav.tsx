@@ -9,6 +9,7 @@ import { getDisplayUsernameFromUser } from "@/lib/auth-username";
 import { isDevMockLoginEnabled } from "@/lib/dev-mock-auth";
 import { createClient } from "@/lib/supabase/browser";
 import { isSupabaseAuthEnabled } from "@/lib/supabase";
+import { POST_LOGIN_DEFAULT_PATH } from "@/lib/post-login-home";
 
 export function UserNav() {
   const { locale, setLocale, t } = useLocale();
@@ -22,6 +23,32 @@ export function UserNav() {
   useEffect(() => {
     if (supabaseOn) {
       const supabase = createClient();
+      let cancelled = false;
+
+      async function enforceSessionStatus() {
+        try {
+          const res = await fetch("/api/auth/session-status", {
+            method: "GET",
+            cache: "no-store",
+          });
+          const payload = (await res.json().catch(() => null)) as
+            | { active?: boolean; reason?: string | null }
+            | null;
+          if (cancelled || payload?.active !== false) {
+            return;
+          }
+          await supabase.auth.signOut();
+          const loginUrl =
+            payload?.reason === "recycled" || payload?.reason === "confirm_email"
+              ? `/login?reason=${encodeURIComponent(payload.reason)}`
+              : "/login";
+          router.replace(loginUrl);
+          router.refresh();
+        } catch {
+          // Ignore transient polling failures and retry later.
+        }
+      }
+
       void supabase.auth.getUser().then(({ data: { user } }) => {
         setDisplayName(user ? getDisplayUsernameFromUser(user) : null);
       });
@@ -33,7 +60,23 @@ export function UserNav() {
         setDisplayName(user ? getDisplayUsernameFromUser(user) : null);
       });
 
+      void enforceSessionStatus();
+      const intervalId = window.setInterval(() => {
+        void enforceSessionStatus();
+      }, 5000);
+      const onFocus = () => {
+        if (document.visibilityState === "visible") {
+          void enforceSessionStatus();
+        }
+      };
+      window.addEventListener("focus", onFocus);
+      document.addEventListener("visibilitychange", onFocus);
+
       return () => {
+        cancelled = true;
+        window.clearInterval(intervalId);
+        window.removeEventListener("focus", onFocus);
+        document.removeEventListener("visibilitychange", onFocus);
         subscription.unsubscribe();
       };
     }
@@ -51,7 +94,7 @@ export function UserNav() {
     }
 
     return;
-  }, [supabaseOn, devMock]);
+  }, [supabaseOn, devMock, router]);
 
   if (!supabaseOn && !devMock) {
     return null;
@@ -72,7 +115,7 @@ export function UserNav() {
     <header className="sticky top-0 z-40 border-b border-[var(--border)] bg-[var(--surface)]/90 backdrop-blur-sm">
       <div className="mx-auto flex w-[80%] max-w-full items-center justify-between gap-4 px-3 py-2 text-sm">
         <Link
-          href="/"
+          href={POST_LOGIN_DEFAULT_PATH}
           className="shrink-0 text-base font-semibold tracking-tight text-[var(--foreground)] hover:opacity-80"
         >
           Orsight

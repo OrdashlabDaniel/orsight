@@ -1,6 +1,7 @@
 "use client";
 
 import Image from "next/image";
+import JSZip from "jszip";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Fragment, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -21,7 +22,6 @@ import {
   organizeRecords,
 } from "@/lib/pod";
 import {
-  DEFAULT_TABLE_FIELDS,
   broadcastTableFieldsChanged,
   createCustomField,
   getActiveTableFields,
@@ -240,6 +240,20 @@ function formatDateForFilename(rawDate: string | undefined, dataSuffix: string) 
   return `${normalized.replace(/[\\/:*?"<>|]/g, "-")}_${dataSuffix}`;
 }
 
+function formatTimestampForFilename(date = new Date()) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  const hours = String(date.getHours()).padStart(2, "0");
+  const minutes = String(date.getMinutes()).padStart(2, "0");
+  return `${year}${month}${day}-${hours}${minutes}`;
+}
+
+function buildArchiveEntryName(fileName: string, index: number) {
+  const safeName = (fileName || "upload").replace(/[\\/:*?"<>|]/g, "-");
+  return `${String(index + 1).padStart(2, "0")}-${safeName}`;
+}
+
 const ISSUE_CODE_FIELD_REQUIREMENTS: Record<string, string[]> = {
   missing_task_code: ["taskCode"],
   invalid_task_code: ["taskCode"],
@@ -299,12 +313,14 @@ function HomeContent() {
 
   const [uploads, setUploads] = useState<UploadItem[]>([]);
   const [selectedUploadId, setSelectedUploadId] = useState<string | null>(null);
+  const [selectedUploadIds, setSelectedUploadIds] = useState<string[]>([]);
   const [records, setRecords] = useState<PodRecord[]>([]);
   const [issues, setIssues] = useState<ExtractionIssue[]>([]);
   const [confirmedCorrectRecords, setConfirmedCorrectRecords] = useState<ConfirmedCorrectRecord[]>([]);
   const [isExtracting, setIsExtracting] = useState(false);
   const [isHighQualityReextracting, setIsHighQualityReextracting] = useState(false);
   const [isRetryingReviewAll, setIsRetryingReviewAll] = useState(false);
+  const [isExportingUploads, setIsExportingUploads] = useState(false);
   const [retryingKeys, setRetryingKeys] = useState<string[]>([]);
   const [progress, setProgress] = useState<{ completed: number; total: number } | null>(null);
   const [trainingExamplesLoaded, setTrainingExamplesLoaded] = useState(0);
@@ -330,9 +346,9 @@ function HomeContent() {
   const [viewerLoadError, setViewerLoadError] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
   const [noticeMessage, setNoticeMessage] = useState("");
-  const [tableFields, setTableFields] = useState<TableFieldDefinition[]>(DEFAULT_TABLE_FIELDS);
+  const [tableFields, setTableFields] = useState<TableFieldDefinition[]>([]);
   const [isFieldManagerOpen, setIsFieldManagerOpen] = useState(false);
-  const [fieldDrafts, setFieldDrafts] = useState<TableFieldDefinition[]>(DEFAULT_TABLE_FIELDS);
+  const [fieldDrafts, setFieldDrafts] = useState<TableFieldDefinition[]>([]);
   const [newFieldName, setNewFieldName] = useState("");
   const [newFieldType, setNewFieldType] = useState<"text" | "number">("text");
   const [isSavingFieldConfig, setIsSavingFieldConfig] = useState(false);
@@ -341,6 +357,7 @@ function HomeContent() {
   const [columnFilters, setColumnFilters] = useState<Record<string, string>>({});
   const viewerAnchorRef = useRef<HTMLElement | null>(null);
   const uploadPanelRef = useRef<HTMLDivElement | null>(null);
+  const uploadInputRef = useRef<HTMLInputElement | null>(null);
   const splitResultsRef = useRef<HTMLDivElement | null>(null);
   const columnDragRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const rowDragRef = useRef<{ startY: number; startHeight: number; shellHeight: number } | null>(null);
@@ -364,6 +381,10 @@ function HomeContent() {
       revokeUploadPreviewUrls(uploadsRef.current);
     };
   }, []);
+
+  useEffect(() => {
+    setSelectedUploadIds((current) => current.filter((id) => uploads.some((upload) => upload.id === id)));
+  }, [uploads]);
 
   useEffect(() => {
     uploadPanelWidthRef.current = uploadPanelWidthPx;
@@ -712,6 +733,11 @@ function HomeContent() {
     () => uploads.find((upload) => upload.id === selectedUploadId) || uploads[0] || null,
     [selectedUploadId, uploads],
   );
+  const selectedUploads = useMemo(
+    () => uploads.filter((upload) => selectedUploadIds.includes(upload.id)),
+    [selectedUploadIds, uploads],
+  );
+  const allUploadsSelected = uploads.length > 0 && selectedUploadIds.length === uploads.length;
   const activeTableFields = useMemo(() => getActiveTableFields(tableFields), [tableFields]);
   const activeBuiltInFieldIds = useMemo(
     () => new Set(activeTableFields.filter((field) => field.builtIn).map((field) => field.id)),
@@ -1026,7 +1052,7 @@ function HomeContent() {
       if (!response.ok) {
         throw new Error(payload.error || t("home.errTableCfg"));
       }
-      const nextFields = payload.tableFields?.length ? payload.tableFields : DEFAULT_TABLE_FIELDS;
+      const nextFields = Array.isArray(payload.tableFields) ? payload.tableFields : [];
       setTableFields(nextFields);
       setFieldDrafts(nextFields);
     } catch (error) {
@@ -1167,7 +1193,7 @@ function HomeContent() {
   }
   handleFilesRef.current = handleFiles;
 
-  function handleDragOver(event: React.DragEvent<HTMLLabelElement>) {
+  function handleDragOver(event: React.DragEvent<HTMLDivElement>) {
     event.preventDefault();
     event.stopPropagation();
     if (!isDraggingFiles) {
@@ -1175,17 +1201,31 @@ function HomeContent() {
     }
   }
 
-  function handleDragLeave(event: React.DragEvent<HTMLLabelElement>) {
+  function handleDragLeave(event: React.DragEvent<HTMLDivElement>) {
     event.preventDefault();
     event.stopPropagation();
     setIsDraggingFiles(false);
   }
 
-  function handleDrop(event: React.DragEvent<HTMLLabelElement>) {
+  function handleDrop(event: React.DragEvent<HTMLDivElement>) {
     event.preventDefault();
     event.stopPropagation();
     setIsDraggingFiles(false);
     void handleFiles(event.dataTransfer.files);
+  }
+
+  function openUploadFilePicker() {
+    uploadInputRef.current?.click();
+  }
+
+  function toggleUploadSelected(uploadId: string) {
+    setSelectedUploadIds((current) =>
+      current.includes(uploadId) ? current.filter((id) => id !== uploadId) : [...current, uploadId],
+    );
+  }
+
+  function toggleSelectAllUploads() {
+    setSelectedUploadIds((current) => (current.length === uploads.length ? [] : uploads.map((upload) => upload.id)));
   }
 
   function clearAll() {
@@ -1195,6 +1235,7 @@ function HomeContent() {
     clearWorkbenchSessionDraft(currentFormId);
     void clearPersistedWorkbenchUploads(currentFormId);
     setUploads([]);
+    setSelectedUploadIds([]);
     setSelectedUploadId(null);
     setRecords([]);
     setIssues([]);
@@ -1202,6 +1243,70 @@ function HomeContent() {
     setTrainingExamplesLoaded(0);
     setErrorMessage("");
     setNoticeMessage(t("home.cleared"));
+  }
+
+  async function downloadSelectedUploads() {
+    if (!selectedUploads.length) {
+      setErrorMessage(t("home.errNoUploadSelected"));
+      return;
+    }
+
+    setIsExportingUploads(true);
+    setErrorMessage("");
+    setNoticeMessage("");
+
+    const filename = `orsight-uploads-${formatTimestampForFilename()}.zip`;
+
+    try {
+      const zip = new JSZip();
+      for (const [index, upload] of selectedUploads.entries()) {
+        zip.file(buildArchiveEntryName(upload.file.name, index), await upload.file.arrayBuffer());
+      }
+
+      const archiveBlob = await zip.generateAsync({ type: "blob" });
+
+      try {
+        const pickerWindow = window as WindowWithSavePicker;
+        if (typeof pickerWindow.showSaveFilePicker === "function") {
+          const handle = await pickerWindow.showSaveFilePicker({
+            suggestedName: filename,
+            types: [
+              {
+                description: t("home.uploadArchive"),
+                accept: {
+                  "application/zip": [".zip"],
+                },
+              },
+            ],
+          });
+          const writable = await handle.createWritable();
+          await writable.write(archiveBlob);
+          await writable.close();
+          setNoticeMessage(t("home.uploadArchiveSaved", { name: filename }));
+          return;
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (message.toLowerCase().includes("abort")) {
+          setNoticeMessage(t("home.uploadArchiveCancelled"));
+          return;
+        }
+      }
+
+      const downloadUrl = URL.createObjectURL(archiveBlob);
+      const link = document.createElement("a");
+      link.href = downloadUrl;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(downloadUrl), 1000);
+      setNoticeMessage(t("home.uploadArchiveDownloaded", { name: filename }));
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : t("home.errDownloadUploads"));
+    } finally {
+      setIsExportingUploads(false);
+    }
   }
 
   function openFieldManager() {
@@ -1287,6 +1392,17 @@ function HomeContent() {
 
   function handleRestoreFieldDraft(field: TableFieldDefinition) {
     updateFieldDraft(field.id, (current) => ({ ...current, active: true }));
+  }
+
+  function handlePurgeDeletedFieldDraft(field: TableFieldDefinition) {
+    if (field.active) {
+      return;
+    }
+    const label = getLocalizedTableFieldLabel(field, locale);
+    if (!window.confirm(t("home.confirmPurgeField", { label }))) {
+      return;
+    }
+    setFieldDrafts((current) => current.filter((item) => item.id !== field.id));
   }
 
   function moveFieldDraft(fieldId: string, direction: -1 | 1) {
@@ -2238,7 +2354,10 @@ function HomeContent() {
                         fieldDrafts
                           .filter((field) => !field.active)
                           .map((field) => (
-                            <div key={field.id} className="flex items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-3 py-3">
+                            <div
+                              key={field.id}
+                              className="flex flex-col gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-3 py-3 sm:flex-row sm:items-center sm:justify-between"
+                            >
                               <div>
                                 <div className="text-sm font-medium text-slate-700">
                                   {getLocalizedTableFieldLabel(field, locale)}
@@ -2249,13 +2368,22 @@ function HomeContent() {
                                     : t("formSetup.fieldTypeTextFull")}
                                 </div>
                               </div>
-                              <button
-                                type="button"
-                                className="rounded-xl border border-emerald-300 bg-emerald-50 px-3 py-2 text-sm font-medium text-emerald-700 hover:bg-emerald-100"
-                                onClick={() => handleRestoreFieldDraft(field)}
-                              >
-                                {t("formSetup.restore")}
-                              </button>
+                              <div className="flex shrink-0 flex-col gap-2 sm:flex-row sm:items-center">
+                                <button
+                                  type="button"
+                                  className="rounded-xl border border-emerald-300 bg-emerald-50 px-3 py-2 text-sm font-medium text-emerald-700 hover:bg-emerald-100"
+                                  onClick={() => handleRestoreFieldDraft(field)}
+                                >
+                                  {t("formSetup.restore")}
+                                </button>
+                                <button
+                                  type="button"
+                                  className="rounded-xl border border-rose-300 bg-rose-50 px-3 py-2 text-sm font-medium text-rose-700 hover:bg-rose-100"
+                                  onClick={() => handlePurgeDeletedFieldDraft(field)}
+                                >
+                                  {t("home.purgePermanent")}
+                                </button>
+                              </div>
                             </div>
                           ))
                       ) : (
@@ -2303,30 +2431,6 @@ function HomeContent() {
             </div>
 
             <div className="flex flex-col gap-4 p-4 pb-3">
-              <label
-                className={`flex min-h-[140px] cursor-pointer flex-col items-center justify-center rounded-lg border border-dashed px-3 py-6 text-center transition ${
-                  isDraggingFiles
-                    ? "border-[var(--accent)] bg-[var(--accent-muted)]"
-                    : "border-[var(--border)] bg-[var(--background)] hover:border-[var(--muted-foreground)]"
-                }`}
-                onDragOver={handleDragOver}
-                onDragEnter={handleDragOver}
-                onDragLeave={handleDragLeave}
-                onDrop={handleDrop}
-              >
-                <span className="text-sm">{t("home.dropClick")}</span>
-                <span className="mt-1 text-xs text-[var(--muted-foreground)]">
-                  {isDraggingFiles ? t("home.dropRelease") : t("home.pasteHint")}
-                </span>
-                <input
-                  className="hidden"
-                  type="file"
-                  accept={SUPPORTED_WORKSPACE_UPLOAD_ACCEPT}
-                  multiple
-                  onChange={(event) => void handleFiles(event.target.files)}
-                />
-              </label>
-
               <div className="flex flex-wrap gap-2">
                 <button
                   className="rounded-md bg-[var(--foreground)] px-3 py-2 text-sm text-[var(--background)] hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
@@ -2432,34 +2536,118 @@ function HomeContent() {
             </div>
 
             <div className="border-t border-[var(--border)] px-2 pb-2 pt-1">
-              <div className="max-h-[min(50vh,420px)] overflow-y-auto rounded-lg border border-[var(--border)] bg-[var(--background)]">
+              <input
+                ref={uploadInputRef}
+                className="hidden"
+                type="file"
+                accept={SUPPORTED_WORKSPACE_UPLOAD_ACCEPT}
+                multiple
+                onChange={(event) => {
+                  void handleFiles(event.target.files);
+                  event.currentTarget.value = "";
+                }}
+              />
+              <div
+                className={`overflow-hidden rounded-lg border transition ${
+                  isDraggingFiles
+                    ? "border-[var(--accent)] bg-[var(--accent-muted)]"
+                    : "border-[var(--border)] bg-[var(--background)]"
+                }`}
+                onDragOver={handleDragOver}
+                onDragEnter={handleDragOver}
+                onDragLeave={handleDragLeave}
+                onDrop={handleDrop}
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--border)] px-3 py-2">
+                  <div className="min-w-0">
+                    <div className="text-xs font-medium text-[var(--foreground)]">{t("home.uploadListTitle")}</div>
+                    <div className="mt-0.5 text-xs text-[var(--muted-foreground)]">
+                      {isDraggingFiles ? t("home.dropRelease") : t("home.uploadListHint")}
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      className="rounded-md border border-[var(--border)] px-2.5 py-1.5 text-xs font-medium hover:bg-[var(--surface)]"
+                      onClick={openUploadFilePicker}
+                    >
+                      {t("home.addFiles")}
+                    </button>
+                    {uploads.length ? (
+                      <button
+                        type="button"
+                        className="rounded-md border border-[var(--border)] px-2.5 py-1.5 text-xs font-medium hover:bg-[var(--surface)]"
+                        onClick={toggleSelectAllUploads}
+                      >
+                        {allUploadsSelected ? t("home.deselectAllUploads") : t("home.selectAllUploads")}
+                      </button>
+                    ) : null}
+                    <button
+                      type="button"
+                      className="rounded-md border border-[var(--border)] px-2.5 py-1.5 text-xs font-medium hover:bg-[var(--surface)] disabled:cursor-not-allowed disabled:opacity-40"
+                      onClick={() => void downloadSelectedUploads()}
+                      disabled={isExportingUploads || !selectedUploads.length}
+                    >
+                      {isExportingUploads ? t("home.exportingSelectedUploads") : t("home.exportSelectedUploads")}
+                    </button>
+                  </div>
+                </div>
+                {uploads.length ? (
+                  <div className="border-b border-[var(--border)] px-3 py-2 text-xs text-[var(--muted-foreground)]">
+                    {t("home.uploadSelectedCount", {
+                      selected: selectedUploads.length,
+                      total: uploads.length,
+                    })}
+                  </div>
+                ) : null}
+                <div className="max-h-[min(50vh,420px)] overflow-y-auto">
                 {uploads.length ? (
                   <ul className="divide-y divide-[var(--border)]">
                     {uploads.map((upload) => (
                       <li key={upload.id}>
-                        <button
-                          type="button"
-                          className={`flex w-full items-center gap-3 px-3 py-2 text-left text-sm transition-colors ${
-                            selectedUpload?.id === upload.id ? "bg-[var(--accent-muted)]" : "hover:bg-[var(--background)]"
-                          }`}
-                          onClick={(e) => handleImageClick(upload, e)}
-                        >
-                          <div className="relative h-11 w-11 shrink-0 overflow-hidden rounded border border-[var(--border)] bg-[var(--background)]">
-                            <Image src={upload.previewUrl} alt={upload.file.name} className="object-cover" fill unoptimized />
-                          </div>
-                          <div className="min-w-0 flex-1">
-                            <div className="truncate font-medium">{upload.file.name}</div>
-                            <div className="mt-0.5 text-xs text-[var(--muted-foreground)]">
-                              {(upload.file.size / 1024).toFixed(1)} KB
+                        <div className="flex items-center gap-2 px-3 py-2">
+                          <input
+                            type="checkbox"
+                            checked={selectedUploadIds.includes(upload.id)}
+                            onChange={() => toggleUploadSelected(upload.id)}
+                            onClick={(event) => event.stopPropagation()}
+                            aria-label={upload.file.name}
+                            className="h-4 w-4 rounded border-[var(--border)]"
+                          />
+                          <button
+                            type="button"
+                            className={`flex min-w-0 flex-1 items-center gap-3 rounded-md px-2 py-1.5 text-left text-sm transition-colors ${
+                              selectedUpload?.id === upload.id ? "bg-[var(--accent-muted)]" : "hover:bg-[var(--surface)]"
+                            }`}
+                            onClick={(e) => handleImageClick(upload, e)}
+                          >
+                            <div className="relative h-11 w-11 shrink-0 overflow-hidden rounded border border-[var(--border)] bg-[var(--background)]">
+                              <Image src={upload.previewUrl} alt={upload.file.name} className="object-cover" fill unoptimized />
                             </div>
-                          </div>
-                        </button>
+                            <div className="min-w-0 flex-1">
+                              <div className="truncate font-medium">{upload.file.name}</div>
+                              <div className="mt-0.5 text-xs text-[var(--muted-foreground)]">
+                                {(upload.file.size / 1024).toFixed(1)} KB
+                              </div>
+                            </div>
+                          </button>
+                        </div>
                       </li>
                     ))}
                   </ul>
                 ) : (
-                  <div className="px-4 py-10 text-center text-sm text-[var(--muted-foreground)]">{t("home.uploadQueueEmpty")}</div>
+                  <button
+                    type="button"
+                    className="flex min-h-[220px] w-full flex-col items-center justify-center px-4 py-10 text-center text-sm text-[var(--muted-foreground)]"
+                    onClick={openUploadFilePicker}
+                  >
+                    <span>{t("home.uploadQueueEmpty")}</span>
+                    <span className="mt-2 text-xs">
+                      {isDraggingFiles ? t("home.dropRelease") : t("home.uploadListHint")}
+                    </span>
+                  </button>
                 )}
+                </div>
               </div>
             </div>
           </div>

@@ -1,10 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { DEFAULT_FORM_ID, STARTER_FORM_2_ID, normalizeFormId } from "@/lib/forms";
+import { DEFAULT_FORM_ID, STANDARD_FINANCE_STARTER_TABLE_FIELDS, STARTER_FORM_2_ID, normalizeFormId } from "@/lib/forms";
 import { loadRemoteFormConfig, saveRemoteFormConfig } from "@/lib/form-config-db";
 import { hasTenantDbAccess } from "@/lib/tenant-db";
-import { DEFAULT_TABLE_FIELDS, normalizeTableFields, type TableFieldDefinition } from "@/lib/table-fields";
+import { normalizeTableFields, type TableFieldDefinition } from "@/lib/table-fields";
 
 function localFieldConfigCandidatePaths(formId = DEFAULT_FORM_ID) {
   if (normalizeFormId(formId) !== DEFAULT_FORM_ID) {
@@ -26,29 +26,41 @@ function resolveLocalFieldConfigPath(formId = DEFAULT_FORM_ID) {
   );
 }
 
-function cloneDefaultTableFields() {
-  return DEFAULT_TABLE_FIELDS.map((field) => ({ ...field }));
+function isGiftStarterFormId(formId = DEFAULT_FORM_ID) {
+  const id = normalizeFormId(formId);
+  return id === DEFAULT_FORM_ID || id === STARTER_FORM_2_ID;
 }
 
-function shouldUseBlankFieldConfig(formId = DEFAULT_FORM_ID) {
-  const id = normalizeFormId(formId);
-  return id !== DEFAULT_FORM_ID && id !== STARTER_FORM_2_ID;
+function cloneGiftStarterTableFields() {
+  return STANDARD_FINANCE_STARTER_TABLE_FIELDS.map((field) => ({ ...field }));
+}
+
+function fallbackTableFields(formId = DEFAULT_FORM_ID): TableFieldDefinition[] {
+  return isGiftStarterFormId(formId) ? cloneGiftStarterTableFields() : [];
+}
+
+function normalizeStoredTableFields(raw: unknown, formId = DEFAULT_FORM_ID): TableFieldDefinition[] {
+  const normalized = normalizeTableFields(raw, {
+    preserveEmpty: true,
+    appendMissingBuiltIns: false,
+  });
+  if (normalized.length === 0 && isGiftStarterFormId(formId)) {
+    return cloneGiftStarterTableFields();
+  }
+  return normalized;
 }
 
 function loadLocalTableFields(formId = DEFAULT_FORM_ID): TableFieldDefinition[] {
   const filePath = resolveLocalFieldConfigPath(formId);
   if (!fs.existsSync(filePath)) {
-    return shouldUseBlankFieldConfig(formId) ? [] : cloneDefaultTableFields();
+    return fallbackTableFields(formId);
   }
 
   try {
     const payload = JSON.parse(fs.readFileSync(filePath, "utf8")) as { tableFields?: unknown };
-    return normalizeTableFields(payload.tableFields, {
-      preserveEmpty: shouldUseBlankFieldConfig(formId),
-      appendMissingBuiltIns: !shouldUseBlankFieldConfig(formId),
-    });
+    return normalizeStoredTableFields(payload.tableFields, formId);
   } catch {
-    return shouldUseBlankFieldConfig(formId) ? [] : cloneDefaultTableFields();
+    return fallbackTableFields(formId);
   }
 }
 
@@ -67,24 +79,17 @@ export async function loadTableFields(formId = DEFAULT_FORM_ID): Promise<TableFi
   try {
     const config = await loadRemoteFormConfig(normalizedFormId);
     if (!config) {
-      return shouldUseBlankFieldConfig(normalizedFormId) ? [] : cloneDefaultTableFields();
+      return fallbackTableFields(normalizedFormId);
     }
-    return normalizeTableFields(config.tableFields, {
-      preserveEmpty: shouldUseBlankFieldConfig(normalizedFormId),
-      appendMissingBuiltIns: !shouldUseBlankFieldConfig(normalizedFormId),
-    });
+    return normalizeStoredTableFields(config.tableFields, normalizedFormId);
   } catch {
-    return shouldUseBlankFieldConfig(normalizedFormId) ? [] : cloneDefaultTableFields();
+    return fallbackTableFields(normalizedFormId);
   }
 }
 
 export async function saveTableFields(fields: TableFieldDefinition[], formId = DEFAULT_FORM_ID) {
   const normalizedFormId = normalizeFormId(formId);
-  const blankFieldConfig = shouldUseBlankFieldConfig(normalizedFormId);
-  const normalized = normalizeTableFields(fields, {
-    preserveEmpty: blankFieldConfig,
-    appendMissingBuiltIns: !blankFieldConfig,
-  });
+  const normalized = normalizeStoredTableFields(fields, normalizedFormId);
   if (!hasTenantDbAccess()) {
     saveLocalTableFields(normalized, normalizedFormId);
     return normalized;
