@@ -14,7 +14,9 @@ export async function GET(request: Request) {
   const verifiedFlag = searchParams.get("verified") === "1";
   const next = searchParams.get("next");
   const nextPath = next?.startsWith("/") ? next : POST_LOGIN_DEFAULT_PATH;
-  const isSignupVerification = verifiedFlag || callbackType === "signup";
+  // Only show the email-verified success page for explicit email confirmation callbacks.
+  // OAuth code exchanges (for example Google login) can also arrive here and must continue to the app.
+  const isSignupVerification = verifiedFlag || (Boolean(tokenHash) && callbackType === "signup");
 
   if (code || (tokenHash && callbackType)) {
     const supabase = await createClient();
@@ -29,9 +31,7 @@ export async function GET(request: Request) {
       const {
         data: { user },
       } = await supabase.auth.getUser();
-      const authProvider =
-        user && typeof user.app_metadata?.provider === "string" ? user.app_metadata.provider : "";
-      const shouldShowVerifiedPage = isSignupVerification || (!callbackType && authProvider === "email");
+      const shouldShowVerifiedPage = isSignupVerification;
 
       if (user) {
         const meta = user.user_metadata ?? {};
