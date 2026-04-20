@@ -72,6 +72,29 @@ export function LoginForm() {
     [account, nextPath, router],
   );
 
+  async function waitForServerSession(timeoutMs = 5000) {
+    const deadline = Date.now() + timeoutMs;
+
+    while (Date.now() < deadline) {
+      try {
+        const res = await fetch("/api/auth/session-status", {
+          method: "GET",
+          cache: "no-store",
+        });
+        const payload = (await res.json().catch(() => null)) as { active?: boolean } | null;
+        if (payload?.active) {
+          return true;
+        }
+      } catch {
+        // Ignore transient cookie/session sync failures and retry briefly.
+      }
+
+      await new Promise((resolve) => window.setTimeout(resolve, 150));
+    }
+
+    return false;
+  }
+
   async function resendSignupEmailFor(email: string, supabase = createClient()) {
     const emailRedirectTo = `${window.location.origin}${buildSignupVerificationCallbackPath(nextPath)}`;
     const { error } = await supabase.auth.resend({
@@ -218,6 +241,7 @@ export function LoginForm() {
         }
 
         if (!cancelled) {
+          await waitForServerSession();
           router.replace(nextPath);
           router.refresh();
         }
@@ -383,7 +407,8 @@ export function LoginForm() {
         setMessage(error.message);
         return;
       }
-      router.push(nextPath);
+      await waitForServerSession();
+      router.replace(nextPath);
       router.refresh();
     } finally {
       setLoading(false);
