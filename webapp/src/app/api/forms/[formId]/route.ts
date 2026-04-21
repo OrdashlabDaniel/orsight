@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server";
 
-import { verifyLoginPasswordForUser } from "@/lib/verify-login-password";
 import {
   duplicateForm,
   getFormById,
@@ -22,7 +21,6 @@ type UpdateFormPayload = {
   name?: unknown;
   description?: unknown;
   templateSource?: unknown;
-  password?: unknown;
 };
 
 function normalizeText(value: unknown, maxLength: number) {
@@ -81,16 +79,6 @@ export async function POST(request: Request, context: RouteContext) {
       }
 
       if (action === "permanent-delete") {
-        if (!skipAuth && user) {
-          const pw = typeof payload.password === "string" ? payload.password.trim() : "";
-          if (!pw) {
-            return NextResponse.json({ error: "请输入登录密码以确认永久删除。" }, { status: 400 });
-          }
-          const verified = await verifyLoginPasswordForUser(user, pw);
-          if (!verified.ok) {
-            return NextResponse.json({ error: verified.message }, { status: verified.status });
-          }
-        }
         await permanentlyDeleteForm(normalizedFormId);
         return NextResponse.json({ ok: true });
       }

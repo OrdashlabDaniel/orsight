@@ -4,8 +4,6 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { useLocale } from "@/i18n/LocaleProvider";
-import { isDevMockLoginEnabled } from "@/lib/dev-mock-auth";
-import { isSupabaseAuthEnabled } from "@/lib/supabase";
 import { getLocalizedFormDescription, getLocalizedFormName } from "@/lib/form-display";
 import {
   DEFAULT_FORM_ID,
@@ -69,7 +67,6 @@ export default function FormsPoolBoard() {
   const [deleteTarget, setDeleteTarget] = useState<FormDefinition | null>(null);
   const [deleteError, setDeleteError] = useState("");
   const [purgeTarget, setPurgeTarget] = useState<FormDefinition | null>(null);
-  const [purgePassword, setPurgePassword] = useState("");
   const [purgeError, setPurgeError] = useState("");
   const [shareTarget, setShareTarget] = useState<FormDefinition | null>(null);
   const [shareRecipientEmail, setShareRecipientEmail] = useState("");
@@ -81,8 +78,6 @@ export default function FormsPoolBoard() {
   const [acceptShareError, setAcceptShareError] = useState("");
 
   const { active, recycleBin } = useMemo(() => splitForms(forms), [forms]);
-
-  const purgeNeedsPassword = useMemo(() => isSupabaseAuthEnabled() || isDevMockLoginEnabled(), []);
 
   const loadForms = useCallback(async () => {
     setIsLoading(true);
@@ -229,15 +224,10 @@ export default function FormsPoolBoard() {
   function openPurgeConfirm(form: FormDefinition) {
     setErrorMessage("");
     setPurgeError("");
-    if (!purgeNeedsPassword) {
-      void executePermanentDelete(form, undefined, false);
-      return;
-    }
     setPurgeTarget(form);
-    setPurgePassword("");
   }
 
-  async function executePermanentDelete(form: FormDefinition, password: string | undefined, fromModal: boolean) {
+  async function executePermanentDelete(form: FormDefinition, fromModal: boolean) {
     setWorkingKey(`purge:${form.id}`);
     setErrorMessage("");
     setNoticeMessage("");
@@ -245,14 +235,10 @@ export default function FormsPoolBoard() {
       setPurgeError("");
     }
     try {
-      await mutateForm(form.id, {
-        action: "permanent-delete",
-        ...(password != null && password !== "" ? { password } : {}),
-      });
+      await mutateForm(form.id, { action: "permanent-delete" });
       await loadForms();
       setNoticeMessage(t("formsPool.purged", { name: formTitle(form) }));
       setPurgeTarget(null);
-      setPurgePassword("");
     } catch (error) {
       const msg = error instanceof Error ? error.message : t("formsPool.errPurge");
       if (fromModal) {
@@ -269,17 +255,11 @@ export default function FormsPoolBoard() {
     if (!purgeTarget) {
       return;
     }
-    const trimmed = purgePassword.trim();
-    if (purgeNeedsPassword && !trimmed) {
-      setPurgeError(t("formsPool.purgePasswordRequired"));
-      return;
-    }
-    await executePermanentDelete(purgeTarget, trimmed, true);
+    await executePermanentDelete(purgeTarget, true);
   }
 
   function cancelPermanentDelete() {
     setPurgeTarget(null);
-    setPurgePassword("");
     setPurgeError("");
   }
 
@@ -767,22 +747,8 @@ export default function FormsPoolBoard() {
               <p className="mt-2 text-sm text-slate-600">
                 {t("formsPool.purgeConfirmBody", { name: formTitle(purgeTarget) })}
               </p>
-              <label className="mt-4 block">
-                <span className="text-sm font-medium text-slate-700">{t("formsPool.purgePasswordLabel")}</span>
-                <input
-                  type="password"
-                  autoComplete="current-password"
-                  value={purgePassword}
-                  onChange={(event) => {
-                    setPurgePassword(event.target.value);
-                    setPurgeError("");
-                  }}
-                  className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm outline-none focus:border-blue-500"
-                  placeholder={t("formsPool.purgePasswordPlaceholder")}
-                />
-              </label>
               {purgeError ? (
-                <p className="mt-2 text-sm text-rose-700" role="alert">
+                <p className="mt-4 text-sm text-rose-700" role="alert">
                   {purgeError}
                 </p>
               ) : null}
