@@ -37,10 +37,7 @@ export const en = {
     deleteConfirming: "Deleting…",
     purgeConfirmTitle: "Confirm permanent delete",
     purgeConfirmBody:
-      "This will permanently delete “{name}” and related data. Enter your account password to continue.",
-    purgePasswordLabel: "Password",
-    purgePasswordPlaceholder: "Account password",
-    purgePasswordRequired: "Enter your password.",
+      "This will permanently delete “{name}” and related data. This action cannot be undone and will run immediately after you confirm.",
     purgeConfirm: "Delete forever",
     purgeConfirming: "Deleting…",
     statusDone: "Ready",
