@@ -3,7 +3,21 @@ import sharp from "sharp";
 
 import { withAuthedStorageTenant } from "@/lib/storage-tenant";
 import { getFormIdFromRequest } from "@/lib/form-request";
-import type { FieldAggregation, TrainingField } from "@/lib/training";
+import {
+  buildEditableRecognitionRulesSection,
+  buildRecognitionRuleCodePromptSection,
+  extractRecognitionRuleCodeFromWorkingRules,
+  loadGlobalRules,
+  mergeLegacyIntoAgentThreadIfEmpty,
+  seedWorkingRulesFromLegacy,
+  type FieldAggregation,
+  type RecognitionRuleCode,
+  type TrainingField,
+} from "@/lib/training";
+import {
+  buildRecognitionFieldGuidancePromptSection,
+  mapToRecognitionFieldGuidance,
+} from "@/lib/recognition-field-guidance";
 import {
   DEFAULT_TABLE_FIELDS,
   getActiveTableFields,
@@ -45,6 +59,7 @@ type PreviewRequestBody = {
   fieldAggregations?: unknown;
   tableFields?: unknown;
   annotationMode?: unknown;
+  fieldGuidance?: unknown;
 };
 
 type RequestedAnnotationMode = "record" | "table" | "auto";
@@ -288,6 +303,7 @@ function buildCropInstructionText(
   tableFields: TableFieldDefinition[],
   fieldLabels: Record<string, string>,
   fieldTypeMap: Record<string, "text" | "number">,
+  recognitionContextText?: string,
 ): string {
   const byField = new Map<TrainingField, typeof boxes>();
   for (const box of boxes) {
@@ -341,6 +357,11 @@ function buildCropInstructionText(
     );
   }
 
+  const recognitionContext = typeof recognitionContextText === "string" ? recognitionContextText.trim() : "";
+  if (recognitionContext) {
+    lines.push("", recognitionContext);
+  }
+
   return lines.join("\n");
 }
 
@@ -350,6 +371,7 @@ function buildTableCropInstructionText(
   tableFields: TableFieldDefinition[],
   fieldLabels: Record<string, string>,
   fieldTypeMap: Record<string, "text" | "number">,
+  recognitionContextText?: string,
 ): string {
   const byField = new Map<TrainingField, typeof boxes>();
   for (const box of boxes) {
@@ -408,7 +430,127 @@ function buildTableCropInstructionText(
     `}`,
   );
 
+  const recognitionContext = typeof recognitionContextText === "string" ? recognitionContextText.trim() : "";
+  if (recognitionContext) {
+    lines.push("", recognitionContext);
+  }
+
   return lines.join("\n");
+}
+
+function buildLiveFieldGuidancePromptText(raw: unknown, allowedFieldIds: Set<string>) {
+  if (!raw || typeof raw !== "object") {
+    return "";
+  }
+
+  const guidanceMap = Object.fromEntries(
+    Object.entries(raw as Record<string, unknown>)
+      .map(([fieldId, note]) => [fieldId.trim(), typeof note === "string" ? note.trim().slice(0, 2000) : ""] as const)
+      .filter(([fieldId, note]) => fieldId && note && allowedFieldIds.has(fieldId)),
+  );
+
+  return buildRecognitionFieldGuidancePromptSection(mapToRecognitionFieldGuidance(guidanceMap)).trim();
+}
+
+function normalizeFieldAlias(value: string) {
+  return normalizeText(value)
+    .toLowerCase()
+    .replace(/[`"'“”‘’]/g, "")
+    .replace(/\s+/g, "")
+    .replace(/[：:，,。.;；()[\]{}]/g, "");
+}
+
+function stripGuidanceValue(value: string) {
+  return normalizeText(value).replace(/^[`"'“”‘’\s]+|[`"'“”‘’\s]+$/g, "").replace(/[。；;，,]+$/g, "");
+}
+
+function parseLiveDerivedRuleFromNote(
+  fieldId: string,
+  note: string,
+  tableFields: TableFieldDefinition[],
+): RecognitionRuleCode["derivedFieldRules"][number] | null {
+  const compact = note.replace(/\s+/g, " ").trim();
+  if (!compact) {
+    return null;
+  }
+
+  const patterns = [
+    /^(?:如果\s*)?(.+?)\s*是\s*(.+?)[，,]\s*(?:这里|本字段|该字段)?\s*(?:就)?(?:填|写|设为)[:：]?\s*(.+?)(?:[，,]\s*否则(?:就)?(?:填|写|设为)[:：]?\s*(.+)|[，,]\s*否则(?:就)?(不填|留空|为空|填空))?$/i,
+    /^if\s+(.+?)\s*(?:=|is)\s*(.+?),\s*(?:then\s*)?(?:fill|set)\s+(.+?)(?:,\s*else\s*(?:fill|set)\s+(.+)|,\s*else\s*(?:leave\s+blank|empty))?$/i,
+  ];
+
+  let sourceLabel = "";
+  let sourceValue = "";
+  let targetValue = "";
+  let elseValue: string | undefined;
+
+  for (const pattern of patterns) {
+    const match = compact.match(pattern);
+    if (!match) {
+      continue;
+    }
+    sourceLabel = stripGuidanceValue(match[1] || "");
+    sourceValue = stripGuidanceValue(match[2] || "");
+    targetValue = stripGuidanceValue(match[3] || "");
+    const explicitElse = stripGuidanceValue(match[4] || "");
+    const blankElse = stripGuidanceValue(match[5] || "");
+    elseValue = blankElse ? "" : explicitElse || undefined;
+    break;
+  }
+
+  if (!sourceLabel || !sourceValue || !targetValue) {
+    return null;
+  }
+
+  const sourceField = tableFields.find((field) => {
+    const aliases = new Set([
+      normalizeFieldAlias(field.id),
+      normalizeFieldAlias(field.label),
+      normalizeFieldAlias(field.label.replace(/\s+/g, "")),
+    ]);
+    return aliases.has(normalizeFieldAlias(sourceLabel));
+  });
+  if (!sourceField) {
+    return null;
+  }
+
+  return {
+    fieldId,
+    sourceFieldId: sourceField.id,
+    operator: "equals",
+    sourceValue,
+    value: targetValue,
+    ...(elseValue !== undefined ? { elseValue } : {}),
+    instruction: compact.slice(0, 300),
+  };
+}
+
+function mergeLiveDerivedRulesIntoRuleCode(
+  baseRuleCode: RecognitionRuleCode,
+  rawGuidance: unknown,
+  tableFields: TableFieldDefinition[],
+) {
+  if (!rawGuidance || typeof rawGuidance !== "object") {
+    return baseRuleCode;
+  }
+
+  const liveRules = Object.entries(rawGuidance as Record<string, unknown>)
+    .map(([fieldId, note]) =>
+      parseLiveDerivedRuleFromNote(fieldId.trim(), typeof note === "string" ? note.trim() : "", tableFields),
+    )
+    .filter((rule): rule is RecognitionRuleCode["derivedFieldRules"][number] => Boolean(rule));
+
+  if (liveRules.length === 0) {
+    return baseRuleCode;
+  }
+
+  const preservedRules = baseRuleCode.derivedFieldRules.filter(
+    (rule) => !liveRules.some((liveRule) => liveRule.fieldId === rule.fieldId),
+  );
+  return {
+    ...baseRuleCode,
+    derivedFieldRules: [...preservedRules, ...liveRules],
+  };
 }
 
 function parsePreviewJson(content: string): { record: Record<string, unknown>; previewNote: string } {
@@ -539,6 +681,120 @@ function normalizeCustomFieldPreviewValue(
   return "";
 }
 
+function normalizeDerivedComparisonValue(value: string | number | "") {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return String(value);
+  }
+  return normalizeText(value).replace(/\s+/g, " ").toLowerCase();
+}
+
+function ruleMatchesPreviewDerivedCondition(
+  sourceValue: string | number | "",
+  rule: RecognitionRuleCode["derivedFieldRules"][number],
+) {
+  switch (rule.operator) {
+    case "empty":
+      return sourceValue === "" || sourceValue === undefined || sourceValue === null;
+    case "not_empty":
+      return !(sourceValue === "" || sourceValue === undefined || sourceValue === null);
+    case "contains": {
+      const haystack = normalizeDerivedComparisonValue(sourceValue);
+      const needle = normalizeDerivedComparisonValue((rule.sourceValue ?? "") as string | number | "");
+      return Boolean(haystack && needle && haystack.includes(needle));
+    }
+    case "equals":
+    default:
+      return (
+        normalizeDerivedComparisonValue(sourceValue) ===
+        normalizeDerivedComparisonValue((rule.sourceValue ?? "") as string | number | "")
+      );
+  }
+}
+
+function applyDerivedRuleCodeToPreviewRecord(
+  record: Record<string, unknown>,
+  tableFields: TableFieldDefinition[],
+  ruleCode: RecognitionRuleCode,
+) {
+  const nextRecord = { ...record };
+  const nextCustomFieldValues =
+    nextRecord.customFieldValues && typeof nextRecord.customFieldValues === "object"
+      ? { ...(nextRecord.customFieldValues as Record<string, string | number | "">) }
+      : {};
+  const fieldMap = new Map(tableFields.map((field) => [field.id, field] as const));
+
+  const getFieldValue = (fieldId: string): string | number | "" => {
+    if (fieldId in nextRecord) {
+      const rawValue = nextRecord[fieldId];
+      return typeof rawValue === "number" && Number.isFinite(rawValue)
+        ? rawValue
+        : normalizeText(rawValue) || "";
+    }
+    return nextCustomFieldValues[fieldId] ?? "";
+  };
+
+  const setFieldValue = (fieldId: string, rawValue: string | number | "") => {
+    const field = fieldMap.get(fieldId);
+    if (!field) {
+      return;
+    }
+    const nextValue = normalizeCustomFieldPreviewValue(field, rawValue);
+    if (isBuiltInFieldId(fieldId)) {
+      nextRecord[fieldId] = nextValue;
+    } else {
+      nextCustomFieldValues[fieldId] = nextValue;
+    }
+  };
+
+  for (const rule of ruleCode.derivedFieldRules) {
+    const sourceValue = getFieldValue(rule.sourceFieldId);
+    if (ruleMatchesPreviewDerivedCondition(sourceValue, rule)) {
+      setFieldValue(rule.fieldId, rule.value);
+    } else if (rule.elseValue !== undefined) {
+      setFieldValue(rule.fieldId, rule.elseValue);
+    }
+  }
+
+  if (Object.keys(nextCustomFieldValues).length > 0) {
+    nextRecord.customFieldValues = nextCustomFieldValues;
+  }
+  return nextRecord;
+}
+
+function applyDerivedRuleCodeToPreviewTable(
+  tableFieldValues: PreviewTableFieldValues,
+  tableFields: TableFieldDefinition[],
+  ruleCode: RecognitionRuleCode,
+) {
+  const next = Object.fromEntries(
+    Object.entries(tableFieldValues).map(([fieldId, series]) => [fieldId, [...series]]),
+  ) as PreviewTableFieldValues;
+  const fieldMap = new Map(tableFields.map((field) => [field.id, field] as const));
+  const rowCount = Math.max(0, ...Object.values(next).map((series) => series.length));
+
+  for (const rule of ruleCode.derivedFieldRules) {
+    const targetField = fieldMap.get(rule.fieldId);
+    if (!targetField || !fieldMap.has(rule.sourceFieldId)) {
+      continue;
+    }
+    const targetSeries = [...(next[rule.fieldId] || [])];
+    const sourceSeries = next[rule.sourceFieldId] || [];
+
+    for (let index = 0; index < rowCount; index += 1) {
+      const sourceValue = sourceSeries[index] ?? "";
+      if (ruleMatchesPreviewDerivedCondition(sourceValue, rule)) {
+        targetSeries[index] = normalizeCustomFieldPreviewValue(targetField, rule.value);
+      } else if (rule.elseValue !== undefined) {
+        targetSeries[index] = normalizeCustomFieldPreviewValue(targetField, rule.elseValue);
+      }
+    }
+
+    next[rule.fieldId] = trimTrailingEmptyEntries(targetSeries);
+  }
+
+  return next;
+}
+
 function trimTrailingEmptyEntries(values: Array<string | number | "">) {
   const next = [...values];
   while (next.length > 0 && next[next.length - 1] === "") {
@@ -628,6 +884,24 @@ export async function POST(request: Request) {
       ...getFieldTypeMap(activeTableFields),
     };
     const allowedFieldIds = new Set(activeTableFields.map((field) => field.id));
+    const normalizedRules = seedWorkingRulesFromLegacy(mergeLegacyIntoAgentThreadIfEmpty(await loadGlobalRules(formId)));
+    const savedRecognitionRuleCode = extractRecognitionRuleCodeFromWorkingRules(normalizedRules.workingRules);
+    const recognitionRuleCode = mergeLiveDerivedRulesIntoRuleCode(
+      savedRecognitionRuleCode,
+      body.fieldGuidance,
+      activeTableFields,
+    );
+    const savedRecognitionContextText = buildEditableRecognitionRulesSection(normalizedRules).trim();
+    const liveFieldGuidanceText = buildLiveFieldGuidancePromptText(body.fieldGuidance, allowedFieldIds);
+    const liveRuleCodeText = buildRecognitionRuleCodePromptSection(recognitionRuleCode).trim();
+    const recognitionContextSections = [savedRecognitionContextText].filter(Boolean);
+    if (liveRuleCodeText && !savedRecognitionContextText.includes(liveRuleCodeText)) {
+      recognitionContextSections.push(liveRuleCodeText);
+    }
+    if (liveFieldGuidanceText && !savedRecognitionContextText.includes(liveFieldGuidanceText)) {
+      recognitionContextSections.push(liveFieldGuidanceText);
+    }
+    const recognitionContextText = recognitionContextSections.join("\n\n");
 
     const boxes = normalizeBoxes(body.boxes, allowedFieldIds);
     if (boxes.length === 0) {
@@ -714,8 +988,22 @@ export async function POST(request: Request) {
 
     const userText =
       resolvedAnnotationMode === "table"
-        ? buildTableCropInstructionText(boxes, fieldAggregations, activeTableFields, fieldLabels, fieldTypeMap)
-        : buildCropInstructionText(boxes, fieldAggregations, activeTableFields, fieldLabels, fieldTypeMap);
+        ? buildTableCropInstructionText(
+            boxes,
+            fieldAggregations,
+            activeTableFields,
+            fieldLabels,
+            fieldTypeMap,
+            recognitionContextText,
+          )
+        : buildCropInstructionText(
+            boxes,
+            fieldAggregations,
+            activeTableFields,
+            fieldLabels,
+            fieldTypeMap,
+            recognitionContextText,
+          );
 
     const systemText =
       resolvedAnnotationMode === "table"
@@ -799,10 +1087,16 @@ export async function POST(request: Request) {
         }
       }
 
+      const finalTableFieldValues = applyDerivedRuleCodeToPreviewTable(
+        tableFieldValues,
+        activeTableFields,
+        recognitionRuleCode,
+      );
+
       return NextResponse.json({
         detectedMode: resolvedAnnotationMode,
         detectedModeReason: detectionReason || undefined,
-        tableFieldValues,
+        tableFieldValues: finalTableFieldValues,
         previewNote: previewNote || undefined,
       });
     }
@@ -862,10 +1156,12 @@ export async function POST(request: Request) {
       out.customFieldValues = customFieldValues;
     }
 
+      const finalRecord = applyDerivedRuleCodeToPreviewRecord(out, activeTableFields, recognitionRuleCode);
+
       return NextResponse.json({
         detectedMode: resolvedAnnotationMode,
         detectedModeReason: detectionReason || undefined,
-        record: out,
+        record: finalRecord,
         previewNote: previewNote || undefined,
       });
     } catch (error) {

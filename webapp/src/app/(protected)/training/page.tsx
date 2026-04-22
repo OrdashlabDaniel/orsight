@@ -96,6 +96,30 @@ function rasterImageLabelFromTrainingStatus(
   return item?.labeled ? "labeled" : "unlabeled";
 }
 
+function buildSavedTrainingImageNameSet(items: Array<Pick<TrainingStatusItem, "imageName">> | undefined) {
+  return new Set((items || []).map((item) => normalizeUploadFileName(item.imageName)));
+}
+
+function splitPendingUploadsFromSaved(
+  items: UploadItem[],
+  savedImageNames: ReadonlySet<string>,
+): { pending: UploadItem[]; alreadySaved: UploadItem[] } {
+  if (savedImageNames.size === 0) {
+    return { pending: items, alreadySaved: [] };
+  }
+
+  const pending: UploadItem[] = [];
+  const alreadySaved: UploadItem[] = [];
+  for (const item of items) {
+    if (savedImageNames.has(normalizeUploadFileName(item.file.name))) {
+      alreadySaved.push(item);
+    } else {
+      pending.push(item);
+    }
+  }
+  return { pending, alreadySaved };
+}
+
 type TrainingStatusItem = {
   imageName: string;
   labeled: boolean;
@@ -246,6 +270,10 @@ function TrainingModeContent() {
   const OUTPUT_RIGHT_PANEL_WIDTH_KEY = "orsight-training-output-right-width";
 
   const [isSavingTraining, setIsSavingTraining] = useState(false);
+  const savedTrainingImageNames = useMemo(
+    () => buildSavedTrainingImageNameSet(trainingStatus?.items),
+    [trainingStatus?.items],
+  );
 
   const activeTableFields = getActiveTableFields(tableFields);
   const setupFieldDefinition = activeTableFields.find((field) => field.id === setupField) || null;
@@ -430,6 +458,27 @@ function TrainingModeContent() {
   }, [currentFormId]);
 
   useEffect(() => {
+    if (!uploads.length || savedTrainingImageNames.size === 0) {
+      return;
+    }
+
+    setUploads((current) => {
+      const { pending, alreadySaved } = splitPendingUploadsFromSaved(current, savedTrainingImageNames);
+      if (alreadySaved.length === 0) {
+        return current;
+      }
+
+      alreadySaved.forEach((upload) => URL.revokeObjectURL(upload.previewUrl));
+      uploadsRef.current = pending;
+      void savePersistedWorkbenchUploads(
+        currentFormId,
+        pending.map((upload) => ({ id: upload.id, file: upload.file })),
+      );
+      return pending;
+    });
+  }, [currentFormId, savedTrainingImageNames, uploads.length]);
+
+  useEffect(() => {
     outputLeftPanelWidthRef.current = outputLeftPanelWidthPx;
   }, [outputLeftPanelWidthPx]);
 
@@ -569,14 +618,14 @@ function TrainingModeContent() {
 
   async function loadTrainingStatus() {
     try {
-      const response = await fetch(withFormId("/api/training/status"));
+      const response = await fetch(withFormId("/api/training/status"), { cache: "no-store" });
       const payload = (await response.json()) as TrainingStatusResponse & { error?: string };
       if (!response.ok) {
-
+        throw new Error(payload.error || t("training.errStatus"));
       }
       setTrainingStatus(payload);
     } catch (error) {
-
+      setErrorMessage(error instanceof Error ? error.message : t("training.errStatus"));
     }
   }
 
@@ -847,7 +896,8 @@ function TrainingModeContent() {
       );
 
       const existingNames = new Set(uploadsRef.current.map((upload) => normalizeUploadFileName(upload.file.name)));
-      const { accepted, skipped } = dedupeUploadsByName(nextUploads, existingNames);
+      const blockedNames = new Set([...existingNames, ...savedTrainingImageNames]);
+      const { accepted, skipped } = dedupeUploadsByName(nextUploads, blockedNames);
       skipped.forEach((upload) => URL.revokeObjectURL(upload.previewUrl));
 
       if (accepted.length === 0) {
@@ -882,7 +932,7 @@ function TrainingModeContent() {
         void openAnnotationPanel(accepted[0]);
       }
     } catch {
-
+      setErrorMessage(t("home.errReadVisual"));
     }
   }
   handleFilesRef.current = handleFiles;
@@ -1052,7 +1102,7 @@ function TrainingModeContent() {
       );
       const payload = (await response.json()) as { error?: string };
       if (!response.ok) {
-
+        throw new Error(payload.error || t("training.errDelete"));
       }
 
       if (annotatingItem && !("file" in annotatingItem) && annotatingItem.imageName === item.imageName) {
@@ -1073,7 +1123,7 @@ function TrainingModeContent() {
       await loadTrainingStatus();
 
     } catch (error) {
-
+      setErrorMessage(error instanceof Error ? error.message : t("training.errDelete"));
     } finally {
       setDeletingImageName(null);
     }
@@ -1169,11 +1219,15 @@ function TrainingModeContent() {
 
     setIsSavingTraining(true);
     setErrorMessage("");
+    setNoticeMessage("");
     try {
+      const savedUploads: UploadItem[] = [];
+      const failedUploads: Array<{ upload: UploadItem; message: string }> = [];
+
       for (const upload of uploads) {
         try {
           const imageDataUrl = await imageSourceToDataUrl(upload.previewUrl);
-          await fetch(withFormId("/api/training/save"), {
+          const response = await fetch(withFormId("/api/training/save"), {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -1195,17 +1249,67 @@ function TrainingModeContent() {
               boxes: [],
             }),
           });
+          const payload = (await response.json()) as { error?: string };
+          if (!response.ok) {
+            throw new Error(payload.error || t("training.errSaveNoBox"));
+          }
+          savedUploads.push(upload);
         } catch (err) {
           console.error(`Failed to save ${upload.file.name}:`, err);
+          failedUploads.push({
+            upload,
+            message: err instanceof Error ? err.message : t("training.errSaveNoBox"),
+          });
         }
       }
-      const last = uploads[uploads.length - 1];
-      if (last) {
-        await refreshTrainingStatusUntilImage(last.file.name);
+
+      const lastSaved = savedUploads[savedUploads.length - 1];
+      if (lastSaved) {
+        await refreshTrainingStatusUntilImage(lastSaved.file.name);
       } else {
         await loadTrainingStatus();
       }
-      clearAll();
+
+      if (savedUploads.length > 0) {
+        setNoticeMessage(
+          failedUploads.length > 0
+            ? t("training.saveNoBoxPartial", { saved: savedUploads.length, failed: failedUploads.length })
+            : t("training.saveNoBoxDone", { n: savedUploads.length }),
+        );
+      }
+
+      if (failedUploads.length > 0) {
+        const nextUploads = failedUploads.map(({ upload }) => upload);
+        const failedIds = new Set(nextUploads.map((upload) => upload.id));
+        uploads.forEach((upload) => {
+          if (!failedIds.has(upload.id)) {
+            URL.revokeObjectURL(upload.previewUrl);
+          }
+        });
+        uploadsRef.current = nextUploads;
+        setUploads(nextUploads);
+        setSelectedUploadId((current) =>
+          current && nextUploads.some((upload) => upload.id === current) ? current : nextUploads[0]?.id ?? null,
+        );
+        void savePersistedWorkbenchUploads(
+          currentFormId,
+          nextUploads.map((upload) => ({ id: upload.id, file: upload.file })),
+        );
+        setErrorMessage(
+          failedUploads
+            .slice(0, 3)
+            .map(({ upload, message }) => `${upload.file.name}：${message}`)
+            .join("；"),
+        );
+        return;
+      }
+
+      uploadRestoreRequestIdRef.current += 1;
+      uploads.forEach((upload) => URL.revokeObjectURL(upload.previewUrl));
+      uploadsRef.current = [];
+      setUploads([]);
+      setSelectedUploadId(null);
+      void clearPersistedWorkbenchUploads(currentFormId);
     } finally {
       setIsSavingTraining(false);
     }

@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 
 import { withAuthedStorageTenant } from "@/lib/storage-tenant";
 import { getFormIdFromRequest } from "@/lib/form-request";
+import { getActiveTableFields } from "@/lib/table-fields";
+import { loadTableFields } from "@/lib/table-fields-store";
 import {
   buildRecognitionFieldGuidancePromptSection,
   extractRecognitionFieldGuidanceFromWorkingRules,
@@ -161,6 +163,7 @@ export async function POST(request: Request) {
     }
 
     const rules = seedWorkingRulesFromLegacy(mergeLegacyIntoAgentThreadIfEmpty(await loadGlobalRules(formId)));
+    const activeTableFields = getActiveTableFields(await loadTableFields(formId));
     const serverWorking = (rules.workingRules || "").trim().slice(0, 12000);
     const currentRuleCode = extractRecognitionRuleCodeFromWorkingRules(
       currentWorkingRules || rules.workingRules || "",
@@ -185,6 +188,7 @@ export async function POST(request: Request) {
 - 多行拆分或合并的识别原则
 - 哪些字段在某类界面里本来就不存在，因此留空时不应报警
 - 当前表单字段的输出格式，例如 date 必须写成 YYYY.MM.DD
+- 某些字段不是直接 OCR 读取，而是应根据其它字段自动派生，例如当 Payment Method = Company Payed 时，Reimbursement 自动填 Not Required
 
 系统为你开放了一个“当前表单规则代码”区域，它只对当前 form 生效，并会被系统直接执行。你可以修改的只有这块结构化规则代码与对应的识别规则正文，不能改项目其他代码。
 
@@ -207,12 +211,23 @@ export async function POST(request: Request) {
       "exampleValue": "2026.02.04",
       "instruction": "date 必须严格按图上显示格式输出"
     }
+  ],
+  "derivedFieldRules": [
+    {
+      "fieldId": "custom_reimbursement",
+      "sourceFieldId": "custom_payment_method",
+      "operator": "equals" | "contains" | "empty" | "not_empty",
+      "sourceValue": "Company Payed",
+      "value": "Not Required",
+      "elseValue": "",
+      "instruction": "若 Payment Method = Company Payed，则 Reimbursement 自动填 Not Required"
+    }
   ]
 }
 
 系统会把 revisedRuleCode 写入下面这个机器可读代码块中：
 ${RECOGNITION_RULE_CODE_BEGIN}
-{"fieldDirectives":[{"fieldId":"date","outputFormat":"YYYY.MM.DD","exampleValue":"2026.02.04","instruction":"date 按截图格式输出"}]}
+{"fieldDirectives":[{"fieldId":"date","outputFormat":"YYYY.MM.DD","exampleValue":"2026.02.04","instruction":"date 按截图格式输出"}],"derivedFieldRules":[{"fieldId":"custom_reimbursement","sourceFieldId":"custom_payment_method","operator":"equals","sourceValue":"Company Payed","value":"Not Required","elseValue":"","instruction":"若 Payment Method = Company Payed，则 Reimbursement 自动填 Not Required"}]}
 ${RECOGNITION_RULE_CODE_END}
 
 系统也会把“字段可空/不报警”策略写入下面这个机器可读 JSON 区块中：
@@ -227,6 +242,11 @@ ${RECOGNITION_VALIDATION_CONFIG_END}
 4. “requireModelConfidence” 默认应为 true，表示只有当模型本身没有标记 reviewRequired 时，留空才视为正常。
 5. revisedRuleCode 也是给系统直接执行的，必须是合法 JSON，且只写当前表单真正需要的字段指令。
 6. 如果用户附了截图，你必须优先看图判断格式/标签，再写入 revisedRuleCode；不要只复述用户的话。
+7. 如果某个字段应根据另一个字段自动填写，而不是直接从截图像素读取，应优先写入 derivedFieldRules。
+8. derivedFieldRules 里的 fieldId/sourceFieldId 必须使用当前表单真实字段 id，不要使用显示名。
+
+【当前表单字段列表】
+${activeTableFields.length > 0 ? activeTableFields.map((field) => `- ${field.id}（显示名：${field.label}；类型：${field.type}）`).join("\n") : "（无字段）"}
 
 【客户端传入的当前识别规则】
 """
@@ -332,7 +352,19 @@ ${fallbackContext}`;
     const modelValidationConfig = extractRecognitionValidationConfigFromWorkingRules(revisedWorkingRules);
     const deterministicValidationConfig = deriveValidationConfigFromMessages(messages, currentValidationConfig);
     const revisedValidationConfig = mergeValidationConfigs(modelValidationConfig, deterministicValidationConfig);
-    const revisedRuleCode = normalizeRecognitionRuleCode(parsed.revisedRuleCode ?? currentRuleCode);
+    const rawRevisedRuleCode =
+      parsed.revisedRuleCode && typeof parsed.revisedRuleCode === "object" ? parsed.revisedRuleCode : null;
+    const currentNormalizedRuleCode = normalizeRecognitionRuleCode(currentRuleCode);
+    const revisedRuleCode = normalizeRecognitionRuleCode({
+      fieldDirectives:
+        rawRevisedRuleCode && Array.isArray((rawRevisedRuleCode as { fieldDirectives?: unknown }).fieldDirectives)
+          ? (rawRevisedRuleCode as { fieldDirectives?: unknown }).fieldDirectives
+          : currentNormalizedRuleCode.fieldDirectives,
+      derivedFieldRules:
+        rawRevisedRuleCode && Array.isArray((rawRevisedRuleCode as { derivedFieldRules?: unknown }).derivedFieldRules)
+          ? (rawRevisedRuleCode as { derivedFieldRules?: unknown }).derivedFieldRules
+          : currentNormalizedRuleCode.derivedFieldRules,
+    });
     revisedWorkingRules = upsertRecognitionValidationConfigBlock(revisedWorkingRules, revisedValidationConfig);
     revisedWorkingRules = upsertRecognitionRuleCodeBlock(revisedWorkingRules, revisedRuleCode);
     revisedWorkingRules = upsertRecognitionFieldGuidanceBlock(revisedWorkingRules, currentFieldGuidance).slice(0, 50000);
