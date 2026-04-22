@@ -477,12 +477,15 @@ export const en = {
       "Describe how this field should be derived, which label to trust, and any format rules. The recognition copilot will read this automatically.",
     fieldGuidancePlaceholder:
       "For example: read {label} from the matching label on the screenshot, do not confuse it with nearby fields, and keep any required output format.",
-    fieldGuidanceLinkedHint: "Once saved, this note is shared with the recognition copilot and current form rules.",
+    fieldGuidanceLinkedHint:
+      "Once saved, this note is shared with the recognition copilot and current form rules, and directly affects future recognition.",
     fieldGuidanceSave: "Save note",
     fieldGuidanceSaving: "Saving…",
     fieldGuidanceClear: "Clear note",
     fieldGuidanceSaved: "Saved the recognition note for “{label}”.",
     fieldGuidanceCleared: "Cleared the recognition note for “{label}”.",
+    fieldGuidanceSyncFailed:
+      "The field note was saved, but syncing recognition-copilot rules failed. The note will still be used during future recognition.",
   },
   home: {
     backForms: "← Home",
@@ -660,6 +663,9 @@ export const en = {
       "Skipped {n} document(s). Training needs screenshots/PDF—use the workspace for Excel/Word extraction.",
     cleared: "Cleared pending uploads.",
     errTrainImage: "Could not load training image.",
+    errStatus: "Could not load training pool status.",
+    errDelete: "Could not delete training image.",
+    errSaveNoBox: "Could not save to the training pool.",
     confirmDelete: "Delete training image “{name}”? This cannot be undone.",
     opening: "Opening labeling: {name}",
     opened: "Opened labeling: {name}",
@@ -706,6 +712,9 @@ export const en = {
     errNeedImage: "Upload at least one image.",
     saveNoBox: "Saving…",
     saveNoBoxBtn: "Save to pool (no boxes)",
+    saveNoBoxDone: "Saved {n} image(s) to the training pool.",
+    saveNoBoxPartial:
+      "Saved {saved} image(s) to the training pool; {failed} failed and were kept in the upload list.",
     noClipboard: "No image in clipboard.",
     errClipboard: "Clipboard denied. Try Ctrl+V.",
     pasteClipboard: "Paste from clipboard",

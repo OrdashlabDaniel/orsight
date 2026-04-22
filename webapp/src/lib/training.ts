@@ -16,7 +16,11 @@ import {
   normalizeFormId,
 } from "./forms";
 import { loadRemoteFormConfig, saveRemoteFormConfig } from "./form-config-db";
-import { stripRecognitionFieldGuidanceBlock } from "./recognition-field-guidance";
+import {
+  buildRecognitionFieldGuidancePromptSection,
+  extractRecognitionFieldGuidanceFromWorkingRules,
+  stripRecognitionFieldGuidanceBlock,
+} from "./recognition-field-guidance";
 import {
   scopeTrainingBucketPath,
   scopeTrainingExamplesImageName,
@@ -134,8 +138,21 @@ export type RecognitionFieldRuleCode = {
   instruction?: string;
 };
 
+export type RecognitionDerivedFieldOperator = "equals" | "contains" | "empty" | "not_empty";
+
+export type RecognitionDerivedFieldRule = {
+  fieldId: string;
+  sourceFieldId: string;
+  operator?: RecognitionDerivedFieldOperator;
+  sourceValue?: string | number | "";
+  value: string | number | "";
+  elseValue?: string | number | "";
+  instruction?: string;
+};
+
 export type RecognitionRuleCode = {
   fieldDirectives: RecognitionFieldRuleCode[];
+  derivedFieldRules: RecognitionDerivedFieldRule[];
 };
 
 export type TrainingImageBinary = {
@@ -173,6 +190,12 @@ const RECOGNITION_FIELD_OUTPUT_FORMATS = new Set<RecognitionFieldOutputFormat>([
   "YYYY.MM.DD",
   "YYYY-MM-DD",
   "MM/DD/YYYY",
+]);
+const RECOGNITION_DERIVED_FIELD_OPERATORS = new Set<RecognitionDerivedFieldOperator>([
+  "equals",
+  "contains",
+  "empty",
+  "not_empty",
 ]);
 
 const trainingImageRequestCacheStorage = new AsyncLocalStorage<TrainingImageRequestCache>();
@@ -361,7 +384,7 @@ export function upsertRecognitionValidationConfigBlock(
 
 export function normalizeRecognitionRuleCode(raw: unknown): RecognitionRuleCode {
   if (!raw || typeof raw !== "object") {
-    return { fieldDirectives: [] };
+    return { fieldDirectives: [], derivedFieldRules: [] };
   }
 
   const source = raw as Record<string, unknown>;
@@ -396,7 +419,56 @@ export function normalizeRecognitionRuleCode(raw: unknown): RecognitionRuleCode 
       }, [])
     : [];
 
-  return { fieldDirectives };
+  const normalizeDerivedScalar = (value: unknown): string | number | "" | undefined => {
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return value;
+    }
+    if (typeof value === "string") {
+      return value.trim().slice(0, 200);
+    }
+    return undefined;
+  };
+
+  const derivedFieldRules: RecognitionDerivedFieldRule[] = Array.isArray(source.derivedFieldRules)
+    ? source.derivedFieldRules.reduce<RecognitionDerivedFieldRule[]>((acc, item) => {
+        if (!item || typeof item !== "object") {
+          return acc;
+        }
+
+        const rule = item as Record<string, unknown>;
+        const fieldId = typeof rule.fieldId === "string" ? rule.fieldId.trim() : "";
+        const sourceFieldId = typeof rule.sourceFieldId === "string" ? rule.sourceFieldId.trim() : "";
+        const operator =
+          typeof rule.operator === "string" && RECOGNITION_DERIVED_FIELD_OPERATORS.has(rule.operator as RecognitionDerivedFieldOperator)
+            ? (rule.operator as RecognitionDerivedFieldOperator)
+            : "equals";
+        const sourceValue = normalizeDerivedScalar(rule.sourceValue);
+        const value = normalizeDerivedScalar(rule.value);
+        const elseValue = normalizeDerivedScalar(rule.elseValue);
+        const instruction =
+          typeof rule.instruction === "string" ? rule.instruction.trim().slice(0, 500) : undefined;
+
+        if (!fieldId || !sourceFieldId || value === undefined) {
+          return acc;
+        }
+        if ((operator === "equals" || operator === "contains") && sourceValue === undefined) {
+          return acc;
+        }
+
+        acc.push({
+          fieldId,
+          sourceFieldId,
+          ...(operator ? { operator } : {}),
+          ...(sourceValue !== undefined ? { sourceValue } : {}),
+          value,
+          ...(elseValue !== undefined ? { elseValue } : {}),
+          ...(instruction ? { instruction } : {}),
+        });
+        return acc;
+      }, [])
+    : [];
+
+  return { fieldDirectives, derivedFieldRules };
 }
 
 export function stripRecognitionRuleCodeBlock(workingRules: string | undefined | null): string {
@@ -421,24 +493,24 @@ export function extractRecognitionRuleCodeFromWorkingRules(
   const text = typeof workingRules === "string" ? workingRules : "";
   const start = text.indexOf(RECOGNITION_RULE_CODE_BEGIN);
   if (start < 0) {
-    return { fieldDirectives: [] };
+    return { fieldDirectives: [], derivedFieldRules: [] };
   }
 
   const jsonStart = start + RECOGNITION_RULE_CODE_BEGIN.length;
   const end = text.indexOf(RECOGNITION_RULE_CODE_END, jsonStart);
   if (end < 0) {
-    return { fieldDirectives: [] };
+    return { fieldDirectives: [], derivedFieldRules: [] };
   }
 
   const rawJson = text.slice(jsonStart, end).trim();
   if (!rawJson) {
-    return { fieldDirectives: [] };
+    return { fieldDirectives: [], derivedFieldRules: [] };
   }
 
   try {
     return normalizeRecognitionRuleCode(JSON.parse(rawJson));
   } catch {
-    return { fieldDirectives: [] };
+    return { fieldDirectives: [], derivedFieldRules: [] };
   }
 }
 
@@ -460,7 +532,7 @@ export function buildRecognitionRuleCodePromptSection(
   code: RecognitionRuleCode | undefined | null,
 ): string {
   const normalized = normalizeRecognitionRuleCode(code);
-  if (normalized.fieldDirectives.length === 0) {
+  if (normalized.fieldDirectives.length === 0 && normalized.derivedFieldRules.length === 0) {
     return "";
   }
 
@@ -482,6 +554,25 @@ export function buildRecognitionRuleCodePromptSection(
       parts.push(directive.instruction);
     }
     lines.push(`- ${parts.join("；")}`);
+  }
+
+  for (const rule of normalized.derivedFieldRules) {
+    const operatorLabel =
+      rule.operator === "contains"
+        ? "包含"
+        : rule.operator === "empty"
+          ? "为空"
+          : rule.operator === "not_empty"
+            ? "非空"
+            : "等于";
+    const sourceValueLabel =
+      rule.operator === "empty" || rule.operator === "not_empty" ? "" : ` ${String(rule.sourceValue ?? "")}`;
+    const elseLabel =
+      rule.elseValue !== undefined ? `；否则填 ${String(rule.elseValue) || "空值"}` : "";
+    const instructionLabel = rule.instruction ? `；${rule.instruction}` : "";
+    lines.push(
+      `- 派生字段 ${rule.fieldId}：当字段 ${rule.sourceFieldId} ${operatorLabel}${sourceValueLabel} 时，填 ${String(rule.value) || "空值"}${elseLabel}${instructionLabel}`,
+    );
   }
 
   lines.push("- 不要忽略这些规则，也不要把它们套用到其他未指定字段。");
@@ -1267,15 +1358,33 @@ export async function getTrainingPoolStatus(formId = DEFAULT_FORM_ID) {
   const examples = await loadTrainingExamples(formId);
   const exampleMap = new Map(examples.map((example) => [example.imageName, example]));
   const images = await listTrainingImages(formId);
+  const orderedImageNames: string[] = [];
+  const seenImageNames = new Set<string>();
+
+  for (const image of images) {
+    if (seenImageNames.has(image.imageName)) {
+      continue;
+    }
+    seenImageNames.add(image.imageName);
+    orderedImageNames.push(image.imageName);
+  }
+
+  for (const example of examples) {
+    if (seenImageNames.has(example.imageName)) {
+      continue;
+    }
+    seenImageNames.add(example.imageName);
+    orderedImageNames.push(example.imageName);
+  }
 
   return {
-    totalImages: images.length,
-    labeledImages: images.filter((image) => exampleMap.has(image.imageName)).length,
-    unlabeledImages: images.filter((image) => !exampleMap.has(image.imageName)).length,
-    items: images.map((image) => ({
-      imageName: image.imageName,
-      labeled: exampleMap.has(image.imageName),
-      example: exampleMap.get(image.imageName) || null,
+    totalImages: orderedImageNames.length,
+    labeledImages: orderedImageNames.filter((imageName) => exampleMap.has(imageName)).length,
+    unlabeledImages: orderedImageNames.filter((imageName) => !exampleMap.has(imageName)).length,
+    items: orderedImageNames.map((imageName) => ({
+      imageName,
+      labeled: exampleMap.has(imageName),
+      example: exampleMap.get(imageName) || null,
     })),
   };
 }
@@ -1998,13 +2107,17 @@ export function buildEditableRecognitionRulesSection(globalRules?: GlobalRules |
 
   const normalizedRules = seedWorkingRulesFromLegacy(mergeLegacyIntoAgentThreadIfEmpty(globalRules));
   const workingRules = stripRecognitionFieldGuidanceBlock(normalizedRules.workingRules).trim();
+  const fieldGuidanceSection = buildRecognitionFieldGuidancePromptSection(
+    extractRecognitionFieldGuidanceFromWorkingRules(normalizedRules.workingRules),
+  ).trim();
   if (workingRules) {
     section += `\n\n【当前工作识别规则】\n${workingRules}\n`;
-    return section;
+  } else if (normalizedRules.agentThread && normalizedRules.agentThread.length > 0) {
+    section += buildAgentThreadPromptSection(normalizedRules.agentThread);
   }
 
-  if (normalizedRules.agentThread && normalizedRules.agentThread.length > 0) {
-    section += buildAgentThreadPromptSection(normalizedRules.agentThread);
+  if (fieldGuidanceSection) {
+    section += `\n${fieldGuidanceSection}\n`;
   }
 
   return section;
@@ -2111,6 +2224,9 @@ export function buildTrainingPromptSection(
 
   if (globalRules) {
     const wr = stripRecognitionFieldGuidanceBlock(globalRules.workingRules).trim();
+    const fieldGuidanceSection = buildRecognitionFieldGuidancePromptSection(
+      extractRecognitionFieldGuidanceFromWorkingRules(globalRules.workingRules),
+    ).trim();
     if (wr) {
       section += `\n\n【当前工作识别规则】\n${wr}\n`;
     } else {
@@ -2137,6 +2253,10 @@ export function buildTrainingPromptSection(
           section += `\n\n【与操作员的近期对话（帮助理解业务偏好；执行时须与上文规则及示例一致，冲突以规则与可见像素为准）】\n${lines.join("\n")}\n`;
         }
       }
+    }
+
+    if (fieldGuidanceSection) {
+      section += `\n${fieldGuidanceSection}\n`;
     }
   }
 

@@ -1250,7 +1250,7 @@ function HomeContent() {
 
   async function loadTrainingStatus() {
     try {
-      const response = await fetch(withFormId("/api/training/status"));
+      const response = await fetch(withFormId("/api/training/status"), { cache: "no-store" });
       const payload = (await response.json()) as TrainingStatusResponse & { error?: string };
       if (!response.ok) {
         throw new Error(payload.error || t("home.errTrainStatus"));

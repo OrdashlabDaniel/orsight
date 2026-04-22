@@ -613,6 +613,48 @@ export function TrainingAnnotationWorkbench({
     }));
   }
 
+  async function persistWorkingRules(nextWorkingRules: string) {
+    const saveRes = await fetch(buildApiPath("/api/training/rules"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workingRules: nextWorkingRules }),
+    });
+    const saveData = (await saveRes.json()) as { error?: string; workingRules?: string };
+    if (!saveRes.ok) {
+      throw new Error(saveData.error || t("agent.errSaveRules"));
+    }
+    return typeof saveData.workingRules === "string" ? saveData.workingRules : nextWorkingRules;
+  }
+
+  async function syncFieldGuidanceWithRecognitionAgent(
+    field: TableFieldDefinition,
+    label: string,
+    workingRules: string,
+    note: string,
+  ) {
+    const fieldCatalog = activeFieldDefinitions
+      .map((item) => `${item.id}（${getLocalizedTableFieldLabel(item, locale)}）`)
+      .join("、");
+    const syncMessage = note
+      ? `用户刚通过字段说明保存了字段「${label}」（fieldId=${field.id}）的识别要求。当前表单字段列表如下：${fieldCatalog}。请把这条字段级沟通需求转化为当前表单真正执行的识别规则与规则代码，使后续识别直接遵循它；如果该字段应根据其它字段自动派生，请优先写成 derivedFieldRules。该字段说明如下：${note}`
+      : `用户刚清空了字段「${label}」（fieldId=${field.id}）的字段说明。当前表单字段列表如下：${fieldCatalog}。请移除这条字段说明单独带来的特殊识别要求、格式约束或 derivedFieldRules，保留其它规则不变。`;
+    const res = await fetch(buildApiPath("/api/training/guidance-chat"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        messages: [{ role: "user", content: syncMessage }],
+        currentWorkingRules: workingRules,
+      }),
+    });
+    const data = (await res.json()) as { error?: string; revisedWorkingRules?: string };
+    if (!res.ok) {
+      throw new Error(data.error || t("annotation.fieldGuidanceSyncFailed"));
+    }
+    return typeof data.revisedWorkingRules === "string" && data.revisedWorkingRules.trim()
+      ? data.revisedWorkingRules
+      : workingRules;
+  }
+
   async function saveFieldGuidance(field: TableFieldDefinition, nextNote = fieldGuidanceDrafts[field.id] ?? "") {
     const trimmed = nextNote.trim().slice(0, 2000);
     const label = getLocalizedTableFieldLabel(field, locale);
@@ -639,20 +681,22 @@ export function TrainingAnnotationWorkbench({
         currentWorkingRules,
         mapToRecognitionFieldGuidance(nextDrafts),
       );
+      const savedWorkingRules = await persistWorkingRules(nextWorkingRules);
+      let finalWorkingRules = savedWorkingRules;
 
-      const saveRes = await fetch(buildApiPath("/api/training/rules"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ workingRules: nextWorkingRules }),
-      });
-      const saveData = (await saveRes.json()) as { error?: string; workingRules?: string };
-      if (!saveRes.ok) {
-        throw new Error(saveData.error || t("agent.errSaveRules"));
+      try {
+        const syncedWorkingRules = await syncFieldGuidanceWithRecognitionAgent(field, label, savedWorkingRules, trimmed);
+        if (syncedWorkingRules !== savedWorkingRules) {
+          finalWorkingRules = await persistWorkingRules(syncedWorkingRules);
+        }
+      } catch (syncError) {
+        onError?.(
+          syncError instanceof Error ? syncError.message : t("annotation.fieldGuidanceSyncFailed"),
+        );
       }
 
-      const savedWorkingRules = typeof saveData.workingRules === "string" ? saveData.workingRules : nextWorkingRules;
       setFieldGuidanceDrafts(
-        recognitionFieldGuidanceToMap(extractRecognitionFieldGuidanceFromWorkingRules(savedWorkingRules)),
+        recognitionFieldGuidanceToMap(extractRecognitionFieldGuidanceFromWorkingRules(finalWorkingRules)),
       );
       onNotice?.(
         trimmed
@@ -1302,6 +1346,7 @@ export function TrainingAnnotationWorkbench({
           boxes: boxesForVisionApi(visibleAnnotationBoxes),
           fieldAggregations: sanitizeFieldAggregations(fieldAggregations, activeFieldIdSet),
           tableFields: activeFieldDefinitions,
+          fieldGuidance: fieldGuidanceDrafts,
         }),
       });
       const data = (await res.json()) as {
@@ -1360,26 +1405,27 @@ export function TrainingAnnotationWorkbench({
       setManualRecord((prev) => {
         const next = { ...prev };
         const strFromModel = (v: unknown) => (typeof v === "string" ? v : "");
-        if (boxed.has("date")) next.date = strFromModel(r.date);
-        if (boxed.has("route")) next.route = strFromModel(r.route);
-        if (boxed.has("driver")) next.driver = strFromModel(r.driver);
-        if (boxed.has("taskCode")) next.taskCode = strFromModel(r.taskCode);
-        if (boxed.has("waybillStatus")) next.waybillStatus = strFromModel(r.waybillStatus);
-        if (boxed.has("stationTeam")) next.stationTeam = strFromModel(r.stationTeam);
-        if (boxed.has("total")) {
+        const hasRecordKey = (fieldId: string) => fieldId in r;
+        if (boxed.has("date") || hasRecordKey("date")) next.date = strFromModel(r.date);
+        if (boxed.has("route") || hasRecordKey("route")) next.route = strFromModel(r.route);
+        if (boxed.has("driver") || hasRecordKey("driver")) next.driver = strFromModel(r.driver);
+        if (boxed.has("taskCode") || hasRecordKey("taskCode")) next.taskCode = strFromModel(r.taskCode);
+        if (boxed.has("waybillStatus") || hasRecordKey("waybillStatus")) next.waybillStatus = strFromModel(r.waybillStatus);
+        if (boxed.has("stationTeam") || hasRecordKey("stationTeam")) next.stationTeam = strFromModel(r.stationTeam);
+        if (boxed.has("total") || hasRecordKey("total")) {
           next.total = numOrEmpty(r.total);
           if (typeof r.totalSourceLabel === "string") {
             next.totalSourceLabel = r.totalSourceLabel;
           }
         }
-        if (boxed.has("unscanned")) next.unscanned = numOrEmpty(r.unscanned);
-        if (boxed.has("exceptions")) next.exceptions = numOrEmpty(r.exceptions);
+        if (boxed.has("unscanned") || hasRecordKey("unscanned")) next.unscanned = numOrEmpty(r.unscanned);
+        if (boxed.has("exceptions") || hasRecordKey("exceptions")) next.exceptions = numOrEmpty(r.exceptions);
         const customRecord =
           r.customFieldValues && typeof r.customFieldValues === "object"
             ? (r.customFieldValues as Record<string, string | number | "">)
             : {};
         for (const field of activeFieldDefinitions) {
-          if (isBuiltInFieldId(field.id) || !boxed.has(field.id)) {
+          if (isBuiltInFieldId(field.id) || (!boxed.has(field.id) && !(field.id in customRecord))) {
             continue;
           }
           next.customFieldValues = {

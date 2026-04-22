@@ -3,6 +3,10 @@ import sharp from "sharp";
 
 import { withAuthedStorageTenant } from "@/lib/storage-tenant";
 import { getFormIdFromFormData } from "@/lib/form-request";
+import {
+  buildRecognitionFieldGuidancePromptSection,
+  extractRecognitionFieldGuidanceFromWorkingRules,
+} from "@/lib/recognition-field-guidance";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import {
   ensureUniquePodRecordIds,
@@ -134,6 +138,7 @@ type ExtractVisionContext = {
   activeFieldIds: ReadonlySet<string>;
   activeBuiltInFieldIds: ReadonlySet<string>;
   editableRecognitionRulesText: string;
+  fieldGuidancePromptText: string;
   recognitionRuleCode: RecognitionRuleCode;
   recognitionValidationConfig: RecognitionValidationConfig;
   currentImageVisualPacks: WeakMap<File, Promise<Awaited<ReturnType<typeof buildVisualReferencePack>>>>;
@@ -267,6 +272,153 @@ function getRecognitionFieldDirective(ruleCode: RecognitionRuleCode, fieldId: st
   return ruleCode.fieldDirectives.find((directive) => directive.fieldId === fieldId);
 }
 
+type RecognitionRuleScalar = string | number | "";
+
+function getRuleFieldValueFromRecord(record: PodRecord, fieldId: string): RecognitionRuleScalar {
+  switch (fieldId) {
+    case "date":
+      return record.date || "";
+    case "route":
+      return record.route || "";
+    case "driver":
+      return record.driver || "";
+    case "taskCode":
+      return record.taskCode || "";
+    case "total":
+      return record.total ?? "";
+    case "totalSourceLabel":
+      return record.totalSourceLabel || "";
+    case "unscanned":
+      return record.unscanned ?? "";
+    case "exceptions":
+      return record.exceptions ?? "";
+    case "waybillStatus":
+      return record.waybillStatus || "";
+    case "stationTeam":
+      return record.stationTeam || "";
+    default:
+      return record.customFieldValues?.[fieldId] ?? "";
+  }
+}
+
+function normalizeRuleComparisonValue(value: RecognitionRuleScalar) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return String(value);
+  }
+  return normalizeText(value).replace(/\s+/g, " ").toLowerCase();
+}
+
+function ruleMatchesDerivedCondition(
+  sourceValue: RecognitionRuleScalar,
+  rule: RecognitionRuleCode["derivedFieldRules"][number],
+) {
+  switch (rule.operator) {
+    case "empty":
+      return sourceValue === "" || sourceValue === undefined || sourceValue === null;
+    case "not_empty":
+      return !(sourceValue === "" || sourceValue === undefined || sourceValue === null);
+    case "contains": {
+      const haystack = normalizeRuleComparisonValue(sourceValue);
+      const needle = normalizeRuleComparisonValue((rule.sourceValue ?? "") as RecognitionRuleScalar);
+      return Boolean(haystack && needle && haystack.includes(needle));
+    }
+    case "equals":
+    default:
+      return normalizeRuleComparisonValue(sourceValue) === normalizeRuleComparisonValue((rule.sourceValue ?? "") as RecognitionRuleScalar);
+  }
+}
+
+function coerceRuleTargetValue(
+  fieldId: string,
+  rawValue: RecognitionRuleScalar,
+  fieldMap: ReadonlyMap<string, TableFieldDefinition>,
+): RecognitionRuleScalar {
+  switch (fieldId) {
+    case "total":
+    case "unscanned":
+    case "exceptions":
+      return normalizeNumber(rawValue) ?? "";
+    case "date":
+    case "route":
+    case "driver":
+    case "taskCode":
+    case "totalSourceLabel":
+    case "waybillStatus":
+    case "stationTeam":
+      return typeof rawValue === "number" && Number.isFinite(rawValue) ? String(rawValue) : normalizeText(rawValue);
+    default: {
+      const field = fieldMap.get(fieldId);
+      if (!field) {
+        return typeof rawValue === "number" && Number.isFinite(rawValue) ? rawValue : normalizeText(rawValue);
+      }
+      if (field.type === "number") {
+        return normalizeNumber(rawValue) ?? "";
+      }
+      return typeof rawValue === "number" && Number.isFinite(rawValue) ? String(rawValue) : normalizeText(rawValue);
+    }
+  }
+}
+
+function setRuleFieldValueOnRecord(
+  record: PodRecord,
+  fieldId: string,
+  rawValue: RecognitionRuleScalar,
+  activeBuiltInFieldIds: ReadonlySet<string>,
+  tableFields: TableFieldDefinition[],
+): PodRecord {
+  const fieldMap = new Map(tableFields.map((field) => [field.id, field] as const));
+  const value = coerceRuleTargetValue(fieldId, rawValue, fieldMap);
+
+  switch (fieldId) {
+    case "date":
+      if (!activeBuiltInFieldIds.has("date") || record.date === value) return record;
+      return { ...record, date: String(value) };
+    case "route":
+      if (!activeBuiltInFieldIds.has("route") || record.route === value) return record;
+      return { ...record, route: String(value) };
+    case "driver":
+      if (!activeBuiltInFieldIds.has("driver") || record.driver === value) return record;
+      return { ...record, driver: String(value) };
+    case "taskCode":
+      if (!activeBuiltInFieldIds.has("taskCode") || (record.taskCode || "") === value) return record;
+      return { ...record, taskCode: String(value) };
+    case "total":
+      if (!activeBuiltInFieldIds.has("total") || record.total === value) return record;
+      return { ...record, total: typeof value === "number" ? value : "" };
+    case "totalSourceLabel":
+      if (!activeBuiltInFieldIds.has("total") || (record.totalSourceLabel || "") === value) return record;
+      return { ...record, totalSourceLabel: String(value) };
+    case "unscanned":
+      if (!activeBuiltInFieldIds.has("unscanned") || record.unscanned === value) return record;
+      return { ...record, unscanned: typeof value === "number" ? value : "" };
+    case "exceptions":
+      if (!activeBuiltInFieldIds.has("exceptions") || record.exceptions === value) return record;
+      return { ...record, exceptions: typeof value === "number" ? value : "" };
+    case "waybillStatus":
+      if (!activeBuiltInFieldIds.has("waybillStatus") || (record.waybillStatus || "") === value) return record;
+      return { ...record, waybillStatus: String(value) };
+    case "stationTeam":
+      if (!activeBuiltInFieldIds.has("stationTeam") || (record.stationTeam || "") === value) return record;
+      return { ...record, stationTeam: String(value) };
+    default: {
+      if (!fieldMap.has(fieldId)) {
+        return record;
+      }
+      const currentValue = record.customFieldValues?.[fieldId] ?? "";
+      if (currentValue === value) {
+        return record;
+      }
+      return {
+        ...record,
+        customFieldValues: {
+          ...(record.customFieldValues || {}),
+          [fieldId]: value,
+        },
+      };
+    }
+  }
+}
+
 function detectDateOutputFormatFromExample(exampleValue: string | undefined): string | null {
   const value = normalizeText(exampleValue);
   if (!value) return null;
@@ -355,36 +507,48 @@ function applyRecognitionRuleCodeToRecord(
   record: PodRecord,
   ruleCode: RecognitionRuleCode,
   activeBuiltInFieldIds: ReadonlySet<string>,
+  tableFields: TableFieldDefinition[],
 ): PodRecord {
-  if (!activeBuiltInFieldIds.has("date") || !record.date) {
-    return record;
-  }
+  let nextRecord = record;
 
-  const dateDirective = getRecognitionFieldDirective(ruleCode, "date");
-  if (!dateDirective) {
-    return record;
-  }
-
-  const outputFormat =
-    dateDirective.outputFormat && dateDirective.outputFormat !== "as_visible"
-      ? dateDirective.outputFormat
-      : detectDateOutputFormatFromExample(dateDirective.exampleValue);
-  if (!outputFormat) {
-    return record;
-  }
-
-  const parts = parseDateParts(record.date);
-  if (!parts) {
-    return record;
-  }
-
-  const formatted = formatDateWithOutputFormat(parts, outputFormat);
-  return formatted && formatted !== record.date
-    ? {
-        ...record,
-        date: formatted,
+  if (activeBuiltInFieldIds.has("date") && nextRecord.date) {
+    const dateDirective = getRecognitionFieldDirective(ruleCode, "date");
+    if (dateDirective) {
+      const outputFormat =
+        dateDirective.outputFormat && dateDirective.outputFormat !== "as_visible"
+          ? dateDirective.outputFormat
+          : detectDateOutputFormatFromExample(dateDirective.exampleValue);
+      if (outputFormat) {
+        const parts = parseDateParts(nextRecord.date);
+        if (parts) {
+          const formatted = formatDateWithOutputFormat(parts, outputFormat);
+          if (formatted && formatted !== nextRecord.date) {
+            nextRecord = {
+              ...nextRecord,
+              date: formatted,
+            };
+          }
+        }
       }
-    : record;
+    }
+  }
+
+  for (const rule of ruleCode.derivedFieldRules) {
+    const sourceValue = getRuleFieldValueFromRecord(nextRecord, rule.sourceFieldId);
+    if (ruleMatchesDerivedCondition(sourceValue, rule)) {
+      nextRecord = setRuleFieldValueOnRecord(nextRecord, rule.fieldId, rule.value, activeBuiltInFieldIds, tableFields);
+    } else if (rule.elseValue !== undefined) {
+      nextRecord = setRuleFieldValueOnRecord(
+        nextRecord,
+        rule.fieldId,
+        rule.elseValue,
+        activeBuiltInFieldIds,
+        tableFields,
+      );
+    }
+  }
+
+  return nextRecord;
 }
 
 async function buildExtractVisionContext(formId: string): Promise<ExtractVisionContext> {
@@ -406,6 +570,9 @@ async function buildExtractVisionContext(formId: string): Promise<ExtractVisionC
   const activeFieldIds = new Set(tableFields.map((field) => field.id));
   const activeBuiltInFieldIds = activeBuiltInIdsFromTableFields(tableFields);
   const recognitionRuleCode = extractRecognitionRuleCodeFromWorkingRules(normalizedRules.workingRules);
+  const fieldGuidancePromptText = buildRecognitionFieldGuidancePromptSection(
+    extractRecognitionFieldGuidanceFromWorkingRules(normalizedRules.workingRules),
+  );
   return {
     formId,
     examples,
@@ -415,6 +582,7 @@ async function buildExtractVisionContext(formId: string): Promise<ExtractVisionC
     activeFieldIds,
     activeBuiltInFieldIds,
     editableRecognitionRulesText: buildEditableRecognitionRulesSection(normalizedRules),
+    fieldGuidancePromptText,
     recognitionRuleCode,
     recognitionValidationConfig: extractRecognitionValidationConfigFromWorkingRules(normalizedRules.workingRules),
     currentImageVisualPacks: new WeakMap(),
@@ -1256,6 +1424,7 @@ async function runLiveAggregationRefine(
     },
     records,
     model,
+    ctx.fieldGuidancePromptText,
   );
   return {
     ...refined,
@@ -1317,6 +1486,7 @@ async function cropsToPngDataUrls(
 function buildBoxGuidedCropInstructionText(
   boxes: TrainingBox[],
   aggs: Partial<Record<TrainingField, FieldAggregation>>,
+  recognitionContextText?: string,
 ): string {
   const byField = new Map<TrainingField, TrainingBox[]>();
   for (const box of boxes) {
@@ -1360,6 +1530,11 @@ function buildBoxGuidedCropInstructionText(
     `输出一个 JSON 对象，键可包括：${Array.from(responseKeys).join(", ")}。`,
     "规则：只有当小图里可见标签足以证明字段语义时，才允许输出该字段值；否则输出 null 或省略。",
   );
+
+  const recognitionContext = typeof recognitionContextText === "string" ? recognitionContextText.trim() : "";
+  if (recognitionContext) {
+    lines.push("", recognitionContext);
+  }
 
   return lines.join("\n");
 }
@@ -1463,6 +1638,7 @@ async function refinePODFromTrainingExampleBoxes(
   example: TrainingExample,
   records: PodRecord[],
   model: string,
+  recognitionContextText?: string,
 ): Promise<{ records: PodRecord[]; usage?: OpenAIUsage }> {
   if (!OPENAI_API_KEY || records.length === 0) return { records };
 
@@ -1477,7 +1653,11 @@ async function refinePODFromTrainingExampleBoxes(
     return { records };
   }
 
-  const userText = buildBoxGuidedCropInstructionText(boxes, example.fieldAggregations || {});
+  const userText = buildBoxGuidedCropInstructionText(
+    boxes,
+    example.fieldAggregations || {},
+    recognitionContextText,
+  );
   const systemText = `你是 OrSight 的训练池强引导识别助手。你会收到多张已经按训练标注框裁剪好的小图。
 你必须先识别每张小图中可见的字段标签/项目名称，再读取该标签直接对应的值；禁止仅凭坐标位置、数字大小或常见布局去猜字段。
 若小图里没有足够标签语义证明字段归属，就输出 null 或省略该字段。只返回合法 JSON。`;
@@ -2991,7 +3171,12 @@ function collectRecoveryPlan(
   });
 }
 
-function buildRecoveryPrompt(records: PodRecord[], plans: RecoveryPlan[], tableFields: TableFieldDefinition[]) {
+function buildRecoveryPrompt(
+  records: PodRecord[],
+  plans: RecoveryPlan[],
+  tableFields: TableFieldDefinition[],
+  recognitionContextText?: string,
+) {
   const fieldLabelMap = getFieldLabelMap(tableFields);
   const requestedBuiltIns = new Set<RecoveryFieldId>(plans.flatMap((plan) => plan.missingBuiltIns));
   const needsCustomRecovery = plans.some((plan) => plan.missingCustomFields.length > 0);
@@ -3030,6 +3215,11 @@ function buildRecoveryPrompt(records: PodRecord[], plans: RecoveryPlan[], tableF
   }
   if (needsCustomRecovery) {
     lines.push("- customFieldValues：只补当前 need 里列出的自定义字段，键必须严格使用字段 id。");
+  }
+
+  const recognitionContext = typeof recognitionContextText === "string" ? recognitionContextText.trim() : "";
+  if (recognitionContext) {
+    lines.push("", recognitionContext);
   }
 
   lines.push("", "下面是首轮识别后的部分记录与待补字段：");
@@ -3221,7 +3411,12 @@ async function recoverMissingFieldsFromVision(
   const bytes = Buffer.from(await file.arrayBuffer());
   const dataUrl = `data:${file.type || "image/jpeg"};base64,${bytes.toString("base64")}`;
   const visualPack = await buildVisualPackForCurrentImage(file, ctx);
-  const userContent: OpenAIMessageContent[] = [{ type: "text", text: buildRecoveryPrompt(records, plans, ctx.tableFields) }];
+  const userContent: OpenAIMessageContent[] = [
+    {
+      type: "text",
+      text: buildRecoveryPrompt(records, plans, ctx.tableFields, ctx.fieldGuidancePromptText),
+    },
+  ];
 
   for (const ref of visualPack.referenceImages) {
     userContent.push({ type: "text", text: ref.caption });
@@ -3303,6 +3498,7 @@ async function recoverMissingFieldsFromVision(
         stripInactiveBuiltInValues(record, ctx.activeBuiltInFieldIds),
         ctx.recognitionRuleCode,
         ctx.activeBuiltInFieldIds,
+        ctx.tableFields,
       ),
     ),
     usage: payload.usage,
@@ -3448,6 +3644,7 @@ function normalizeRecordsForConsistency(
   recognitionValidationConfig: RecognitionValidationConfig,
   recognitionRuleCode: RecognitionRuleCode,
   activeBuiltInFieldIds: ReadonlySet<string>,
+  tableFields: TableFieldDefinition[],
   counterVerificationResult?: CounterVerificationResult | null,
 ): PodRecord[] {
   const routeStationActive =
@@ -3460,6 +3657,7 @@ function normalizeRecordsForConsistency(
         { ...record, imageType },
         recognitionRuleCode,
         activeBuiltInFieldIds,
+        tableFields,
       ),
     )
     .map((record) => (routeStationActive ? repairRouteVersusStationTeamRecord(record) : record))
@@ -3499,6 +3697,7 @@ function applyProcessedConsistencyAnalysis(
   recognitionValidationConfig: RecognitionValidationConfig,
   recognitionRuleCode: RecognitionRuleCode,
   activeBuiltInFieldIds: ReadonlySet<string>,
+  tableFields: TableFieldDefinition[],
   counterVerificationResult?: CounterVerificationResult | null,
 ): { records: PodRecord[]; issues: ExtractionIssue[] } {
   const normalizedAttempts = attemptRecords.map((records) =>
@@ -3510,6 +3709,7 @@ function applyProcessedConsistencyAnalysis(
       recognitionValidationConfig,
       recognitionRuleCode,
       activeBuiltInFieldIds,
+      tableFields,
       counterVerificationResult,
     ),
   );
@@ -3981,6 +4181,7 @@ async function runConsistencyCheck(file: File, model: string, ctx: ExtractVision
             stripInactiveBuiltInValues(record, ctx.activeBuiltInFieldIds),
             ctx.recognitionRuleCode,
             ctx.activeBuiltInFieldIds,
+            ctx.tableFields,
           ),
         ),
       file.name,
@@ -4092,6 +4293,7 @@ export async function POST(request: Request) {
                 ),
                 visionCtx.recognitionRuleCode,
                 activeBuiltInFieldIds,
+                visionCtx.tableFields,
               ),
             )
           );
@@ -4127,7 +4329,7 @@ export async function POST(request: Request) {
               imageType,
             }))
             .map((record) =>
-              applyRecognitionRuleCodeToRecord(record, visionCtx.recognitionRuleCode, activeBuiltInFieldIds),
+              applyRecognitionRuleCodeToRecord(record, visionCtx.recognitionRuleCode, activeBuiltInFieldIds, visionCtx.tableFields),
             )
             .map((record) => (routeStationBuiltInActive ? repairRouteVersusStationTeamRecord(record) : record))
             .map((record) => (routeStationBuiltInActive ? sanitizeStationTeamRecord(record) : record));
@@ -4140,6 +4342,7 @@ export async function POST(request: Request) {
               nextRecord,
               visionCtx.recognitionRuleCode,
               activeBuiltInFieldIds,
+              visionCtx.tableFields,
             );
           });
           checkedRecords = deriveWaybillStatus(checkedRecords, activeBuiltInFieldIds);
@@ -4154,6 +4357,7 @@ export async function POST(request: Request) {
             visionCtx.recognitionValidationConfig,
             visionCtx.recognitionRuleCode,
             activeBuiltInFieldIds,
+            visionCtx.tableFields,
             counterVerificationResult,
           );
           checkedRecords = consistencyAnalysis.records;
@@ -4222,6 +4426,7 @@ export async function POST(request: Request) {
               stripInactiveBuiltInValues(record, activeBuiltInFieldIds),
               visionCtx.recognitionRuleCode,
               activeBuiltInFieldIds,
+              visionCtx.tableFields,
             ),
           );
           if (refined.usage) {
@@ -4284,7 +4489,7 @@ export async function POST(request: Request) {
             imageType: consistencyResult.imageType,
           }))
           .map((record) =>
-            applyRecognitionRuleCodeToRecord(record, visionCtx.recognitionRuleCode, activeBuiltInFieldIds),
+            applyRecognitionRuleCodeToRecord(record, visionCtx.recognitionRuleCode, activeBuiltInFieldIds, visionCtx.tableFields),
           )
           .map((record) => (routeStationBuiltInActive ? repairRouteVersusStationTeamRecord(record) : record))
           .map((record) => (routeStationBuiltInActive ? sanitizeStationTeamRecord(record) : record));
@@ -4297,6 +4502,7 @@ export async function POST(request: Request) {
             nextRecord,
             visionCtx.recognitionRuleCode,
             activeBuiltInFieldIds,
+            visionCtx.tableFields,
           );
         });
         checkedRecords = deriveWaybillStatus(checkedRecords, activeBuiltInFieldIds);
@@ -4311,6 +4517,7 @@ export async function POST(request: Request) {
           visionCtx.recognitionValidationConfig,
           visionCtx.recognitionRuleCode,
           activeBuiltInFieldIds,
+          visionCtx.tableFields,
           counterVerificationResult,
         );
         checkedRecords = consistencyAnalysis.records;
