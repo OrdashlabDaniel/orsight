@@ -1,7 +1,6 @@
 "use client";
 
 import Image from "next/image";
-import JSZip from "jszip";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Fragment, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -14,8 +13,10 @@ import {
   type FieldAggregation,
   type WorkbenchAnnotationBox,
 } from "@/components/TrainingAnnotationWorkbench";
+import { EditableFormTitle } from "@/components/EditableFormTitle";
 import { RecognitionAgentDock } from "@/components/RecognitionAgentDock";
 import {
+  ensureUniquePodRecordIds,
   type ExtractionIssue,
   type ExtractionResponse,
   type PodRecord,
@@ -62,6 +63,28 @@ function revokeUploadPreviewUrls(items: UploadItem[]) {
       URL.revokeObjectURL(upload.previewUrl);
     }
   });
+}
+
+function normalizeUploadFileName(fileName: string) {
+  return fileName.trim().toLocaleLowerCase();
+}
+
+function dedupeUploadsByName(items: UploadItem[], existingNames?: ReadonlySet<string>) {
+  const seen = new Set(existingNames ? Array.from(existingNames) : []);
+  const accepted: UploadItem[] = [];
+  const skipped: UploadItem[] = [];
+
+  for (const item of items) {
+    const key = normalizeUploadFileName(item.file.name);
+    if (!key || seen.has(key)) {
+      skipped.push(item);
+      continue;
+    }
+    seen.add(key);
+    accepted.push(item);
+  }
+
+  return { accepted, skipped };
 }
 
 type ConfirmedCorrectRecord = {
@@ -128,11 +151,24 @@ type FieldManagerDragState = {
   originY: number;
 };
 
-type SaveFilePickerHandle = {
-  createWritable: () => Promise<{
-    write: (data: Blob) => Promise<void>;
-    close: () => Promise<void>;
-  }>;
+type UploadPanelSplitDragState = {
+  startY: number;
+  startHeight: number;
+  minHeight: number;
+  maxHeight: number;
+};
+
+type FileSystemWritableHandle = {
+  write: (data: Blob) => Promise<void>;
+  close: () => Promise<void>;
+};
+
+type FileSystemFileHandle = {
+  createWritable: () => Promise<FileSystemWritableHandle>;
+};
+
+type FileSystemDirectoryHandle = {
+  getFileHandle: (name: string, options?: { create?: boolean }) => Promise<FileSystemFileHandle>;
 };
 
 type WindowWithSavePicker = Window &
@@ -143,7 +179,14 @@ type WindowWithSavePicker = Window &
         description?: string;
         accept: Record<string, string[]>;
       }>;
-    }) => Promise<SaveFilePickerHandle>;
+    }) => Promise<FileSystemFileHandle>;
+  };
+
+type WindowWithDirectoryPicker = Window &
+  typeof globalThis & {
+    showDirectoryPicker?: (options?: {
+      mode?: "read" | "readwrite";
+    }) => Promise<FileSystemDirectoryHandle>;
   };
 
 const EXTRACTION_BATCH_SIZE = 5;
@@ -240,18 +283,50 @@ function formatDateForFilename(rawDate: string | undefined, dataSuffix: string) 
   return `${normalized.replace(/[\\/:*?"<>|]/g, "-")}_${dataSuffix}`;
 }
 
-function formatTimestampForFilename(date = new Date()) {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  const hours = String(date.getHours()).padStart(2, "0");
-  const minutes = String(date.getMinutes()).padStart(2, "0");
-  return `${year}${month}${day}-${hours}${minutes}`;
+function sanitizeExportFileName(fileName: string) {
+  const safeName = (fileName || "upload").replace(/[\\/:*?"<>|]/g, "-").trim();
+  return safeName || "upload";
 }
 
-function buildArchiveEntryName(fileName: string, index: number) {
-  const safeName = (fileName || "upload").replace(/[\\/:*?"<>|]/g, "-");
-  return `${String(index + 1).padStart(2, "0")}-${safeName}`;
+function splitFileNameParts(fileName: string) {
+  const dotIndex = fileName.lastIndexOf(".");
+  if (dotIndex <= 0 || dotIndex === fileName.length - 1) {
+    return { name: fileName, ext: "" };
+  }
+  return {
+    name: fileName.slice(0, dotIndex),
+    ext: fileName.slice(dotIndex),
+  };
+}
+
+function buildUniqueExportFileNames(files: readonly File[]) {
+  const usedNames = new Set<string>();
+
+  return files.map((file) => {
+    const safeName = sanitizeExportFileName(file.name);
+    const { name, ext } = splitFileNameParts(safeName);
+
+    let candidate = safeName;
+    let suffix = 2;
+    while (usedNames.has(candidate.toLowerCase())) {
+      candidate = `${name}-${suffix}${ext}`;
+      suffix += 1;
+    }
+
+    usedNames.add(candidate.toLowerCase());
+    return candidate;
+  });
+}
+
+function triggerBrowserFileDownload(file: Blob, fileName: string) {
+  const downloadUrl = URL.createObjectURL(file);
+  const link = document.createElement("a");
+  link.href = downloadUrl;
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(downloadUrl), 1000);
 }
 
 const ISSUE_CODE_FIELD_REQUIREMENTS: Record<string, string[]> = {
@@ -357,20 +432,29 @@ function HomeContent() {
   const [columnFilters, setColumnFilters] = useState<Record<string, string>>({});
   const viewerAnchorRef = useRef<HTMLElement | null>(null);
   const uploadPanelRef = useRef<HTMLDivElement | null>(null);
+  const uploadPanelBodyRef = useRef<HTMLDivElement | null>(null);
+  const uploadTopActionsRef = useRef<HTMLDivElement | null>(null);
+  const uploadTopInfoContentRef = useRef<HTMLDivElement | null>(null);
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
   const splitResultsRef = useRef<HTMLDivElement | null>(null);
   const columnDragRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const rowDragRef = useRef<{ startY: number; startHeight: number; shellHeight: number } | null>(null);
+  const uploadPanelSplitDragRef = useRef<UploadPanelSplitDragState | null>(null);
   const uploadPanelWidthRef = useRef(380);
   const remindersPanelHeightRef = useRef(160);
+  const uploadTopSectionMinHeightRef = useRef(124);
+  const uploadTopSectionHeightRef = useRef(260);
   const prevWorkbenchFormIdRef = useRef<string | null>(null);
   const uploadRestoreRequestIdRef = useRef(0);
   const skipNextWorkbenchSessionSaveRef = useRef(true);
 
   const UPLOAD_PANEL_WIDTH_KEY = "orsight-home-upload-width";
   const RESULTS_REMINDERS_HEIGHT_KEY = "orsight-home-results-reminders-height";
+  const UPLOAD_PANEL_TOP_HEIGHT_KEY = "orsight-home-upload-panel-top-height";
   const [uploadPanelWidthPx, setUploadPanelWidthPx] = useState(380);
   const [remindersPanelHeightPx, setRemindersPanelHeightPx] = useState(160);
+  const [uploadTopSectionMinHeightPx, setUploadTopSectionMinHeightPx] = useState(124);
+  const [uploadTopSectionHeightPx, setUploadTopSectionHeightPx] = useState(260);
   const [isDesktopLayout, setIsDesktopLayout] = useState(false);
 
   const uploadsRef = useRef(uploads);
@@ -395,6 +479,47 @@ function HomeContent() {
   }, [remindersPanelHeightPx]);
 
   useEffect(() => {
+    uploadTopSectionHeightRef.current = uploadTopSectionHeightPx;
+  }, [uploadTopSectionHeightPx]);
+
+  useLayoutEffect(() => {
+    function measureUploadTopSectionMinHeight() {
+      const actionsHeight = uploadTopActionsRef.current?.getBoundingClientRect().height ?? 0;
+      const infoHeight = uploadTopInfoContentRef.current?.getBoundingClientRect().height ?? 0;
+      const gap = infoHeight > 0 ? 8 : 0;
+      const verticalPadding = 24;
+      const measured = Math.max(96, Math.ceil(actionsHeight + infoHeight + gap + verticalPadding));
+
+      uploadTopSectionMinHeightRef.current = measured;
+      setUploadTopSectionMinHeightPx((current) => (current === measured ? current : measured));
+
+      if (uploadTopSectionHeightRef.current < measured) {
+        uploadTopSectionHeightRef.current = measured;
+        setUploadTopSectionHeightPx(measured);
+      }
+    }
+
+    measureUploadTopSectionMinHeight();
+
+    if (typeof ResizeObserver === "undefined") {
+      return;
+    }
+
+    const observer = new ResizeObserver(() => {
+      measureUploadTopSectionMinHeight();
+    });
+
+    if (uploadTopActionsRef.current) {
+      observer.observe(uploadTopActionsRef.current);
+    }
+    if (uploadTopInfoContentRef.current) {
+      observer.observe(uploadTopInfoContentRef.current);
+    }
+
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
     try {
       const raw = localStorage.getItem(UPLOAD_PANEL_WIDTH_KEY);
       const n = raw ? Number.parseInt(raw, 10) : NaN;
@@ -412,6 +537,18 @@ function HomeContent() {
       const n = raw ? Number.parseInt(raw, 10) : NaN;
       if (Number.isFinite(n)) {
         setRemindersPanelHeightPx(Math.min(480, Math.max(96, n)));
+      }
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(UPLOAD_PANEL_TOP_HEIGHT_KEY);
+      const n = raw ? Number.parseInt(raw, 10) : NaN;
+      if (Number.isFinite(n)) {
+        setUploadTopSectionHeightPx(Math.min(520, Math.max(96, n)));
       }
     } catch {
       /* ignore */
@@ -445,6 +582,13 @@ function HomeContent() {
         remindersPanelHeightRef.current = h;
         setRemindersPanelHeightPx(h);
       }
+      const uploadSplit = uploadPanelSplitDragRef.current;
+      if (uploadSplit) {
+        const deltaY = event.clientY - uploadSplit.startY;
+        const h = Math.min(uploadSplit.maxHeight, Math.max(uploadSplit.minHeight, uploadSplit.startHeight + deltaY));
+        uploadTopSectionHeightRef.current = h;
+        setUploadTopSectionHeightPx(h);
+      }
     }
     function onUp() {
       if (columnDragRef.current) {
@@ -459,6 +603,14 @@ function HomeContent() {
         rowDragRef.current = null;
         try {
           localStorage.setItem(RESULTS_REMINDERS_HEIGHT_KEY, String(remindersPanelHeightRef.current));
+        } catch {
+          /* ignore */
+        }
+      }
+      if (uploadPanelSplitDragRef.current) {
+        uploadPanelSplitDragRef.current = null;
+        try {
+          localStorage.setItem(UPLOAD_PANEL_TOP_HEIGHT_KEY, String(uploadTopSectionHeightRef.current));
         } catch {
           /* ignore */
         }
@@ -493,6 +645,27 @@ function HomeContent() {
     const fallback = Math.min(Math.max(window.innerHeight * 0.68, 360), 880);
     const shellHeight = rect && rect.height > 48 ? rect.height : fallback;
     rowDragRef.current = { startY: event.clientY, startHeight: remindersPanelHeightPx, shellHeight };
+    (event.currentTarget as HTMLElement).setPointerCapture?.(event.pointerId);
+  }
+
+  function beginUploadListResize(event: React.PointerEvent) {
+    if (event.button !== 0) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    const bodyRect = uploadPanelBodyRef.current?.getBoundingClientRect();
+    const shellHeight = bodyRect && bodyRect.height > 120 ? bodyRect.height : 720;
+    const separator = 12;
+    const minBottomHeight = 220;
+    const minHeight = uploadTopSectionMinHeightRef.current;
+    const maxHeight = Math.max(minHeight, shellHeight - separator - minBottomHeight);
+    uploadPanelSplitDragRef.current = {
+      startY: event.clientY,
+      startHeight: Math.min(Math.max(uploadTopSectionHeightPx, minHeight), maxHeight),
+      minHeight,
+      maxHeight,
+    };
     (event.currentTarget as HTMLElement).setPointerCapture?.(event.pointerId);
   }
 
@@ -541,12 +714,20 @@ function HomeContent() {
           revokeUploadPreviewUrls(restoredUploads);
           return;
         }
-        uploadsRef.current = restoredUploads;
-        setUploads(restoredUploads);
+        const { accepted, skipped } = dedupeUploadsByName(restoredUploads);
+        if (skipped.length > 0) {
+          revokeUploadPreviewUrls(skipped);
+          void savePersistedWorkbenchUploads(
+            currentFormId,
+            accepted.map((upload) => ({ id: upload.id, file: upload.file })),
+          );
+        }
+        uploadsRef.current = accepted;
+        setUploads(accepted);
         setSelectedUploadId((current) =>
-          current && restoredUploads.some((upload) => upload.id === current)
+          current && accepted.some((upload) => upload.id === current)
             ? current
-            : restoredUploads[0]?.id ?? null,
+            : accepted[0]?.id ?? null,
         );
       })
       .catch(() => {
@@ -632,6 +813,13 @@ function HomeContent() {
     selectedUploadId,
     currentFormId,
   ]);
+
+  useEffect(() => {
+    const normalized = ensureUniquePodRecordIds(records);
+    if (normalized !== records) {
+      setRecords(normalized);
+    }
+  }, [records]);
 
   useEffect(() => {
     const existingIds = new Set(records.map((record) => record.id));
@@ -1092,7 +1280,10 @@ function HomeContent() {
       throw new Error(payload.error || t("home.errExtract"));
     }
 
-    return payload;
+    return {
+      ...payload,
+      records: ensureUniquePodRecordIds(payload.records || []),
+    };
   }
 
   async function runParallelExtraction(
@@ -1146,7 +1337,7 @@ function HomeContent() {
     await Promise.all(Array.from({ length: Math.min(concurrency, batches.length) }, () => worker()));
 
     return {
-      records: allRecords,
+      records: ensureUniquePodRecordIds(allRecords),
       issues: allIssues,
       modelUsed: mode === "review" ? reviewModelName : primaryModelName,
       trainingExamplesLoaded: loadedTrainingExamples,
@@ -1172,7 +1363,19 @@ function HomeContent() {
         })
       );
 
-      const merged = [...uploadsRef.current, ...nextUploads];
+      const existingNames = new Set(uploadsRef.current.map((upload) => normalizeUploadFileName(upload.file.name)));
+      const { accepted, skipped } = dedupeUploadsByName(nextUploads, existingNames);
+      if (skipped.length > 0) {
+        revokeUploadPreviewUrls(skipped);
+      }
+
+      if (accepted.length === 0) {
+        setNoticeMessage(t("home.noticeSkippedDuplicateUploads", { n: skipped.length }));
+        setErrorMessage("");
+        return;
+      }
+
+      const merged = [...uploadsRef.current, ...accepted];
       uploadsRef.current = merged;
       setUploads(merged);
       setSelectedUploadId((currentId) => {
@@ -1185,7 +1388,11 @@ function HomeContent() {
         currentFormId,
         merged.map((upload) => ({ id: upload.id, file: upload.file })),
       );
-      setNoticeMessage(t("home.noticeAdded", { n: nextUploads.length }));
+      setNoticeMessage(
+        skipped.length > 0
+          ? t("home.noticeAddedDedupByName", { n: accepted.length, skipped: skipped.length })
+          : t("home.noticeAdded", { n: accepted.length }),
+      );
       setErrorMessage("");
     } catch {
       setErrorMessage(t("home.errReadFile"));
@@ -1254,54 +1461,35 @@ function HomeContent() {
     setIsExportingUploads(true);
     setErrorMessage("");
     setNoticeMessage("");
-
-    const filename = `orsight-uploads-${formatTimestampForFilename()}.zip`;
+    const exportFileNames = buildUniqueExportFileNames(selectedUploads.map((upload) => upload.file));
 
     try {
-      const zip = new JSZip();
-      for (const [index, upload] of selectedUploads.entries()) {
-        zip.file(buildArchiveEntryName(upload.file.name, index), await upload.file.arrayBuffer());
-      }
-
-      const archiveBlob = await zip.generateAsync({ type: "blob" });
-
       try {
-        const pickerWindow = window as WindowWithSavePicker;
-        if (typeof pickerWindow.showSaveFilePicker === "function") {
-          const handle = await pickerWindow.showSaveFilePicker({
-            suggestedName: filename,
-            types: [
-              {
-                description: t("home.uploadArchive"),
-                accept: {
-                  "application/zip": [".zip"],
-                },
-              },
-            ],
-          });
-          const writable = await handle.createWritable();
-          await writable.write(archiveBlob);
-          await writable.close();
-          setNoticeMessage(t("home.uploadArchiveSaved", { name: filename }));
+        const pickerWindow = window as WindowWithDirectoryPicker;
+        if (typeof pickerWindow.showDirectoryPicker === "function") {
+          const directoryHandle = await pickerWindow.showDirectoryPicker({ mode: "readwrite" });
+          for (const [index, upload] of selectedUploads.entries()) {
+            const fileHandle = await directoryHandle.getFileHandle(exportFileNames[index], { create: true });
+            const writable = (await fileHandle.createWritable()) as FileSystemWritableHandle;
+            await writable.write(upload.file);
+            await writable.close();
+          }
+          setNoticeMessage(t("home.uploadFilesSaved", { n: selectedUploads.length }));
           return;
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         if (message.toLowerCase().includes("abort")) {
-          setNoticeMessage(t("home.uploadArchiveCancelled"));
+          setNoticeMessage(t("home.uploadFilesExportCancelled"));
           return;
         }
+        throw error;
       }
 
-      const downloadUrl = URL.createObjectURL(archiveBlob);
-      const link = document.createElement("a");
-      link.href = downloadUrl;
-      link.download = filename;
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      window.setTimeout(() => URL.revokeObjectURL(downloadUrl), 1000);
-      setNoticeMessage(t("home.uploadArchiveDownloaded", { name: filename }));
+      for (const [index, upload] of selectedUploads.entries()) {
+        triggerBrowserFileDownload(upload.file, exportFileNames[index]);
+      }
+      setNoticeMessage(t("home.uploadFilesDownloaded", { n: selectedUploads.length }));
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : t("home.errDownloadUploads"));
     } finally {
@@ -2233,6 +2421,15 @@ function HomeContent() {
               </p>
             </div>
           </div>
+          <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+            <EditableFormTitle
+              formId={currentFormId}
+              onNotice={setNoticeMessage}
+              onError={setErrorMessage}
+              titleClassName="text-[20px] font-medium leading-7 tracking-[0.06em] text-slate-600"
+            />
+            <p className="max-w-3xl text-sm text-[var(--muted-foreground)]">{t("home.subtitle")}</p>
+          </div>
         </header>
 
         {isFieldManagerOpen ? (
@@ -2425,13 +2622,16 @@ function HomeContent() {
                 : undefined
             }
           >
-            <div className="shrink-0 border-b border-[var(--border)] px-4 py-3">
-              <h2 className="text-sm font-medium">{t("home.uploadTitle")}</h2>
-              <p className="mt-0.5 text-xs text-[var(--muted-foreground)]">{t("upload.workspaceHelper")}</p>
+            <div className="flex items-center gap-2 overflow-hidden border-b border-[var(--border)] px-4 py-2.5">
+              <h2 className="shrink-0 text-sm font-medium">{t("home.uploadTitle")}</h2>
+              <p className="min-w-0 truncate text-xs text-[var(--muted-foreground)]">{t("upload.workspaceHelper")}</p>
             </div>
-
-            <div className="flex flex-col gap-4 p-4 pb-3">
-              <div className="flex flex-wrap gap-2">
+            <div ref={uploadPanelBodyRef} className="flex min-h-0 flex-1 flex-col">
+            <div
+              className="flex min-h-0 shrink-0 flex-col px-4 py-3"
+              style={isDesktopLayout ? { height: Math.max(uploadTopSectionHeightPx, uploadTopSectionMinHeightPx) } : undefined}
+            >
+              <div ref={uploadTopActionsRef} className="flex flex-wrap gap-2">
                 <button
                   className="rounded-md bg-[var(--foreground)] px-3 py-2 text-sm text-[var(--background)] hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
                   onClick={extractData}
@@ -2481,61 +2681,53 @@ function HomeContent() {
                   {t("home.clear")}
                 </button>
               </div>
+              <div className="mt-2 min-h-0 flex-1 overflow-y-auto pr-1">
+                <div ref={uploadTopInfoContentRef} className="flex flex-col gap-2">
+                  {progress ? (
+                    <div className="rounded-lg border border-[var(--border)] px-2.5 py-2">
+                      <div className="mb-1 flex items-center justify-between text-[11px] text-[var(--muted-foreground)]">
+                        <span>{t("home.progress")}</span>
+                        <span>
+                          {progress.completed} / {progress.total}
+                        </span>
+                      </div>
+                      <div className="h-1 overflow-hidden rounded-full bg-[var(--border)]">
+                        <div
+                          className="h-full rounded-full bg-[var(--foreground)] transition-all duration-300"
+                          style={{ width: `${progress.total ? Math.round((progress.completed / progress.total) * 100) : 0}%` }}
+                        />
+                      </div>
+                    </div>
+                  ) : null}
 
-              <button
-                type="button"
-                className="w-full rounded-md border border-[var(--border)] px-3 py-2 text-sm hover:bg-[var(--background)] disabled:cursor-not-allowed disabled:opacity-40"
-                onClick={openFieldManager}
-                disabled={isSavingFieldConfig}
-              >
-                {t("home.manageColumns")}
-              </button>
-
-              {progress ? (
-                <div className="rounded-lg border border-[var(--border)] px-3 py-3">
-                  <div className="mb-1.5 flex items-center justify-between text-xs text-[var(--muted-foreground)]">
-                    <span>{t("home.progress")}</span>
-                    <span>
-                      {progress.completed} / {progress.total}
+                  <div className="flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-[var(--muted-foreground)]">
+                    <span>{t("home.countRecords", { n: organizedRecordsResult.records.length })}</span>
+                    <span>{t("home.warnings", { n: totalWarnings })}</span>
+                    <span title={t("home.mergedCross")}>
+                      {t("home.merged", { n: organizedRecordsResult.duplicateCount })}
                     </span>
                   </div>
-                  <div className="h-1.5 overflow-hidden rounded-full bg-[var(--border)]">
-                    <div
-                      className="h-full rounded-full bg-[var(--foreground)] transition-all duration-300"
-                      style={{ width: `${progress.total ? Math.round((progress.completed / progress.total) * 100) : 0}%` }}
-                    />
-                  </div>
-                </div>
-              ) : null}
 
-              <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-[var(--muted-foreground)]">
-                <span>{t("home.countRecords", { n: organizedRecordsResult.records.length })}</span>
-                <span>{t("home.warnings", { n: totalWarnings })}</span>
-                <span title={t("home.mergedCross")}>
-                  {t("home.merged", { n: organizedRecordsResult.duplicateCount })}
-                </span>
+                  {errorMessage ? (
+                    <div className="rounded-md border border-red-200/80 bg-red-50/80 px-2.5 py-1.5 text-xs text-red-800">{errorMessage}</div>
+                  ) : null}
+
+                  {noticeMessage ? (
+                    <div className="rounded-md border border-emerald-200/80 bg-emerald-50/80 px-2.5 py-1.5 text-xs text-emerald-900">{noticeMessage}</div>
+                  ) : null}
+                </div>
               </div>
-
-              {trainingStatus ? (
-                <div className="text-xs text-[var(--muted-foreground)]">
-                  {t("home.trainPool", {
-                    total: trainingStatus.totalImages,
-                    labeled: trainingStatus.labeledImages,
-                    unlabeled: trainingStatus.unlabeledImages,
-                  })}
-                </div>
-              ) : null}
-
-              {errorMessage ? (
-                <div className="rounded-lg border border-red-200/80 bg-red-50/80 px-3 py-2 text-sm text-red-800">{errorMessage}</div>
-              ) : null}
-
-              {noticeMessage ? (
-                <div className="rounded-lg border border-emerald-200/80 bg-emerald-50/80 px-3 py-2 text-sm text-emerald-900">{noticeMessage}</div>
-              ) : null}
             </div>
-
-            <div className="border-t border-[var(--border)] px-2 pb-2 pt-1">
+            <div
+              role="separator"
+              aria-orientation="horizontal"
+              aria-label={t("home.resizeUploadListPanel")}
+              className="relative hidden h-3 w-full shrink-0 cursor-row-resize touch-none select-none lg:block"
+              onPointerDown={beginUploadListResize}
+            >
+              <div className="pointer-events-none absolute inset-x-4 top-1/2 h-0.5 -translate-y-1/2 rounded-full bg-[var(--border)]" />
+            </div>
+            <div className="min-h-0 flex-1 px-2 pb-2 pt-1">
               <input
                 ref={uploadInputRef}
                 className="hidden"
@@ -2548,7 +2740,7 @@ function HomeContent() {
                 }}
               />
               <div
-                className={`overflow-hidden rounded-lg border transition ${
+                className={`flex h-full min-h-0 flex-col overflow-hidden rounded-lg border transition ${
                   isDraggingFiles
                     ? "border-[var(--accent)] bg-[var(--accent-muted)]"
                     : "border-[var(--border)] bg-[var(--background)]"
@@ -2559,9 +2751,9 @@ function HomeContent() {
                 onDrop={handleDrop}
               >
                 <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--border)] px-3 py-2">
-                  <div className="min-w-0">
-                    <div className="text-xs font-medium text-[var(--foreground)]">{t("home.uploadListTitle")}</div>
-                    <div className="mt-0.5 text-xs text-[var(--muted-foreground)]">
+                  <div className="flex min-w-0 items-center gap-2 overflow-hidden">
+                    <div className="shrink-0 text-xs font-medium text-[var(--foreground)]">{t("home.uploadListTitle")}</div>
+                    <div className="min-w-0 truncate text-xs text-[var(--muted-foreground)]">
                       {isDraggingFiles ? t("home.dropRelease") : t("home.uploadListHint")}
                     </div>
                   </div>
@@ -2600,7 +2792,7 @@ function HomeContent() {
                     })}
                   </div>
                 ) : null}
-                <div className="max-h-[min(50vh,420px)] overflow-y-auto">
+                <div className="min-h-0 flex-1 overflow-y-auto">
                 {uploads.length ? (
                   <ul className="divide-y divide-[var(--border)]">
                     {uploads.map((upload) => (
@@ -2649,6 +2841,7 @@ function HomeContent() {
                 )}
                 </div>
               </div>
+            </div>
             </div>
           </div>
 

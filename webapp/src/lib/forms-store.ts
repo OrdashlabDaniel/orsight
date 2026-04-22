@@ -154,11 +154,18 @@ const SHARED_ROUTE_STARTER_FIELDS: TableFieldDefinition[] = [
   { id: "stationTeam", type: "text", label: "站点车队", active: false, builtIn: true },
 ];
 
-/** 旧版财务种子「Reimbursement Status」文案，用于识别未改元数据的赠送模板并同步到当前标准列。 */
+/** 历史财务赠送模板：`date` 旧为小写，需视作未改模板并自动同步到当前标准列。 */
+const LEGACY_FINANCE_STARTER_V0_FIELDS: TableFieldDefinition[] = STANDARD_FINANCE_STARTER_TABLE_FIELDS.map((field) =>
+  field.id === "date" ? { ...field, label: "date" } : field,
+);
+
+/** 更早的财务赠送模板还使用过 `Reimbursement Status` 文案。 */
 const LEGACY_FINANCE_STARTER_V1_FIELDS: TableFieldDefinition[] = STANDARD_FINANCE_STARTER_TABLE_FIELDS.map((field) =>
-  field.id === "custom_reimbursement_status"
-    ? { ...field, label: "Reimbursement Status" }
-    : field,
+  field.id === "date"
+    ? { ...field, label: "date" }
+    : field.id === "custom_reimbursement_status"
+      ? { ...field, label: "Reimbursement Status" }
+      : field,
 );
 
 type StarterSeed = {
@@ -238,12 +245,14 @@ function hasStarterRuleCustomizations(rules: GlobalRules) {
 
 function getLegacyStarterFieldSets(formId: string) {
   const normalizedId = normalizeFormId(formId);
+  const financeV0 = normalizeStarterFieldSet(LEGACY_FINANCE_STARTER_V0_FIELDS);
   const financeV1 = normalizeStarterFieldSet(LEGACY_FINANCE_STARTER_V1_FIELDS);
   if (normalizedId === DEFAULT_FORM_ID) {
     return [
       normalizeStarterFieldSet(DEFAULT_TABLE_FIELDS),
       normalizeStarterFieldSet(SHARED_ROUTE_STARTER_FIELDS),
       normalizeStarterFieldSet(IAH_ROUTE_STARTER_FIELDS),
+      financeV0,
       financeV1,
     ];
   }
@@ -252,6 +261,7 @@ function getLegacyStarterFieldSets(formId: string) {
       normalizeStarterFieldSet(DEFAULT_TABLE_FIELDS),
       normalizeStarterFieldSet(SHARED_ROUTE_STARTER_FIELDS),
       normalizeStarterFieldSet(IAH_ROUTE_STARTER_FIELDS),
+      financeV0,
       financeV1,
     ];
   }
@@ -612,7 +622,7 @@ async function loadLegacyRemoteForms() {
   if (currentManifest) {
     const forms = normalizeForms(currentManifest.forms, { injectBuiltinDefault: !tenantActive() });
     const restored = await maybeRestoreLegacyFormsIntoLegacyManifest(currentManifest, forms);
-    return restored || forms;
+    return await maybeSyncLegacyGiftStarterForms(restored || forms, currentManifest);
   }
 
   if (!tenantActive()) {
@@ -677,7 +687,7 @@ async function loadRemoteForms() {
     return await loadLegacyRemoteForms();
   }
   if (current.length > 0) {
-    return current;
+    return await maybeSyncRemoteGiftStarterForms(current);
   }
 
   if (!tenantActive()) {

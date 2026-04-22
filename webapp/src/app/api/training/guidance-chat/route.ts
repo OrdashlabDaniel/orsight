@@ -3,6 +3,11 @@ import { NextResponse } from "next/server";
 import { withAuthedStorageTenant } from "@/lib/storage-tenant";
 import { getFormIdFromRequest } from "@/lib/form-request";
 import {
+  buildRecognitionFieldGuidancePromptSection,
+  extractRecognitionFieldGuidanceFromWorkingRules,
+  upsertRecognitionFieldGuidanceBlock,
+} from "@/lib/recognition-field-guidance";
+import {
   buildAgentThreadReferenceImages,
   buildEditableRecognitionRulesSection,
   buildAgentThreadPromptSection,
@@ -163,6 +168,9 @@ export async function POST(request: Request) {
     const currentValidationConfig = extractRecognitionValidationConfigFromWorkingRules(
       currentWorkingRules || rules.workingRules || "",
     );
+    const currentFieldGuidance = extractRecognitionFieldGuidanceFromWorkingRules(
+      currentWorkingRules || rules.workingRules || "",
+    );
     const fallbackContext =
       rules.agentThread && rules.agentThread.length > 0
         ? buildAgentThreadPromptSection(rules.agentThread).slice(0, 8000)
@@ -230,6 +238,8 @@ ${serializeRecognitionRuleCode(currentRuleCode)}
 
 【当前字段缺省策略 JSON】
 ${serializeRecognitionValidationConfig(currentValidationConfig)}
+
+${buildRecognitionFieldGuidancePromptSection(currentFieldGuidance)}
 
 【识别规则的固定边界】
 ${buildEditableRecognitionRulesSection(null).trim()}
@@ -324,8 +334,9 @@ ${fallbackContext}`;
     const revisedValidationConfig = mergeValidationConfigs(modelValidationConfig, deterministicValidationConfig);
     const revisedRuleCode = normalizeRecognitionRuleCode(parsed.revisedRuleCode ?? currentRuleCode);
     revisedWorkingRules = upsertRecognitionValidationConfigBlock(revisedWorkingRules, revisedValidationConfig);
-    revisedWorkingRules = upsertRecognitionRuleCodeBlock(revisedWorkingRules, revisedRuleCode).slice(0, 50000);
-      return NextResponse.json({ assistantReply, revisedWorkingRules, revisedRuleCode });
+    revisedWorkingRules = upsertRecognitionRuleCodeBlock(revisedWorkingRules, revisedRuleCode);
+    revisedWorkingRules = upsertRecognitionFieldGuidanceBlock(revisedWorkingRules, currentFieldGuidance).slice(0, 50000);
+    return NextResponse.json({ assistantReply, revisedWorkingRules, revisedRuleCode });
     } catch (error) {
       return NextResponse.json(
         { error: error instanceof Error ? error.message : "Guidance chat failed." },

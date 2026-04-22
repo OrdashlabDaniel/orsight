@@ -6,6 +6,12 @@ import { useLocale } from "@/i18n/LocaleProvider";
 import { getLocalizedTableFieldLabel } from "@/lib/table-field-display";
 import { DEFAULT_TABLE_FIELDS, isBuiltInFieldId, type TableFieldDefinition } from "@/lib/table-fields";
 import { ensureImageDataUrlFromSource } from "@/lib/client-visual-upload";
+import {
+  extractRecognitionFieldGuidanceFromWorkingRules,
+  mapToRecognitionFieldGuidance,
+  recognitionFieldGuidanceToMap,
+  upsertRecognitionFieldGuidanceBlock,
+} from "@/lib/recognition-field-guidance";
 
 /** 训练标注字段 key，与训练池 boxes 一致 */
 export type AnnotationField = string;
@@ -289,6 +295,8 @@ export type TrainingAnnotationWorkbenchProps = {
   imageName: string;
   imageSrc: string;
   apiPathBuilder?: (path: string) => string;
+  /** Optional localStorage key to persist unsaved draft state. */
+  draftStorageKey?: string;
   fieldDefinitions?: TableFieldDefinition[];
   initialSeed: AnnotationWorkbenchSeed;
   initialAnnotationMode?: AnnotationMode;
@@ -318,6 +326,7 @@ export function TrainingAnnotationWorkbench({
   imageName,
   imageSrc,
   apiPathBuilder,
+  draftStorageKey,
   fieldDefinitions,
   initialSeed,
   initialAnnotationMode = "record",
@@ -355,10 +364,14 @@ export function TrainingAnnotationWorkbench({
   const [annotationField, setAnnotationField] = useState<AnnotationField>(defaultFieldId);
   const [resolvedImageSrc, setResolvedImageSrc] = useState("");
   const [annotationNotes, setAnnotationNotes] = useState(initialNotes ?? t("annotation.defaultNotes"));
+  const [fieldGuidanceDrafts, setFieldGuidanceDrafts] = useState<Record<string, string>>({});
+  const [openFieldGuidancePanels, setOpenFieldGuidancePanels] = useState<Record<string, boolean>>({});
   const [drawingState, setDrawingState] = useState<DrawingState | null>(null);
   const [isSavingTraining, setIsSavingTraining] = useState(false);
   const [isApplyingToMain, setIsApplyingToMain] = useState(false);
   const [isPreviewFillLoading, setIsPreviewFillLoading] = useState(false);
+  const [isLoadingFieldGuidance, setIsLoadingFieldGuidance] = useState(false);
+  const [savingFieldGuidanceId, setSavingFieldGuidanceId] = useState<string | null>(null);
   const [annotationZoom, setAnnotationZoom] = useState(100);
   const [annotationInteractionMode, setAnnotationInteractionMode] = useState<"draw" | "pan">("draw");
   const [isPanningViewport, setIsPanningViewport] = useState(false);
@@ -369,6 +382,104 @@ export function TrainingAnnotationWorkbench({
   const [leftPanelWidth, setLeftPanelWidth] = useState(65);
   /** Narrow layout: fraction of workbench height for the image pane (stacked column). */
   const [stackedImageHeightPct, setStackedImageHeightPct] = useState(48);
+
+  type PersistedDraft = {
+    v: 1;
+    imageName: string;
+    manualRecord: ManualRecordState;
+    annotationMode: AnnotationMode;
+    tableFieldTexts: TableAnnotationTextState;
+    annotationBoxes: WorkbenchAnnotationBox[];
+    fieldAggregations: Partial<Record<AnnotationField, FieldAggregation>>;
+    annotationField: AnnotationField;
+    annotationNotes: string;
+  };
+
+  const loadDraftOnceRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!open || !draftStorageKey || !imageName) {
+      return;
+    }
+    const marker = `${draftStorageKey}::${imageName}`;
+    if (loadDraftOnceRef.current === marker) {
+      return;
+    }
+    loadDraftOnceRef.current = marker;
+
+    try {
+      const raw = window.localStorage.getItem(draftStorageKey);
+      if (!raw) {
+        return;
+      }
+      const parsed = JSON.parse(raw) as Partial<PersistedDraft>;
+      if (parsed.v !== 1 || parsed.imageName !== imageName) {
+        return;
+      }
+
+      if (parsed.manualRecord) {
+        setManualRecord(sanitizeManualRecord(parsed.manualRecord, activeFieldDefinitions));
+      }
+      if (parsed.annotationMode === "record" || parsed.annotationMode === "table") {
+        setAnnotationMode(parsed.annotationMode);
+      }
+      if (parsed.tableFieldTexts) {
+        setTableFieldTexts(sanitizeTableFieldTexts(parsed.tableFieldTexts, activeFieldDefinitions));
+      }
+      if (Array.isArray(parsed.annotationBoxes)) {
+        setAnnotationBoxes(sanitizeAnnotationBoxes(parsed.annotationBoxes, activeFieldIdSet));
+      }
+      if (parsed.fieldAggregations && typeof parsed.fieldAggregations === "object") {
+        setFieldAggregations(sanitizeFieldAggregations(parsed.fieldAggregations, activeFieldIdSet));
+      }
+      if (typeof parsed.annotationField === "string" && parsed.annotationField) {
+        setAnnotationField(pickAnnotationField(parsed.annotationField, activeFieldDefinitions));
+      }
+      if (typeof parsed.annotationNotes === "string") {
+        setAnnotationNotes(parsed.annotationNotes);
+      }
+    } catch {
+      // ignore malformed drafts
+    }
+  }, [activeFieldDefinitions, activeFieldIdSet, draftStorageKey, imageName, open]);
+
+  useEffect(() => {
+    if (!open || !draftStorageKey || !imageName) {
+      return;
+    }
+
+    const handle = window.setTimeout(() => {
+      const draft: PersistedDraft = {
+        v: 1,
+        imageName,
+        manualRecord,
+        annotationMode,
+        tableFieldTexts,
+        annotationBoxes,
+        fieldAggregations,
+        annotationField,
+        annotationNotes,
+      };
+      try {
+        window.localStorage.setItem(draftStorageKey, JSON.stringify(draft));
+      } catch {
+        // ignore quota / privacy mode
+      }
+    }, 350);
+
+    return () => window.clearTimeout(handle);
+  }, [
+    annotationBoxes,
+    annotationField,
+    annotationMode,
+    annotationNotes,
+    draftStorageKey,
+    fieldAggregations,
+    imageName,
+    manualRecord,
+    open,
+    tableFieldTexts,
+  ]);
   type WorkbenchResizeKind = null | "panels";
   const [workbenchResizeKind, setWorkbenchResizeKind] = useState<WorkbenchResizeKind>(null);
 
@@ -454,6 +565,106 @@ export function TrainingAnnotationWorkbench({
   const imageRef = useRef<HTMLImageElement | null>(null);
   const seedJsonRef = useRef<string>("");
   const viewportPanStateRef = useRef<ViewportPanState | null>(null);
+
+  useEffect(() => {
+    if (!open) {
+      setIsLoadingFieldGuidance(false);
+      return;
+    }
+
+    let cancelled = false;
+    setIsLoadingFieldGuidance(true);
+
+    void (async () => {
+      try {
+        const res = await fetch(buildApiPath("/api/training/rules"));
+        const data = (await res.json()) as { error?: string; workingRules?: string };
+        if (!res.ok) {
+          throw new Error(data.error || t("agent.errLoadRules"));
+        }
+        if (cancelled) {
+          return;
+        }
+        setFieldGuidanceDrafts(
+          recognitionFieldGuidanceToMap(
+            extractRecognitionFieldGuidanceFromWorkingRules(typeof data.workingRules === "string" ? data.workingRules : ""),
+          ),
+        );
+      } catch (error) {
+        if (!cancelled) {
+          onError?.(error instanceof Error ? error.message : t("agent.errLoadRules"));
+        }
+      } finally {
+        if (!cancelled) {
+          setIsLoadingFieldGuidance(false);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [buildApiPath, onError, open, t]);
+
+  function toggleFieldGuidancePanel(fieldId: string) {
+    setOpenFieldGuidancePanels((current) => ({
+      ...current,
+      [fieldId]: !current[fieldId],
+    }));
+  }
+
+  async function saveFieldGuidance(field: TableFieldDefinition, nextNote = fieldGuidanceDrafts[field.id] ?? "") {
+    const trimmed = nextNote.trim().slice(0, 2000);
+    const label = getLocalizedTableFieldLabel(field, locale);
+    const nextDrafts = {
+      ...fieldGuidanceDrafts,
+      ...(trimmed ? { [field.id]: trimmed } : {}),
+    };
+    if (!trimmed) {
+      delete nextDrafts[field.id];
+    }
+
+    setSavingFieldGuidanceId(field.id);
+    onError?.("");
+
+    try {
+      const loadRes = await fetch(buildApiPath("/api/training/rules"));
+      const loadData = (await loadRes.json()) as { error?: string; workingRules?: string };
+      if (!loadRes.ok) {
+        throw new Error(loadData.error || t("agent.errLoadRules"));
+      }
+
+      const currentWorkingRules = typeof loadData.workingRules === "string" ? loadData.workingRules : "";
+      const nextWorkingRules = upsertRecognitionFieldGuidanceBlock(
+        currentWorkingRules,
+        mapToRecognitionFieldGuidance(nextDrafts),
+      );
+
+      const saveRes = await fetch(buildApiPath("/api/training/rules"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ workingRules: nextWorkingRules }),
+      });
+      const saveData = (await saveRes.json()) as { error?: string; workingRules?: string };
+      if (!saveRes.ok) {
+        throw new Error(saveData.error || t("agent.errSaveRules"));
+      }
+
+      const savedWorkingRules = typeof saveData.workingRules === "string" ? saveData.workingRules : nextWorkingRules;
+      setFieldGuidanceDrafts(
+        recognitionFieldGuidanceToMap(extractRecognitionFieldGuidanceFromWorkingRules(savedWorkingRules)),
+      );
+      onNotice?.(
+        trimmed
+          ? t("annotation.fieldGuidanceSaved", { label })
+          : t("annotation.fieldGuidanceCleared", { label }),
+      );
+    } catch (error) {
+      onError?.(error instanceof Error ? error.message : t("agent.errSaveRules"));
+    } finally {
+      setSavingFieldGuidanceId(null);
+    }
+  }
 
   function getImageLayout(): ImageLayout | null {
     const container = annotationCanvasRef.current;
@@ -1256,6 +1467,13 @@ export function TrainingAnnotationWorkbench({
           tableFieldValues,
         }),
       );
+      if (draftStorageKey) {
+        try {
+          window.localStorage.removeItem(draftStorageKey);
+        } catch {
+          // ignore
+        }
+      }
       handleClose();
     } catch (error) {
       onError?.(error instanceof Error ? error.message : t("annotation.errSaveSample"));
@@ -1627,6 +1845,23 @@ export function TrainingAnnotationWorkbench({
                         ) : (
                           <span className="text-xs text-slate-400">{t("annotation.noSelection")}</span>
                         )}
+                        {annotationMode === "record" ? (
+                          <button
+                            type="button"
+                            className={`rounded-full border px-2.5 py-1 text-[11px] font-medium ${
+                              openFieldGuidancePanels[field.id] || (fieldGuidanceDrafts[field.id] || "").trim()
+                                ? "border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100"
+                                : "border-slate-200 bg-white text-slate-500 hover:bg-slate-50"
+                            }`}
+                            onClick={() => toggleFieldGuidancePanel(field.id)}
+                          >
+                            {openFieldGuidancePanels[field.id]
+                              ? t("annotation.fieldGuidanceClose")
+                              : (fieldGuidanceDrafts[field.id] || "").trim()
+                                ? t("annotation.fieldGuidanceEdit")
+                                : t("annotation.fieldGuidanceOpen")}
+                          </button>
+                        ) : null}
                       </div>
 
                       {annotationMode === "table" ? (
@@ -1651,6 +1886,60 @@ export function TrainingAnnotationWorkbench({
                           />
                         </>
                       )}
+
+                      {annotationMode === "record" && openFieldGuidancePanels[field.id] ? (
+                        <div className="mt-3 rounded-xl border border-blue-100 bg-blue-50/70 p-3">
+                          <div className="mb-1 text-xs font-medium text-slate-700">
+                            {t("annotation.fieldGuidanceTitle", {
+                              label: getLocalizedTableFieldLabel(field, locale),
+                            })}
+                          </div>
+                          <p className="mb-2 text-[11px] leading-5 text-slate-500">
+                            {t("annotation.fieldGuidanceHint")}
+                          </p>
+                          <textarea
+                            className="min-h-[88px] w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500"
+                            value={fieldGuidanceDrafts[field.id] ?? ""}
+                            onChange={(event) =>
+                              setFieldGuidanceDrafts((current) => ({
+                                ...current,
+                                [field.id]: event.target.value.slice(0, 2000),
+                              }))
+                            }
+                            placeholder={t("annotation.fieldGuidancePlaceholder", {
+                              label: getLocalizedTableFieldLabel(field, locale),
+                            })}
+                            disabled={isLoadingFieldGuidance || savingFieldGuidanceId === field.id}
+                          />
+                          <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+                            <div className="text-[11px] text-slate-500">
+                              {t("annotation.fieldGuidanceLinkedHint")}
+                            </div>
+                            <div className="flex flex-wrap items-center gap-2">
+                              {(fieldGuidanceDrafts[field.id] || "").trim() ? (
+                                <button
+                                  type="button"
+                                  className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+                                  onClick={() => void saveFieldGuidance(field, "")}
+                                  disabled={isLoadingFieldGuidance || savingFieldGuidanceId === field.id}
+                                >
+                                  {t("annotation.fieldGuidanceClear")}
+                                </button>
+                              ) : null}
+                              <button
+                                type="button"
+                                className="rounded-lg border border-blue-200 bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
+                                onClick={() => void saveFieldGuidance(field)}
+                                disabled={isLoadingFieldGuidance || savingFieldGuidanceId === field.id}
+                              >
+                                {savingFieldGuidanceId === field.id
+                                  ? t("annotation.fieldGuidanceSaving")
+                                  : t("annotation.fieldGuidanceSave")}
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      ) : null}
 
                       {count > 1 ? (
                         <ul className="mt-2 space-y-1 border-t border-slate-100 pt-2 text-[11px] text-slate-600">

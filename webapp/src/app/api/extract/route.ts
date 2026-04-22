@@ -5,6 +5,7 @@ import { withAuthedStorageTenant } from "@/lib/storage-tenant";
 import { getFormIdFromFormData } from "@/lib/form-request";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import {
+  ensureUniquePodRecordIds,
   type ExtractionIssue,
   type PodRecord,
   isMissingFieldAllowedByRecognitionRules,
@@ -4362,7 +4363,7 @@ export async function POST(request: Request) {
       }
 
     return NextResponse.json({
-      records,
+      records: ensureUniquePodRecordIds(records),
       issues,
       modelUsed: model,
       mode,
