@@ -67,7 +67,7 @@ export function createFormId() {
 
 /** 财务支出类赠送模板的标准列（与产品默认示例一致；`date` 为唯一内置列，其余为自定义列）。 */
 export const STANDARD_FINANCE_STARTER_TABLE_FIELDS: TableFieldDefinition[] = [
-  { id: "date", type: "text", label: "date", active: true, builtIn: true },
+  { id: "date", type: "text", label: "Date", active: true, builtIn: true },
   { id: "custom_vendor", type: "text", label: "Vendor", active: true, builtIn: false },
   { id: "custom_description", type: "text", label: "Description", active: true, builtIn: false },
   { id: "custom_category", type: "text", label: "Category", active: true, builtIn: false },

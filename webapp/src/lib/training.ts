@@ -7,6 +7,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { AgentAsset, AgentThreadTurn } from "./agent-context-types";
 import {
   DEFAULT_FORM_ID,
+  FORMS_MANIFEST_KEY,
   FORM_IMAGE_ROOT,
   getFormExampleStorageKey,
   getFormExampleStorageKeyPrefix,
@@ -15,6 +16,7 @@ import {
   normalizeFormId,
 } from "./forms";
 import { loadRemoteFormConfig, saveRemoteFormConfig } from "./form-config-db";
+import { stripRecognitionFieldGuidanceBlock } from "./recognition-field-guidance";
 import {
   scopeTrainingBucketPath,
   scopeTrainingExamplesImageName,
@@ -28,7 +30,7 @@ import {
   isSupabaseTableMarkedUnavailable,
   markSupabaseTableUnavailable,
 } from "./supabase-compat";
-import { getSupabaseAdmin, isSupabaseConfigured } from "./supabase";
+import { getSupabaseAdmin } from "./supabase";
 import { getTenantDbClient, hasTenantDbAccess, requireTenantDbAccess } from "./tenant-db";
 import type { TableFieldDefinition } from "./table-fields";
 
@@ -177,6 +179,39 @@ const trainingImageRequestCacheStorage = new AsyncLocalStorage<TrainingImageRequ
 
 function isAnyTenantScopedTrainingKey(imageName: string) {
   return /^tnt_[A-Za-z0-9_-]+::/.test(imageName);
+}
+
+async function shouldAllowDefaultFormLegacyFallback() {
+  if (!tenantActive()) {
+    return true;
+  }
+  const admin = getSupabaseAdmin();
+  if (!admin) {
+    return true;
+  }
+
+  const { data, error } = await admin
+    .from("training_examples")
+    .select("data")
+    .eq("image_name", scopeTrainingExamplesImageName(FORMS_MANIFEST_KEY))
+    .maybeSingle();
+
+  if (error || !data) {
+    return true;
+  }
+
+  const forms = Array.isArray((data as { data?: { forms?: unknown } }).data?.forms)
+    ? ((data as { data?: { forms?: unknown[] } }).data?.forms ?? [])
+    : [];
+  const defaultForm = forms.find((item) => {
+    if (!item || typeof item !== "object") {
+      return false;
+    }
+    const record = item as { id?: unknown };
+    return normalizeFormId(typeof record.id === "string" ? record.id : "") === DEFAULT_FORM_ID;
+  }) as { name?: unknown } | undefined;
+
+  return (typeof defaultForm?.name === "string" ? defaultForm.name.trim() : "") !== "财务支出表";
 }
 
 function getTrainingImageRequestCache() {
@@ -604,6 +639,10 @@ async function loadLegacyTrainingExamplesFromKv(formId = DEFAULT_FORM_ID): Promi
     return scopedExamples;
   }
 
+  if (normalizedFormId === DEFAULT_FORM_ID && !(await shouldAllowDefaultFormLegacyFallback())) {
+    return scopedExamples;
+  }
+
   const legacyQuery = admin.from("training_examples").select("image_name,data");
   const { data: legacyData, error: legacyError } =
     normalizedFormId === DEFAULT_FORM_ID
@@ -821,6 +860,10 @@ export async function listTrainingImages(formId = DEFAULT_FORM_ID) {
     }));
 
   if (scopedImages.length > 0 || !tenantActive()) {
+    return scopedImages;
+  }
+
+  if (normalizedFormId === DEFAULT_FORM_ID && !(await shouldAllowDefaultFormLegacyFallback())) {
     return scopedImages;
   }
 
@@ -1954,7 +1997,7 @@ export function buildEditableRecognitionRulesSection(globalRules?: GlobalRules |
   }
 
   const normalizedRules = seedWorkingRulesFromLegacy(mergeLegacyIntoAgentThreadIfEmpty(globalRules));
-  const workingRules = normalizedRules.workingRules?.trim();
+  const workingRules = stripRecognitionFieldGuidanceBlock(normalizedRules.workingRules).trim();
   if (workingRules) {
     section += `\n\n【当前工作识别规则】\n${workingRules}\n`;
     return section;
@@ -2067,7 +2110,7 @@ export function buildTrainingPromptSection(
   const exampleLimit = resolveTrainingPromptExampleLimit(limitOpt);
 
   if (globalRules) {
-    const wr = globalRules.workingRules?.trim();
+    const wr = stripRecognitionFieldGuidanceBlock(globalRules.workingRules).trim();
     if (wr) {
       section += `\n\n【当前工作识别规则】\n${wr}\n`;
     } else {

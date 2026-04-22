@@ -46,6 +46,36 @@ export type OrganizedRecordsResult = {
   duplicateCount: number;
 };
 
+export function ensureUniquePodRecordIds(records: PodRecord[]): PodRecord[] {
+  const usedIds = new Set<string>();
+  let changed = false;
+
+  const nextRecords = records.map((record, index) => {
+    const baseId = record.id?.trim() || `record-${index + 1}`;
+    let candidateId = baseId;
+    let suffix = 2;
+
+    while (usedIds.has(candidateId)) {
+      candidateId = `${baseId}--${suffix}`;
+      suffix += 1;
+    }
+
+    usedIds.add(candidateId);
+    if (candidateId === record.id) {
+      return record;
+    }
+
+    changed = true;
+    return {
+      ...record,
+      id: candidateId,
+      sourceRecordIds: record.sourceRecordIds?.map((sourceId) => (sourceId === record.id ? candidateId : sourceId)),
+    };
+  });
+
+  return changed ? nextRecords : records;
+}
+
 export const excelHeaders = [
   "日期",
   "抽查路线",

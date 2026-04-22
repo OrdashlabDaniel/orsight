@@ -1,4 +1,4 @@
-import type { ExtractionIssue, PodRecord } from "./pod";
+import { ensureUniquePodRecordIds, type ExtractionIssue, type PodRecord } from "./pod";
 
 const VERSION = 1 as const;
 const PREFIX = "orsight-workbench-session:v1:";
@@ -68,7 +68,7 @@ function parseWorkbenchSessionDraft(raw: string | null): WorkbenchSessionDraft |
     }
     return {
       v: VERSION,
-      records: parsed.records,
+      records: ensureUniquePodRecordIds(parsed.records),
       issues: Array.isArray(parsed.issues) ? parsed.issues : [],
       confirmedCorrectRecords: Array.isArray(parsed.confirmedCorrectRecords)
         ? parsed.confirmedCorrectRecords
