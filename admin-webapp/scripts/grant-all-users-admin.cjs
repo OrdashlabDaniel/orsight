@@ -5,6 +5,7 @@
  * Usage (from repo root):
  *   node admin-webapp/scripts/grant-all-users-admin.cjs
  */
+/* eslint-disable @typescript-eslint/no-require-imports */
 const fs = require("fs");
 const path = require("path");
 const { createClient } = require("@supabase/supabase-js");

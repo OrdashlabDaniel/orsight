@@ -3,6 +3,7 @@ import path from "node:path";
 
 import { DEFAULT_FORM_ID, STANDARD_FINANCE_STARTER_TABLE_FIELDS, STARTER_FORM_2_ID, normalizeFormId } from "@/lib/forms";
 import { loadRemoteFormConfig, saveRemoteFormConfig } from "@/lib/form-config-db";
+import { tenantActive } from "@/lib/storage-tenant";
 import { hasTenantDbAccess } from "@/lib/tenant-db";
 import { normalizeTableFields, type TableFieldDefinition } from "@/lib/table-fields";
 
@@ -73,7 +74,7 @@ function saveLocalTableFields(fields: TableFieldDefinition[], formId = DEFAULT_F
 export async function loadTableFields(formId = DEFAULT_FORM_ID): Promise<TableFieldDefinition[]> {
   const normalizedFormId = normalizeFormId(formId);
   if (!hasTenantDbAccess()) {
-    return loadLocalTableFields(normalizedFormId);
+    return tenantActive() ? fallbackTableFields(normalizedFormId) : loadLocalTableFields(normalizedFormId);
   }
 
   try {
@@ -91,6 +92,9 @@ export async function saveTableFields(fields: TableFieldDefinition[], formId = D
   const normalizedFormId = normalizeFormId(formId);
   const normalized = normalizeStoredTableFields(fields, normalizedFormId);
   if (!hasTenantDbAccess()) {
+    if (tenantActive()) {
+      throw new Error("Tenant-scoped table field storage is unavailable.");
+    }
     saveLocalTableFields(normalized, normalizedFormId);
     return normalized;
   }

@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useId, useRef, useState } from "react";
 import { ChevronDown, Pencil } from "lucide-react";
 
@@ -11,11 +12,19 @@ type Props = {
   authEmail: string;
   isAdmin: boolean;
   returnView: "users" | "admins";
+  billingHref: string;
 };
 
 type ModalMode = "grant" | "delete" | null;
 
-export function VizAccountRowMenu({ userId, displayLabel, authEmail, isAdmin, returnView }: Props) {
+export function VizAccountRowMenu({
+  userId,
+  displayLabel,
+  authEmail,
+  isAdmin,
+  returnView,
+  billingHref,
+}: Props) {
   const menuId = useId();
   const [menuOpen, setMenuOpen] = useState(false);
   const [modal, setModal] = useState<ModalMode>(null);
@@ -44,7 +53,10 @@ export function VizAccountRowMenu({ userId, displayLabel, authEmail, isAdmin, re
       >
         <Pencil className="h-3.5 w-3.5 text-slate-500" aria-hidden />
         <span>编辑</span>
-        <ChevronDown className={`h-3.5 w-3.5 text-slate-500 transition ${menuOpen ? "rotate-180" : ""}`} aria-hidden />
+        <ChevronDown
+          className={`h-3.5 w-3.5 text-slate-500 transition ${menuOpen ? "rotate-180" : ""}`}
+          aria-hidden
+        />
       </button>
 
       {menuOpen ? (
@@ -53,6 +65,14 @@ export function VizAccountRowMenu({ userId, displayLabel, authEmail, isAdmin, re
           aria-labelledby={menuId}
           className="absolute right-0 z-[60] mt-1 min-w-[11rem] overflow-hidden rounded-xl border border-slate-200 bg-white py-1 shadow-lg"
         >
+          <Link
+            href={billingHref}
+            role="menuitem"
+            className="block w-full px-3 py-2 text-left text-xs text-blue-700 hover:bg-blue-50"
+            onClick={() => setMenuOpen(false)}
+          >
+            计费管理
+          </Link>
           {!isAdmin ? (
             <button
               type="button"
@@ -96,12 +116,12 @@ export function VizAccountRowMenu({ userId, displayLabel, authEmail, isAdmin, re
               {modal === "grant" ? (
                 <>
                   将为 <strong className="text-slate-900">{displayLabel}</strong> 写入{" "}
-                  <code className="rounded bg-slate-100 px-1 text-xs">admin_users</code>，不删除登录账号。
+                  <code className="rounded bg-slate-100 px-1 text-xs">admin_users</code>，不会删除该用户登录账号。
                 </>
               ) : (
                 <>
                   将把 <strong className="text-slate-900">{displayLabel}</strong>{" "}
-                  移入回收站：立即停用登录与移除管理员记录，用量日志暂存最多 30 天，之后自动清除；也可在回收站提前永久删除。
+                  移入回收站：立即停用登录与移除管理员记录，用量日志暂存最多 30 天，之后自动清理；也可以在回收站提前永久删除。
                 </>
               )}
             </p>

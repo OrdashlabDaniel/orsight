@@ -2,6 +2,7 @@
 
 import { redirect } from "next/navigation";
 
+import { isFallbackAdminEmail } from "@/lib/admin-access";
 import {
   POD_USERNAME_METADATA_KEY,
   usernameToPodLoginEmailLegacySync,
@@ -27,7 +28,7 @@ function isNextRedirectError(err: unknown): boolean {
 
 function formatSupabaseNetworkError(phase: string, err: unknown): string {
   const tip =
-    "这通常表示本机运行 Next 的 Node 进程**连不上** Supabase（网络/DNS/代理/IPv6/杀软拦截 HTTPS），不是「注册按钮」本身的逻辑错误。";
+    "这通常表示本机运行 Next 的 Node 进程连不上 Supabase（网络 / DNS / 代理 / IPv6 / 杀软拦截 HTTPS），不是登录按钮本身的逻辑错误。";
   if (err instanceof Error) {
     const cause =
       err.cause instanceof Error
@@ -35,7 +36,7 @@ function formatSupabaseNetworkError(phase: string, err: unknown): string {
         : err.cause != null
           ? String(err.cause)
           : "";
-    return `ERR:${phase}时 ${tip} 原始：${err.message}${cause ? `（${cause}）` : ""}。可试：换网络/关代理；在项目目录执行 npm run dev:ipv4（优先 IPv4）；暂时关闭拦截 HTTPS 的杀毒；确认 .env.local 里 URL/密钥无多余空格或换行。`;
+    return `ERR:${phase}时 ${tip} 原始：${err.message}${cause ? `（${cause}）` : ""}。可试：换网络、关代理；在项目目录执行 npm run dev:ipv4（优先 IPv4）；暂时关闭拦截 HTTPS 的杀毒；确认 .env.local 里的 URL/密钥无多余空格或换行。`;
   }
   return `ERR:${phase}时 ${tip} 原始：${String(err)}。`;
 }
@@ -46,15 +47,8 @@ function resolveLoginEmailCandidates(identifier: string): { ok: true; emails: st
     return { ok: false };
   }
 
-  // Support both true email accounts and legacy "email-looking username" hash aliases.
   if (value.includes("@")) {
-    try {
-      const modern = usernameToPodLoginEmailSync(value);
-      const legacy = usernameToPodLoginEmailLegacySync(value);
-      return { ok: true, emails: Array.from(new Set([value.toLowerCase(), modern, legacy])) };
-    } catch {
-      return { ok: true, emails: [value.toLowerCase()] };
-    }
+    return { ok: true, emails: [value.toLowerCase()] };
   }
 
   try {
@@ -84,7 +78,6 @@ export async function adminAuth(
 function resolveSafeNextPath(formData: FormData): string {
   const raw = String(formData.get("next") ?? "").trim();
   if (!raw) return "/viz";
-  // Prevent external redirects; only allow in-app absolute paths.
   if (!raw.startsWith("/") || raw.startsWith("//")) return "/viz";
   return raw;
 }
@@ -105,7 +98,7 @@ async function adminSignIn(formData: FormData): Promise<string | null> {
 
   try {
     const supabase = await createClient();
-    let signInData: { user: { id?: string } | null } | null = null;
+    let signInData: { user: { id?: string; email?: string | null } | null } | null = null;
     let lastErrMsg = "";
     let sawSchemaErr = false;
 
@@ -115,7 +108,7 @@ async function adminSignIn(formData: FormData): Promise<string | null> {
         password,
       });
       if (!error) {
-        signInData = data as { user: { id?: string } | null };
+        signInData = data as { user: { id?: string; email?: string | null } | null };
         break;
       }
       lastErrMsg = error.message;
@@ -125,18 +118,20 @@ async function adminSignIn(formData: FormData): Promise<string | null> {
       const em = error.message.toLowerCase();
       const isCredentialErr = em.includes("invalid login") || em.includes("invalid email or password");
       if (!isCredentialErr) {
-        // Non-credential errors generally won't be fixed by trying other aliases.
         break;
       }
     }
 
     if (!signInData) {
       if (sawSchemaErr) {
-        return "ERR:登录遇到 Supabase Auth 的 schema 查询异常。已自动尝试兼容登录名映射但仍失败；请先确认 Supabase 控制台中 Auth Hooks/自定义 JWT Hook 未引用不存在的 schema/table，或稍后重试。";
+        return "ERR:登录遇到 Supabase Auth 的 schema 查询异常。系统已自动尝试兼容登录名映射但仍失败；请先检查 Supabase 控制台中的 Auth Hooks / 自定义 JWT Hook 是否引用了不存在的 schema 或表。";
       }
       const em = lastErrMsg.toLowerCase();
       if (em.includes("invalid login") || em.includes("invalid email or password")) {
-        return "ERR:登录名或密码不正确。请确认：① 登录名与注册时完全一致（区分大小写、前后无空格）；② 密码与注册时相同；③ 注册与后台使用同一 Supabase 项目（.env.local 与 /api/health/supabase 里的域名一致）。";
+        if (identifier.includes("@") && isFallbackAdminEmail(identifier)) {
+          return "ERR:这个管理员邮箱当前是 Google 登录账号，请点上方“使用 Google 登录”，不要走密码登录。";
+        }
+        return "ERR:登录名或密码不正确。请确认登录名与注册时完全一致，并且密码正确。";
       }
       return errMsg("登录", lastErrMsg || "未知错误");
     }
@@ -166,9 +161,13 @@ async function adminSignIn(formData: FormData): Promise<string | null> {
       return errMsg("登录·校验 admin_users", adminErr.message);
     }
 
+    if (isFallbackAdminEmail(user.email)) {
+      redirect(nextPath);
+    }
+
     if (!adminRow) {
       await supabase.auth.signOut();
-      return "ERR:账号与密码正确，但你还不在管理员表 public.admin_users 中，因此无法进入后台。若注册时提示「已有管理员」，需要让现管理员在 Supabase SQL Editor 执行：insert into public.admin_users (id, email) values ('你的用户UUID','你的登录名'); 用户 UUID 可在 Authentication → Users 中查看。";
+      return "ERR:账号与密码正确，但你的账号当前不在后台管理员名单中，因此无法进入后台。若这是正式权限问题，请把你的用户 ID 写入 public.admin_users。";
     }
 
     redirect(nextPath);
@@ -248,13 +247,13 @@ async function adminRegister(formData: FormData): Promise<string | null> {
       });
 
       if (signInError) {
-        return `${errMsg("注册·自动登录", signInError.message)} 请改用「登录」进入。`;
+        return `${errMsg("注册·自动登录", signInError.message)} 请改用“登录”进入。`;
       }
 
       redirect(nextPath);
     }
 
-    return "OK:注册成功。当前已有管理员，你的账号暂无后台权限；请让管理员在表 public.admin_users 中添加你的用户 ID 后再登录。";
+    return "OK:注册成功。当前已存在管理员，你的账号暂时没有后台权限；请让管理员把你的用户 ID 加入 public.admin_users 后再登录。";
   } catch (err) {
     if (isNextRedirectError(err)) {
       throw err;

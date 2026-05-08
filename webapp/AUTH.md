@@ -50,6 +50,7 @@ NEXT_PUBLIC_DEV_MOCK_LOGIN=true
    - **Site URL**：生产填正式域名，例如 `https://www.orsight.com`
    - **Redirect URLs** 至少加入：
      - `http://localhost:3000/**`
+     - `http://localhost:3002/**`
      - `https://www.orsight.com/auth/callback`
      - `https://orsight.com/auth/callback`
      - `https://*-.vercel.app/**`（用于 Vercel 支线 / 预览域名）

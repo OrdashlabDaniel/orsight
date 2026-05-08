@@ -1,42 +1,92 @@
-export const TOKEN_PRICING: Record<
-  string,
-  { prompt: number; completion: number }
-> = {
-  "gpt-4o-mini": { prompt: 0.00015 / 1000, completion: 0.0006 / 1000 },
-  "gpt-4o": { prompt: 0.005 / 1000, completion: 0.015 / 1000 },
-  "gpt-5-mini": { prompt: 0.00015 / 1000, completion: 0.0006 / 1000 },
-  "gpt-5": { prompt: 0.005 / 1000, completion: 0.015 / 1000 },
-};
+import { getOpenAIModelTokenPrice } from "@/lib/openai-pricing-basis";
 
 export type UsageLogLike = {
   id?: string;
   action_type?: string | null;
   user_id: string;
+  form_id?: string | null;
   image_count?: number | null;
+  request_count?: number | null;
   total_tokens?: number | null;
   prompt_tokens?: number | null;
+  cached_input_tokens?: number | null;
   completion_tokens?: number | null;
   model_used?: string | null;
+  openai_project_id?: string | null;
+  openai_api_key_id?: string | null;
+  service_tier?: string | null;
+  pricing_tier?: string | null;
+  openai_endpoint?: string | null;
+  pricing_basis_version?: string | null;
+  estimated_cost_usd?: number | null;
+  conservative_cost_usd?: number | null;
   created_at?: string | null;
 };
 
+function normalizeMoney(value: number | null | undefined) {
+  const normalized = Number(value ?? 0);
+  return Number.isFinite(normalized) && normalized > 0 ? normalized : 0;
+}
+
 export function estimateLogCostUsd(
-  log: Pick<UsageLogLike, "model_used" | "prompt_tokens" | "completion_tokens">,
+  log: Pick<UsageLogLike, "model_used" | "prompt_tokens" | "cached_input_tokens" | "completion_tokens">,
 ): number {
-  const model = (log.model_used || "gpt-4o-mini") as keyof typeof TOKEN_PRICING;
-  const rates = TOKEN_PRICING[model] || TOKEN_PRICING["gpt-4o-mini"];
-  return (log.prompt_tokens || 0) * rates.prompt + (log.completion_tokens || 0) * rates.completion;
+  const rates =
+    getOpenAIModelTokenPrice(log.model_used || "gpt-4o-mini", "standard") ||
+    getOpenAIModelTokenPrice("gpt-4o-mini", "standard");
+  if (!rates) {
+    return 0;
+  }
+
+  const promptTokens = Math.max(0, Number(log.prompt_tokens || 0));
+  const cachedInputTokens = Math.min(promptTokens, Math.max(0, Number(log.cached_input_tokens || 0)));
+  const nonCachedPromptTokens = Math.max(0, promptTokens - cachedInputTokens);
+  const completionTokens = Math.max(0, Number(log.completion_tokens || 0));
+
+  const promptCost = (nonCachedPromptTokens / 1_000_000) * rates.inputPerMillionUsd;
+  const cachedPromptCost =
+    rates.cachedInputPerMillionUsd == null
+      ? 0
+      : (cachedInputTokens / 1_000_000) * rates.cachedInputPerMillionUsd;
+  const completionCost = (completionTokens / 1_000_000) * rates.outputPerMillionUsd;
+
+  return promptCost + cachedPromptCost + completionCost;
+}
+
+export function estimatedLogCostUsd(
+  log: Pick<
+    UsageLogLike,
+    "estimated_cost_usd" | "model_used" | "prompt_tokens" | "cached_input_tokens" | "completion_tokens"
+  >,
+) {
+  return Math.max(normalizeMoney(log.estimated_cost_usd), estimateLogCostUsd(log));
+}
+
+export function conservativeLogCostUsd(
+  log: Pick<
+    UsageLogLike,
+    | "conservative_cost_usd"
+    | "estimated_cost_usd"
+    | "model_used"
+    | "prompt_tokens"
+    | "cached_input_tokens"
+    | "completion_tokens"
+  >,
+) {
+  return Math.max(normalizeMoney(log.conservative_cost_usd), estimatedLogCostUsd(log));
 }
 
 export function aggregateUsageLogs(logs: UsageLogLike[]) {
   let totalImages = 0;
   let totalTokens = 0;
-  let totalCost = 0;
+  let totalEstimatedCost = 0;
+  let totalConservativeCost = 0;
 
   for (const log of logs) {
     totalImages += log.image_count || 0;
     totalTokens += log.total_tokens || 0;
-    totalCost += estimateLogCostUsd(log);
+    totalEstimatedCost += estimatedLogCostUsd(log);
+    totalConservativeCost += conservativeLogCostUsd(log);
   }
 
   const uniqueActiveUsers = new Set(logs.map((l) => l.user_id)).size;
@@ -44,7 +94,9 @@ export function aggregateUsageLogs(logs: UsageLogLike[]) {
   return {
     totalImages,
     totalTokens,
-    totalCost,
+    totalEstimatedCost,
+    totalConservativeCost,
+    totalCost: totalConservativeCost,
     uniqueActiveUsers,
     recordCount: logs.length,
   };

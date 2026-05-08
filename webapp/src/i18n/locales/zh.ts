@@ -1,4 +1,8 @@
 export const zh = {
+  deployment: {
+    bannerTitle: "当前为测试环境部署（staging）。",
+    bannerHint: "请勿与正式环境混用账号与数据；测试部署应使用独立的 Supabase 项目，见 webapp/DEPLOY_STAGING.md。",
+  },
   nav: {
     account: "账户",
     signOut: "退出",
@@ -7,6 +11,7 @@ export const zh = {
     zh: "中文",
     en: "English",
     backToPool: "← 首页",
+    plans: "套餐",
   },
   formsPool: {
     title: "首页",
@@ -484,7 +489,17 @@ export const zh = {
     training: "训练",
     title: "工作台",
     subtitle: "上传截图、PDF 或表格与文档，识别结果在右侧表格中编辑与导出。",
-    statsLine: "{primary} · 复审 {review} · 样本 {samples} · 训练图 {images}",
+    statsLine: "{primary} · 复审 {review} · 最高 {max} · 样本 {samples} · 训练图 {images}",
+    modelSelectorLabel: "识别模型",
+    modelFastName: "快速",
+    modelFastHint: "适合简单截图和快速检查。",
+    modelAccurateName: "精准",
+    modelAccurateHint: "适合大表格和待复核条目。",
+    modelMaxName: "最高",
+    modelMaxHint: "大表格优先使用，准确率最高。",
+    modelPaidOnly: "仅 Normal",
+    modelLargeTableTip: "20 行以上大表格建议用精准或最高。",
+    errPremiumModelRequiresNormal: "gpt-5.5 最高识别模型仅对已生效的 Normal 订阅用户开放。",
     fmTitle: "表格项目管理",
     fmIntro:
       "你可以新增、重命名、删除或恢复表格项目。这里的改动会同步到训练页和标注项目；删除命中当前表格数据时会先提示。",
@@ -517,8 +532,8 @@ export const zh = {
     pasteHint: "支持多选；可 Ctrl+V 粘贴截图。",
     extract: "开始识别",
     extracting: "识别中…",
-    extractHighQuality: "高阶模型重识别",
-    extractingHighQuality: "高阶重识别中…",
+    extractHighQuality: "最佳模型重识别",
+    extractingHighQuality: "最佳模型重识别中…",
     pasteScreenshot: "粘贴截图",
     addFiles: "添加文件",
     clear: "清空",

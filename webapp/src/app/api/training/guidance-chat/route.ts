@@ -1,9 +1,14 @@
 import { NextResponse } from "next/server";
 
+import { estimateBillingTokensForAction, recordBillingUsage, requireBillingEntitlement } from "@/lib/billing";
 import { withAuthedStorageTenant } from "@/lib/storage-tenant";
 import { getFormIdFromRequest } from "@/lib/form-request";
 import { getActiveTableFields } from "@/lib/table-fields";
 import { loadTableFields } from "@/lib/table-fields-store";
+import {
+  buildTrackedOpenAIHeaders,
+  extractTrackedOpenAIUsage,
+} from "@/lib/openai-accounting";
 import {
   buildRecognitionFieldGuidancePromptSection,
   extractRecognitionFieldGuidanceFromWorkingRules,
@@ -162,6 +167,16 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "没有有效的对话内容。" }, { status: 400 });
     }
 
+    if (user?.id) {
+      const entitlement = await requireBillingEntitlement(
+        user.id,
+        estimateBillingTokensForAction("guidance_chat"),
+      );
+      if (!entitlement.ok) {
+        return entitlement.response!;
+      }
+    }
+
     const rules = seedWorkingRulesFromLegacy(mergeLegacyIntoAgentThreadIfEmpty(await loadGlobalRules(formId)));
     const activeTableFields = getActiveTableFields(await loadTableFields(formId));
     const serverWorking = (rules.workingRules || "").trim().slice(0, 12000);
@@ -289,12 +304,15 @@ ${fallbackContext}`;
       openaiMessages.push({ role: "user", content: visualContent });
     }
 
+    const tracking = buildTrackedOpenAIHeaders({
+      apiKey: OPENAI_API_KEY,
+      formId,
+      endpoint: "/v1/chat/completions",
+    });
+
     const response = await fetch(`${OPENAI_BASE_URL}/chat/completions`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-      },
+      headers: tracking.headers,
       body: JSON.stringify({
         model: GUIDANCE_MODEL,
         response_format: { type: "json_object" },
@@ -312,11 +330,17 @@ ${fallbackContext}`;
 
     const payload = (await response.json()) as {
       choices?: Array<{ message?: { content?: string } }>;
+      usage?: {
+        prompt_tokens?: number;
+        completion_tokens?: number;
+        total_tokens?: number;
+      };
     };
     const content = payload.choices?.[0]?.message?.content;
     if (!content) {
       return NextResponse.json({ error: "模型未返回内容。" }, { status: 502 });
     }
+    const trackedUsage = extractTrackedOpenAIUsage(payload, response, tracking);
 
     let parsed: {
       assistantReply?: string;
@@ -368,6 +392,28 @@ ${fallbackContext}`;
     revisedWorkingRules = upsertRecognitionValidationConfigBlock(revisedWorkingRules, revisedValidationConfig);
     revisedWorkingRules = upsertRecognitionRuleCodeBlock(revisedWorkingRules, revisedRuleCode);
     revisedWorkingRules = upsertRecognitionFieldGuidanceBlock(revisedWorkingRules, currentFieldGuidance).slice(0, 50000);
+    if (user?.id) {
+      await recordBillingUsage({
+        userId: user.id,
+        actionType: "guidance_chat",
+        formId,
+        quantity: 1,
+        requestCount: trackedUsage.request_count,
+        promptTokens: trackedUsage.prompt_tokens,
+        cachedInputTokens: trackedUsage.cached_input_tokens,
+        completionTokens: trackedUsage.completion_tokens,
+        totalTokens: trackedUsage.total_tokens,
+        modelUsed: GUIDANCE_MODEL,
+        openAIProjectId: trackedUsage.openai_project_id,
+        openAIApiKeyId: trackedUsage.openai_api_key_id,
+        openAIRequestIds: trackedUsage.openai_request_ids,
+        clientRequestIds: trackedUsage.client_request_ids,
+        serviceTier: trackedUsage.service_tier,
+        pricingTier: trackedUsage.pricing_tier,
+        openAIEndpoint: trackedUsage.openai_endpoint,
+      });
+    }
+
     return NextResponse.json({ assistantReply, revisedWorkingRules, revisedRuleCode });
     } catch (error) {
       return NextResponse.json(

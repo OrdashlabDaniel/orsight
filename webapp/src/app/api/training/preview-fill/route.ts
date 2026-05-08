@@ -1,8 +1,15 @@
 import { NextResponse } from "next/server";
 import sharp from "sharp";
 
+import { estimateBillingTokensForAction, recordBillingUsage, requireBillingEntitlement } from "@/lib/billing";
 import { withAuthedStorageTenant } from "@/lib/storage-tenant";
 import { getFormIdFromRequest } from "@/lib/form-request";
+import {
+  buildTrackedOpenAIHeaders,
+  extractTrackedOpenAIUsage,
+  mergeTrackedOpenAIUsage,
+  type TrackedOpenAIUsage,
+} from "@/lib/openai-accounting";
 import {
   buildEditableRecognitionRulesSection,
   buildRecognitionRuleCodePromptSection,
@@ -571,18 +578,19 @@ function appendPreviewNote(base: string, extra: string) {
 }
 
 async function recoverExceptionsPreviewValue(
+  formId: string,
   imageDataUrl: string,
   imageBuffer: Buffer,
   boxes: Array<{ field: TrainingField; x: number; y: number; width: number; height: number }>,
-): Promise<number | null> {
+): Promise<{ value: number | null; usage?: TrackedOpenAIUsage }> {
   try {
     if (!OPENAI_API_KEY) {
-      return null;
+      return { value: null };
     }
 
     const unionBox = buildUnionBox(boxes);
     if (!unionBox) {
-      return null;
+      return { value: null };
     }
 
     const contextUrl = await cropBoxToPngDataUrl(
@@ -591,12 +599,15 @@ async function recoverExceptionsPreviewValue(
       getPreviewCropContextOptions("exceptions", DEFAULT_FIELD_TYPES, "focused"),
     );
 
+    const tracking = buildTrackedOpenAIHeaders({
+      apiKey: OPENAI_API_KEY,
+      formId,
+      endpoint: "/v1/chat/completions",
+    });
+
     const response = await fetch(`${OPENAI_BASE_URL}/chat/completions`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-      },
+      headers: tracking.headers,
       body: JSON.stringify({
         model: PREVIEW_MODEL,
         reasoning_effort: OPENAI_REASONING_EFFORT,
@@ -624,21 +635,27 @@ async function recoverExceptionsPreviewValue(
     });
 
     if (!response.ok) {
-      return null;
+      return { value: null };
     }
 
     const payload = (await response.json()) as {
       choices?: Array<{ message?: { content?: string } }>;
+      usage?: {
+        prompt_tokens?: number;
+        completion_tokens?: number;
+        total_tokens?: number;
+      };
     };
+    const trackedUsage = extractTrackedOpenAIUsage(payload, response, tracking);
     const content = payload.choices?.[0]?.message?.content;
     if (!content) {
-      return null;
+      return { value: null, usage: trackedUsage };
     }
 
     const parsed = JSON.parse(content) as { exceptions?: unknown };
-    return normalizeNumber(parsed.exceptions);
+    return { value: normalizeNumber(parsed.exceptions), usage: trackedUsage };
   } catch {
-    return null;
+    return { value: null };
   }
 }
 
@@ -861,6 +878,7 @@ export async function POST(request: Request) {
         return NextResponse.json({ error: "请先登录后再试。" }, { status: 401 });
       }
       const formId = getFormIdFromRequest(request);
+      let trackedUsage: TrackedOpenAIUsage = {};
     if (!OPENAI_API_KEY) {
       return NextResponse.json({ error: "服务端缺少 OPENAI_API_KEY。" }, { status: 503 });
     }
@@ -869,6 +887,16 @@ export async function POST(request: Request) {
     const imageDataUrl = typeof body.imageDataUrl === "string" ? body.imageDataUrl.trim() : "";
     if (!imageDataUrl.startsWith("data:") || imageDataUrl.length > 14 * 1024 * 1024) {
       return NextResponse.json({ error: "请先上传或粘贴图片。" }, { status: 400 });
+    }
+
+    if (user?.id) {
+      const entitlement = await requireBillingEntitlement(
+        user.id,
+        estimateBillingTokensForAction("preview_fill"),
+      );
+      if (!entitlement.ok) {
+        return entitlement.response!;
+      }
     }
 
     const requestedFields = Array.isArray(body.tableFields)
@@ -939,12 +967,15 @@ export async function POST(request: Request) {
         .filter(Boolean)
         .join("?");
 
+      const detectTracking = buildTrackedOpenAIHeaders({
+        apiKey: OPENAI_API_KEY,
+        formId,
+        endpoint: "/v1/chat/completions",
+      });
+
       const detectResponse = await fetch(`${OPENAI_BASE_URL}/chat/completions`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${OPENAI_API_KEY}`,
-        },
+        headers: detectTracking.headers,
         body: JSON.stringify({
           model: PREVIEW_MODEL,
           reasoning_effort: OPENAI_REASONING_EFFORT,
@@ -972,7 +1003,16 @@ export async function POST(request: Request) {
       if (detectResponse.ok) {
         const detectPayload = (await detectResponse.json()) as {
           choices?: Array<{ message?: { content?: string } }>;
+          usage?: {
+            prompt_tokens?: number;
+            completion_tokens?: number;
+            total_tokens?: number;
+          };
         };
+        trackedUsage = mergeTrackedOpenAIUsage(
+          trackedUsage,
+          extractTrackedOpenAIUsage(detectPayload, detectResponse, detectTracking),
+        );
         const detectContent = detectPayload.choices?.[0]?.message?.content;
         if (detectContent) {
           try {
@@ -1021,12 +1061,15 @@ export async function POST(request: Request) {
       userContent.push({ type: "image_url", image_url: { url } });
     }
 
+    const previewTracking = buildTrackedOpenAIHeaders({
+      apiKey: OPENAI_API_KEY,
+      formId,
+      endpoint: "/v1/chat/completions",
+    });
+
     const response = await fetch(`${OPENAI_BASE_URL}/chat/completions`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-      },
+      headers: previewTracking.headers,
       body: JSON.stringify({
         model: PREVIEW_MODEL,
         reasoning_effort: OPENAI_REASONING_EFFORT,
@@ -1045,7 +1088,16 @@ export async function POST(request: Request) {
 
     const payload = (await response.json()) as {
       choices?: Array<{ message?: { content?: string } }>;
+      usage?: {
+        prompt_tokens?: number;
+        completion_tokens?: number;
+        total_tokens?: number;
+      };
     };
+    trackedUsage = mergeTrackedOpenAIUsage(
+      trackedUsage,
+      extractTrackedOpenAIUsage(payload, response, previewTracking),
+    );
     const content = payload.choices?.[0]?.message?.content;
     if (!content) {
       return NextResponse.json({ error: "AI 试填没有返回内容。" }, { status: 502 });
@@ -1093,6 +1145,28 @@ export async function POST(request: Request) {
         recognitionRuleCode,
       );
 
+      if (user?.id) {
+        await recordBillingUsage({
+          userId: user.id,
+          actionType: "preview_fill",
+          formId,
+          quantity: 1,
+          requestCount: trackedUsage.request_count,
+          promptTokens: trackedUsage.prompt_tokens,
+          cachedInputTokens: trackedUsage.cached_input_tokens,
+          completionTokens: trackedUsage.completion_tokens,
+          totalTokens: trackedUsage.total_tokens,
+          modelUsed: PREVIEW_MODEL,
+          openAIProjectId: trackedUsage.openai_project_id,
+          openAIApiKeyId: trackedUsage.openai_api_key_id,
+          openAIRequestIds: trackedUsage.openai_request_ids,
+          clientRequestIds: trackedUsage.client_request_ids,
+          serviceTier: trackedUsage.service_tier,
+          pricingTier: trackedUsage.pricing_tier,
+          openAIEndpoint: trackedUsage.openai_endpoint,
+        });
+      }
+
       return NextResponse.json({
         detectedMode: resolvedAnnotationMode,
         detectedModeReason: detectionReason || undefined,
@@ -1129,12 +1203,14 @@ export async function POST(request: Request) {
 
     if (boxedFields.has("exceptions") && out.exceptions === "") {
       const recoveredExceptions = await recoverExceptionsPreviewValue(
+        formId,
         imageDataUrl,
         imageBuffer,
         boxes.filter((box) => box.field === "exceptions"),
       );
-      if (recoveredExceptions !== null) {
-        out.exceptions = recoveredExceptions;
+      trackedUsage = mergeTrackedOpenAIUsage(trackedUsage, recoveredExceptions.usage);
+      if (recoveredExceptions.value !== null) {
+        out.exceptions = recoveredExceptions.value;
         previewNote = appendPreviewNote(previewNote, "错扫数量已按字段标签定向补读。");
       }
     }
@@ -1157,6 +1233,28 @@ export async function POST(request: Request) {
     }
 
       const finalRecord = applyDerivedRuleCodeToPreviewRecord(out, activeTableFields, recognitionRuleCode);
+
+      if (user?.id) {
+        await recordBillingUsage({
+          userId: user.id,
+          actionType: "preview_fill",
+          formId,
+          quantity: 1,
+          requestCount: trackedUsage.request_count,
+          promptTokens: trackedUsage.prompt_tokens,
+          cachedInputTokens: trackedUsage.cached_input_tokens,
+          completionTokens: trackedUsage.completion_tokens,
+          totalTokens: trackedUsage.total_tokens,
+          modelUsed: PREVIEW_MODEL,
+          openAIProjectId: trackedUsage.openai_project_id,
+          openAIApiKeyId: trackedUsage.openai_api_key_id,
+          openAIRequestIds: trackedUsage.openai_request_ids,
+          clientRequestIds: trackedUsage.client_request_ids,
+          serviceTier: trackedUsage.service_tier,
+          pricingTier: trackedUsage.pricing_tier,
+          openAIEndpoint: trackedUsage.openai_endpoint,
+        });
+      }
 
       return NextResponse.json({
         detectedMode: resolvedAnnotationMode,

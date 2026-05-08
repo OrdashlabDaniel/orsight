@@ -1,4 +1,9 @@
 export const en = {
+  deployment: {
+    bannerTitle: "You are on a staging deployment.",
+    bannerHint:
+      "Do not mix accounts or data with production. Staging should use a separate Supabase project—see webapp/DEPLOY_STAGING.md.",
+  },
   nav: {
     account: "Account",
     signOut: "Sign out",
@@ -7,6 +12,7 @@ export const en = {
     zh: "中文",
     en: "English",
     backToPool: "← Home",
+    plans: "Plans",
   },
   formsPool: {
     title: "Home",
@@ -493,7 +499,17 @@ export const en = {
     training: "Training",
     title: "Workspace",
     subtitle: "Upload screenshots, PDFs, or documents; edit and export results in the table.",
-    statsLine: "{primary} · Review {review} · Samples {samples} · Train images {images}",
+    statsLine: "{primary} · Review {review} · Max {max} · Samples {samples} · Train images {images}",
+    modelSelectorLabel: "Recognition model",
+    modelFastName: "Fast",
+    modelFastHint: "Good for simple screenshots and quick checks.",
+    modelAccurateName: "Accurate",
+    modelAccurateHint: "Better for dense tables and review rows.",
+    modelMaxName: "Max",
+    modelMaxHint: "Highest accuracy for large tables.",
+    modelPaidOnly: "Normal only",
+    modelLargeTableTip: "Use Accurate or Max for 20+ row tables.",
+    errPremiumModelRequiresNormal: "The gpt-5.5 model is available to active Normal subscribers only.",
     fmTitle: "Table fields",
     fmIntro: "Add, rename, remove, or restore columns. Changes sync to training; deletes warn if data exists.",
     close: "Close",
@@ -525,7 +541,7 @@ export const en = {
     pasteHint: "Multi-select; Ctrl+V to paste screenshots.",
     extract: "Run extraction",
     extracting: "Extracting…",
-    extractHighQuality: "Re-run with stronger model",
+    extractHighQuality: "Re-run with best model",
     extractingHighQuality: "Re-running all…",
     pasteScreenshot: "Paste image",
     addFiles: "Add files",

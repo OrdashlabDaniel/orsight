@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
+import { useLocale } from "@/i18n/LocaleProvider";
 import {
   DEFAULT_FORM_ID,
   buildFormFillHref,
@@ -22,23 +23,30 @@ type FormMutationResponse = {
   error?: string;
 };
 
-function statusLabel(form: FormDefinition) {
-  return form.ready ? "已完成" : "新建中";
+type Translator = (key: string, params?: Record<string, string | number>) => string;
+
+function statusLabel(form: FormDefinition, t: Translator) {
+  return form.ready ? t("formsPool.statusDone") : t("formsPool.statusDraft");
 }
 
-function remainingRecycleText(deletedAt?: number | null) {
+function remainingRecycleText(deletedAt: number | null | undefined, t: Translator) {
   if (!deletedAt) {
-    return "回收站保留 30 天";
+    return t("formsPool.recycleKept");
   }
+
   const remainingMs = deletedAt + 30 * 24 * 60 * 60 * 1000 - Date.now();
   if (remainingMs <= 0) {
-    return "即将清空";
+    return t("formsPool.recycleSoon");
   }
-  return `剩余 ${Math.ceil(remainingMs / (24 * 60 * 60 * 1000))} 天`;
+
+  return t("formsPool.recycleDays", {
+    n: Math.ceil(remainingMs / (24 * 60 * 60 * 1000)),
+  });
 }
 
 export default function FormsPoolClient() {
   const router = useRouter();
+  const { t } = useLocale();
   const [forms, setForms] = useState<FormDefinition[]>([]);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingName, setEditingName] = useState("");
@@ -56,15 +64,15 @@ export default function FormsPoolClient() {
       const response = await fetch("/api/forms", { cache: "no-store" });
       const payload = (await response.json()) as FormsResponse;
       if (!response.ok) {
-        throw new Error(payload.error || "首页加载失败。");
+        throw new Error(payload.error || t("formsPool.errLoad"));
       }
       setForms(payload.forms || []);
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "首页加载失败。");
+      setErrorMessage(error instanceof Error ? error.message : t("formsPool.errLoad"));
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     void loadForms();
@@ -78,7 +86,7 @@ export default function FormsPoolClient() {
     });
     const payload = (await response.json()) as FormMutationResponse;
     if (!response.ok) {
-      throw new Error(payload.error || "更新填表失败。");
+      throw new Error(payload.error || t("formsPool.errMutate"));
     }
     return payload.form || null;
   }
@@ -95,11 +103,11 @@ export default function FormsPoolClient() {
       });
       const payload = (await response.json()) as FormMutationResponse;
       if (!response.ok || !payload.form) {
-        throw new Error(payload.error || "新建填表失败。");
+        throw new Error(payload.error || t("formsPool.errCreate"));
       }
       router.push(buildFormSetupHref(payload.form.id));
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "新建填表失败。");
+      setErrorMessage(error instanceof Error ? error.message : t("formsPool.errCreate"));
     } finally {
       setWorkingKey("");
     }
@@ -112,9 +120,13 @@ export default function FormsPoolClient() {
     try {
       const duplicated = await mutateForm(form.id, { action: "duplicate" });
       await loadForms();
-      setNoticeMessage(duplicated ? `已复制为新的独立填表：${duplicated.name}` : "填表已复制。");
+      setNoticeMessage(
+        duplicated
+          ? t("formsPool.cloned", { name: duplicated.name })
+          : t("formsPool.clonedShort"),
+      );
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "复制填表失败。");
+      setErrorMessage(error instanceof Error ? error.message : t("formsPool.errClone"));
     } finally {
       setWorkingKey("");
     }
@@ -127,9 +139,9 @@ export default function FormsPoolClient() {
     try {
       await mutateForm(form.id, { action: "delete" });
       await loadForms();
-      setNoticeMessage(`已移入回收站：${form.name}`);
+      setNoticeMessage(t("formsPool.trashed", { name: form.name }));
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "删除填表失败。");
+      setErrorMessage(error instanceof Error ? error.message : t("formsPool.errDelete"));
     } finally {
       setWorkingKey("");
     }
@@ -142,9 +154,9 @@ export default function FormsPoolClient() {
     try {
       await mutateForm(form.id, { action: "restore" });
       await loadForms();
-      setNoticeMessage(`已恢复填表：${form.name}`);
+      setNoticeMessage(t("formsPool.restored", { name: form.name }));
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "恢复填表失败。");
+      setErrorMessage(error instanceof Error ? error.message : t("formsPool.errRestore"));
     } finally {
       setWorkingKey("");
     }
@@ -157,9 +169,9 @@ export default function FormsPoolClient() {
     try {
       await mutateForm(form.id, { action: "permanent-delete" });
       await loadForms();
-      setNoticeMessage(`已永久删除：${form.name}`);
+      setNoticeMessage(t("formsPool.purged", { name: form.name }));
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "永久删除失败。");
+      setErrorMessage(error instanceof Error ? error.message : t("formsPool.errPurge"));
     } finally {
       setWorkingKey("");
     }
@@ -168,7 +180,7 @@ export default function FormsPoolClient() {
   async function handleRename(formId: string) {
     const nextName = editingName.trim();
     if (!nextName) {
-      setErrorMessage("请先输入新的填表名称。");
+      setErrorMessage(t("formsPool.errRenameEmpty"));
       return;
     }
 
@@ -180,9 +192,9 @@ export default function FormsPoolClient() {
       await loadForms();
       setEditingId(null);
       setEditingName("");
-      setNoticeMessage(form ? `已重命名为：${form.name}` : "填表名称已更新。");
+      setNoticeMessage(form ? t("formsPool.renamed", { name: form.name }) : t("formsPool.renamedShort"));
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : "重命名失败。");
+      setErrorMessage(error instanceof Error ? error.message : t("formsPool.errRename"));
     } finally {
       setWorkingKey("");
     }
@@ -192,10 +204,8 @@ export default function FormsPoolClient() {
     <main className="flex min-h-0 flex-1 flex-col overflow-y-auto bg-slate-100 px-4 py-6 text-slate-900">
       <div className="mx-auto w-[80%] max-w-full space-y-4">
         <header className="rounded-2xl border border-slate-200 bg-white px-6 py-5 shadow-sm">
-          <h1 className="text-2xl font-semibold">首页</h1>
-          <p className="mt-2 text-sm text-slate-600">
-            在此创建、进入各填表工作区；每个填表拥有独立的填表模式、训练模式、训练池与规则。
-          </p>
+          <h1 className="text-2xl font-semibold">{t("formsPool.title")}</h1>
+          <p className="mt-2 text-sm text-slate-600">{t("formsPool.subtitle")}</p>
           {noticeMessage ? (
             <div className="mt-4 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
               {noticeMessage}
@@ -231,7 +241,7 @@ export default function FormsPoolClient() {
                           disabled={isBusy}
                           className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
                         >
-                          保存
+                          {t("formsPool.save")}
                         </button>
                         <button
                           type="button"
@@ -241,7 +251,7 @@ export default function FormsPoolClient() {
                           }}
                           className="rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-500 hover:bg-slate-50"
                         >
-                          取消
+                          {t("formsPool.cancel")}
                         </button>
                       </div>
                     ) : (
@@ -255,7 +265,7 @@ export default function FormsPoolClient() {
                           }}
                           className="rounded-md border border-slate-300 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50"
                         >
-                          重命名
+                          {t("formsPool.rename")}
                         </button>
                         <button
                           type="button"
@@ -263,7 +273,7 @@ export default function FormsPoolClient() {
                           disabled={isBusy}
                           className="rounded-md border border-slate-300 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50 disabled:opacity-50"
                         >
-                          复制
+                          {t("formsPool.clone")}
                         </button>
                         {!isDefaultForm ? (
                           <button
@@ -272,7 +282,7 @@ export default function FormsPoolClient() {
                             disabled={isBusy}
                             className="rounded-md border border-rose-300 px-2 py-1 text-xs text-rose-700 hover:bg-rose-50 disabled:opacity-50"
                           >
-                            删除
+                            {t("formsPool.delete")}
                           </button>
                         ) : null}
                       </div>
@@ -284,7 +294,7 @@ export default function FormsPoolClient() {
                       form.ready ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"
                     }`}
                   >
-                    {statusLabel(form)}
+                    {statusLabel(form, t)}
                   </span>
                 </div>
 
@@ -294,21 +304,21 @@ export default function FormsPoolClient() {
                       href={buildFormFillHref(form.id)}
                       className="inline-flex rounded-lg border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
                     >
-                      进入填表
+                      {t("formsPool.enterFill")}
                     </Link>
                   ) : (
                     <Link
                       href={buildFormSetupHref(form.id)}
                       className="inline-flex rounded-lg border border-blue-300 px-3 py-2 text-sm font-medium text-blue-700 hover:bg-blue-50"
                     >
-                      继续配置
+                      {t("formsPool.continueSetup")}
                     </Link>
                   )}
                   <Link
                     href={buildFormSetupHref(form.id)}
                     className="inline-flex rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-600 hover:bg-slate-50"
                   >
-                    配置模板与训练
+                    {t("formsPool.configTemplate")}
                   </Link>
                 </div>
               </article>
@@ -316,10 +326,8 @@ export default function FormsPoolClient() {
           })}
 
           <article className="rounded-2xl border border-dashed border-slate-300 bg-white p-5 shadow-sm">
-            <h2 className="text-lg font-semibold text-slate-900">新建填表</h2>
-            <p className="mt-2 text-sm text-slate-600">
-              创建新的独立填表空间。新填表会拥有自己的表格模板、训练池和专属工作规则。
-            </p>
+            <h2 className="text-lg font-semibold text-slate-900">{t("formsPool.newFormTitle")}</h2>
+            <p className="mt-2 text-sm text-slate-600">{t("formsPool.newFormDesc")}</p>
             <div className="mt-5">
               <button
                 type="button"
@@ -327,7 +335,7 @@ export default function FormsPoolClient() {
                 disabled={workingKey === "create" || isLoading}
                 className="inline-flex rounded-lg border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
               >
-                {workingKey === "create" ? "创建中..." : "新建填表"}
+                {workingKey === "create" ? t("formsPool.creating") : t("formsPool.newForm")}
               </button>
             </div>
           </article>
@@ -335,14 +343,14 @@ export default function FormsPoolClient() {
 
         <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <h2 className="text-lg font-semibold text-slate-900">填表回收站</h2>
-            <span className="text-xs text-slate-500">已删除填表保留 30 天，超时自动清空</span>
+            <h2 className="text-lg font-semibold text-slate-900">{t("formsPool.recycleTitle")}</h2>
+            <span className="text-xs text-slate-500">{t("formsPool.recycleHint")}</span>
           </div>
 
           {isLoading ? (
-            <p className="mt-4 text-sm text-slate-500">正在加载…</p>
+            <p className="mt-4 text-sm text-slate-500">{t("formsPool.loading")}</p>
           ) : recycleBin.length === 0 ? (
-            <p className="mt-4 text-sm text-slate-500">回收站为空。</p>
+            <p className="mt-4 text-sm text-slate-500">{t("formsPool.recycleEmpty")}</p>
           ) : (
             <ul className="mt-4 space-y-3">
               {recycleBin.map((form) => (
@@ -352,7 +360,7 @@ export default function FormsPoolClient() {
                 >
                   <div>
                     <div className="text-sm font-semibold text-slate-800">{form.name}</div>
-                    <div className="mt-1 text-xs text-slate-500">{remainingRecycleText(form.deletedAt)}</div>
+                    <div className="mt-1 text-xs text-slate-500">{remainingRecycleText(form.deletedAt, t)}</div>
                   </div>
                   <div className="flex gap-2">
                     <button
@@ -361,7 +369,7 @@ export default function FormsPoolClient() {
                       disabled={workingKey === `restore:${form.id}`}
                       className="rounded-lg border border-slate-300 px-3 py-2 text-xs font-medium text-slate-700 hover:bg-white disabled:opacity-50"
                     >
-                      恢复
+                      {t("formsPool.restore")}
                     </button>
                     <button
                       type="button"
@@ -369,7 +377,7 @@ export default function FormsPoolClient() {
                       disabled={workingKey === `purge:${form.id}`}
                       className="rounded-lg border border-rose-300 px-3 py-2 text-xs font-medium text-rose-700 hover:bg-rose-50 disabled:opacity-50"
                     >
-                      永久删除
+                      {t("formsPool.purge")}
                     </button>
                   </div>
                 </li>

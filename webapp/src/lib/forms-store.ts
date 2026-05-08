@@ -11,14 +11,12 @@ import {
   cloneTableFields,
   createDefaultFormDefinition,
   createFormId,
-  getFormGlobalRulesStorageKey,
   isUnmodifiedTenantGiftStub,
   normalizeFormId,
   normalizeForms,
   STANDARD_FINANCE_STARTER_TABLE_FIELDS,
   type FormDefinition,
 } from "@/lib/forms";
-import { getAuthUserOrSkip } from "@/lib/auth-server";
 import { scopeTrainingExamplesImageName, tenantActive } from "@/lib/storage-tenant";
 import { DEFAULT_TABLE_FIELDS, normalizeTableFields, type TableFieldDefinition } from "@/lib/table-fields";
 import { loadTableFields, saveTableFields } from "@/lib/table-fields-store";
@@ -82,6 +80,8 @@ function formsManifestImageName() {
 
 const FORMS_TABLE = "app_forms";
 
+type PersistedFormTemplateSource = "blank" | "copied";
+
 type FormRow = {
   owner_id: string;
   form_id: string;
@@ -92,9 +92,13 @@ type FormRow = {
   created_at: string;
   updated_at: string;
   deleted_at: string | null;
-  template_source: FormDefinition["templateSource"];
+  template_source: PersistedFormTemplateSource;
   source_form_id: string | null;
 };
+
+function normalizePersistedTemplateSource(source: FormDefinition["templateSource"]): PersistedFormTemplateSource {
+  return source === "copied" ? "copied" : "blank";
+}
 
 function mapFormRow(row: FormRow): FormDefinition {
   return {
@@ -122,12 +126,10 @@ function buildFormRow(ownerId: string, form: FormDefinition): FormRow {
     created_at: new Date(form.createdAt).toISOString(),
     updated_at: new Date(form.updatedAt).toISOString(),
     deleted_at: form.deletedAt ? new Date(form.deletedAt).toISOString() : null,
-    template_source: form.templateSource ?? "blank",
+    template_source: normalizePersistedTemplateSource(form.templateSource),
     source_form_id: form.sourceFormId ?? null,
   };
 }
-
-const SHARED_LEGACY_MANIFEST_CUTOFF_MS = Date.parse("2026-04-17T00:00:00Z");
 
 const IAH_ROUTE_STARTER_FIELDS: TableFieldDefinition[] = [
   { id: "date", type: "text", label: "日期", active: true, builtIn: true },
@@ -209,27 +211,6 @@ function buildBlankStarterRules(tableFields: TableFieldDefinition[]): GlobalRule
     agentThread: [],
     workingRules: "",
     tableFields: cloneTableFields(tableFields),
-  };
-}
-
-function normalizeStarterRulesPayload(raw: unknown): GlobalRules | null {
-  if (!raw || typeof raw !== "object") {
-    return null;
-  }
-  const record = raw as Record<string, unknown>;
-  return {
-    instructions: typeof record.instructions === "string" ? record.instructions : "",
-    documents: Array.isArray(record.documents)
-      ? (JSON.parse(JSON.stringify(record.documents)) as GlobalRules["documents"])
-      : [],
-    guidanceHistory: Array.isArray(record.guidanceHistory)
-      ? (JSON.parse(JSON.stringify(record.guidanceHistory)) as GlobalRules["guidanceHistory"])
-      : [],
-    agentThread: Array.isArray(record.agentThread)
-      ? (JSON.parse(JSON.stringify(record.agentThread)) as GlobalRules["agentThread"])
-      : [],
-    workingRules: typeof record.workingRules === "string" ? record.workingRules : "",
-    tableFields: normalizeStarterFieldSet(record.tableFields),
   };
 }
 
@@ -321,10 +302,11 @@ function shouldAutoSyncStarterRules(form: FormDefinition, currentRules: GlobalRu
 }
 
 async function buildPreferredTenantStarterSeed(): Promise<StarterSeed> {
-  const sharedManifest = await loadRemoteManifestByKey(FORMS_MANIFEST_KEY);
-  const forms =
-    buildTenantStarterFormsFromSharedManifest(sharedManifest) ||
-    normalizeForms(buildTenantStarterForms(), { injectBuiltinDefault: false });
+  const sharedManifest = tenantActive() ? null : await loadRemoteManifestByKey(FORMS_MANIFEST_KEY);
+  const forms = tenantActive()
+    ? normalizeForms(buildTenantStarterForms(), { injectBuiltinDefault: false })
+    : buildTenantStarterFormsFromSharedManifest(sharedManifest) ||
+      normalizeForms(buildTenantStarterForms(), { injectBuiltinDefault: false });
   const financeRules = buildBlankStarterRules(STANDARD_FINANCE_STARTER_TABLE_FIELDS);
 
   return {
@@ -370,15 +352,7 @@ async function shouldRestoreSharedLegacyManifestIntoTenant() {
   if (!tenantActive()) {
     return false;
   }
-  const { user, skipAuth } = await getAuthUserOrSkip();
-  if (skipAuth || !user) {
-    return true;
-  }
-  const createdAt = typeof user.created_at === "string" ? Date.parse(user.created_at) : Number.NaN;
-  if (!Number.isFinite(createdAt)) {
-    return true;
-  }
-  return createdAt < SHARED_LEGACY_MANIFEST_CUTOFF_MS;
+  return process.env.ORSIGHT_ALLOW_SHARED_LEGACY_FORM_IMPORT === "1";
 }
 
 function syncUnmodifiedGiftStarterForms(currentForms: FormDefinition[], starterForms: FormDefinition[]) {
@@ -565,6 +539,9 @@ async function saveLegacyRemoteForms(
 ): Promise<FormDefinition[]> {
   const admin = getSupabaseAdmin();
   if (!admin) {
+    if (tenantActive()) {
+      throw new Error("Tenant-scoped form storage is unavailable.");
+    }
     return saveLocalForms(forms);
   }
   const normalized = normalizeForms(forms, { injectBuiltinDefault: !tenantActive() });
@@ -673,12 +650,38 @@ async function seedStarterTableAndRules(forms: FormDefinition[], rulesByFormId: 
   }
 }
 
+async function migrateTenantLegacyManifestIntoRemoteRows() {
+  if (!tenantActive()) {
+    return null;
+  }
+
+  const currentManifest = await loadRemoteManifestByKey(formsManifestImageName());
+  if (!currentManifest) {
+    return null;
+  }
+
+  const legacyForms = normalizeForms(currentManifest.forms, { injectBuiltinDefault: false });
+  if (legacyForms.length === 0) {
+    return null;
+  }
+
+  // Only import the current tenant's own legacy manifest. Never read the shared legacy manifest here.
+  const persisted = await persistRemoteForms(legacyForms);
+  if (!persisted) {
+    return null;
+  }
+  return await maybeSyncRemoteGiftStarterForms(persisted);
+}
+
 /**
  * 从发布版租户表读取用户自己的填表清单。用户数据按 owner_id + form_id 存储，
  * 代码发布（git push）不会覆盖；仅在该租户尚无任何行时才会写入一份赠送模板。
  */
 async function loadRemoteForms() {
   if (!hasTenantDbAccess()) {
+    if (tenantActive()) {
+      return normalizeForms(buildTenantStarterForms(), { injectBuiltinDefault: false });
+    }
     return loadLocalForms();
   }
 
@@ -692,6 +695,11 @@ async function loadRemoteForms() {
 
   if (!tenantActive()) {
     return normalizeForms([createDefaultFormDefinition()]);
+  }
+
+  const migratedLegacyForms = await migrateTenantLegacyManifestIntoRemoteRows();
+  if (migratedLegacyForms && migratedLegacyForms.length > 0) {
+    return migratedLegacyForms;
   }
 
   const starterSeed = await buildPreferredTenantStarterSeed();
@@ -711,6 +719,9 @@ async function loadRemoteForms() {
 /** 写回时直接写租户表，不再依赖单行 manifest blob；缺失项会被安全删除，不会碰到其他用户数据。 */
 async function saveRemoteForms(forms: FormDefinition[]) {
   if (!hasTenantDbAccess()) {
+    if (tenantActive()) {
+      throw new Error("Tenant-scoped form storage is unavailable.");
+    }
     saveLocalForms(forms);
     return normalizeForms(forms);
   }
@@ -723,11 +734,20 @@ async function saveRemoteForms(forms: FormDefinition[]) {
 }
 
 export async function loadForms() {
-  return hasTenantDbAccess() ? loadRemoteForms() : loadLocalForms();
+  if (!hasTenantDbAccess()) {
+    return tenantActive() ? normalizeForms(buildTenantStarterForms(), { injectBuiltinDefault: false }) : loadLocalForms();
+  }
+  return loadRemoteForms();
 }
 
 export async function saveForms(forms: FormDefinition[]) {
-  return hasTenantDbAccess() ? saveRemoteForms(forms) : saveLocalForms(forms);
+  if (!hasTenantDbAccess()) {
+    if (tenantActive()) {
+      throw new Error("Tenant-scoped form storage is unavailable.");
+    }
+    return saveLocalForms(forms);
+  }
+  return saveRemoteForms(forms);
 }
 
 export async function getFormById(formId: string) {

@@ -111,6 +111,10 @@ export function UserNav() {
     router.refresh();
   }
 
+  function openBillingPlans() {
+    window.dispatchEvent(new CustomEvent("orsight:open-billing-plans", { detail: { reason: "nav" } }));
+  }
+
   return (
     <header className="sticky top-0 z-40 border-b border-[var(--border)] bg-[var(--surface)]/90 backdrop-blur-sm">
       <div className="mx-auto flex w-[80%] max-w-full items-center justify-between gap-4 px-3 py-2 text-sm">
@@ -147,6 +151,13 @@ export function UserNav() {
           >
             {t("nav.account")}
           </Link>
+          <button
+            type="button"
+            onClick={openBillingPlans}
+            className="rounded-full border border-[var(--border)] px-3 py-1 text-xs font-semibold text-[var(--muted-foreground)] hover:border-[var(--foreground)] hover:text-[var(--foreground)]"
+          >
+            {t("nav.plans")}
+          </button>
           {displayName ? (
             <span className="max-w-[160px] truncate text-xs text-[var(--muted-foreground)]" title={displayName}>
               {displayName}

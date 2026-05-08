@@ -11,5 +11,9 @@ export function createClient() {
   }
   return createBrowserClient(url, key, {
     cookieOptions: webappSupabaseCookieOptions,
+    auth: {
+      flowType: "pkce",
+      detectSessionInUrl: true,
+    },
   });
 }

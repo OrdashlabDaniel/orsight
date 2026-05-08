@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Noto_Sans, Noto_Sans_Mono, Noto_Sans_SC } from "next/font/google";
 import "./globals.css";
+import HostNormalizer from "./HostNormalizer";
 
 const notoSans = Noto_Sans({
   variable: "--font-noto-sans",
@@ -35,7 +36,10 @@ export default function RootLayout({
       suppressHydrationWarning
       className={`${notoSans.variable} ${notoSansSC.variable} ${notoSansMono.variable} h-full antialiased`}
     >
-      <body suppressHydrationWarning className="min-h-full flex flex-col">{children}</body>
+      <body suppressHydrationWarning className="min-h-full flex flex-col">
+        <HostNormalizer />
+        {children}
+      </body>
     </html>
   );
 }
