@@ -1,19 +1,51 @@
-import { NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
+import { createServerClient } from "@supabase/ssr";
+import { NextRequest, NextResponse } from "next/server";
 
-export async function GET(request: Request) {
-  const { searchParams, origin } = new URL(request.url);
-  const code = searchParams.get("code");
-  const next = searchParams.get("next") ?? "/";
+import { adminSupabaseCookieOptions } from "@/lib/supabase/cookies";
+import { getPublicSupabaseConfig } from "@/lib/supabase/env";
 
-  if (code) {
-    const supabase = await createClient();
-    const { error } = await supabase.auth.exchangeCodeForSession(code);
-    if (!error) {
-      return NextResponse.redirect(`${origin}${next}`);
-    }
+type PendingCookie = {
+  name: string;
+  value: string;
+  options?: Record<string, unknown>;
+};
+
+export async function GET(request: NextRequest) {
+  const url = new URL(request.url);
+  const origin = url.origin;
+  const code = url.searchParams.get("code");
+  const nextPath = (() => {
+    const raw = url.searchParams.get("next") ?? "/viz";
+    return raw.startsWith("/") && !raw.startsWith("//") ? raw : "/viz";
+  })();
+
+  if (!code) {
+    return NextResponse.redirect(`${origin}/login?error=auth_callback_failed`);
   }
 
-  // return the user to an error page with instructions
-  return NextResponse.redirect(`${origin}/login?error=auth_callback_failed`);
+  const { url: supabaseUrl, anonKey } = getPublicSupabaseConfig();
+  const pendingCookies: PendingCookie[] = [];
+
+  const supabase = createServerClient(supabaseUrl, anonKey, {
+    cookieOptions: adminSupabaseCookieOptions,
+    cookies: {
+      getAll() {
+        return request.cookies.getAll();
+      },
+      setAll(cookiesToSet) {
+        pendingCookies.push(...cookiesToSet);
+      },
+    },
+  });
+
+  const { error } = await supabase.auth.exchangeCodeForSession(code);
+
+  const destination = error ? `${origin}/login?error=auth_callback_failed` : `${origin}${nextPath}`;
+  const response = NextResponse.redirect(destination);
+
+  for (const cookie of pendingCookies) {
+    response.cookies.set(cookie.name, cookie.value, cookie.options ?? {});
+  }
+
+  return response;
 }

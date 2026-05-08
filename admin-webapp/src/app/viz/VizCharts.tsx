@@ -36,7 +36,7 @@ export function VizCharts({ daily, modelShares }: Props) {
   const [pieSize, setPieSize] = useState({ width: 0, height: 0 });
 
   useEffect(() => {
-    setMounted(true);
+    queueMicrotask(() => setMounted(true));
   }, []);
 
   useEffect(() => {

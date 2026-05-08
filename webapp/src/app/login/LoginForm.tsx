@@ -163,6 +163,84 @@ export function LoginForm() {
   }, []);
 
   useEffect(() => {
+    if (!supabaseOn || typeof window === "undefined") {
+      return;
+    }
+
+    const hash = window.location.hash.replace(/^#/, "");
+    if (!hash) {
+      return;
+    }
+
+    const hashParams = new URLSearchParams(hash);
+    const hasImplicitOAuthSession = hashParams.has("access_token") || hashParams.has("refresh_token");
+    if (!hasImplicitOAuthSession) {
+      return;
+    }
+
+    let cancelled = false;
+    setLoading(true);
+    setMessage("");
+
+    (async () => {
+      try {
+        const supabase = createClient();
+        const accessToken = hashParams.get("access_token");
+        const refreshToken = hashParams.get("refresh_token");
+        if (!accessToken || !refreshToken) {
+          throw new Error(t("login.errGoogleStart"));
+        }
+
+        const { data, error } = await supabase.auth.setSession({
+          access_token: accessToken,
+          refresh_token: refreshToken,
+        });
+        if (error || !data.session) {
+          throw error || new Error(t("login.errGoogleStart"));
+        }
+
+        const {
+          data: { user },
+        } = await supabase.auth.getUser();
+        if (user) {
+          const meta = user.user_metadata ?? {};
+          const existing = meta[POD_USERNAME_METADATA_KEY];
+          if (typeof existing !== "string" || !existing.trim()) {
+            const fullName = typeof meta.full_name === "string" ? meta.full_name.trim() : "";
+            const name = typeof meta.name === "string" ? meta.name.trim() : "";
+            const emailLocal =
+              user.email && user.email.includes("@") ? user.email.split("@")[0]!.trim() : "";
+            const podUsername = fullName || name || emailLocal || "user";
+            await supabase.auth.updateUser({
+              data: { [POD_USERNAME_METADATA_KEY]: podUsername },
+            });
+          }
+        }
+
+        if (!cancelled) {
+          window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
+          await waitForServerSession();
+          router.replace(nextPath);
+          router.refresh();
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setMessage(error instanceof Error ? error.message : t("login.errGoogleStart"));
+          window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
+        }
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [nextPath, router, supabaseOn, t]);
+
+  useEffect(() => {
     if (mode !== "login") {
       setBannedOAuthNotice(false);
     }

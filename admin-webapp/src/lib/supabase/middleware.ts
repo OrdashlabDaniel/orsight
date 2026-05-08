@@ -1,88 +1,53 @@
-import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
-import { adminSupabaseCookieOptions } from "@/lib/supabase/cookies";
-import { normalizeSupabaseUrl } from "@/lib/supabase/env";
+import { hasValidLocalAdminCookieFromRequest } from "@/lib/admin-local-auth";
 
 export async function updateSession(request: NextRequest) {
-  let supabaseResponse = NextResponse.next({
-    request,
-  });
+  const hostHeader = request.headers.get("host") ?? "";
+  const normalizedPath = `${request.nextUrl.pathname}${request.nextUrl.search}`;
+  const isLocalLoopbackHost =
+    hostHeader.startsWith("127.0.0.1:") ||
+    hostHeader === "127.0.0.1" ||
+    hostHeader.startsWith("[::1]:") ||
+    hostHeader === "[::1]" ||
+    hostHeader.startsWith("::1:");
 
-  const supabaseUrl = normalizeSupabaseUrl(process.env.NEXT_PUBLIC_SUPABASE_URL);
-  const supabaseAnonKey = (process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? "").trim();
-
-  if (!supabaseUrl || !supabaseAnonKey) {
-    return supabaseResponse;
+  if (isLocalLoopbackHost) {
+    return new Response(null, {
+      status: 307,
+      headers: {
+        Location: `http://localhost:3101${normalizedPath}`,
+      },
+    });
   }
 
-  const supabase = createServerClient(
-    supabaseUrl,
-    supabaseAnonKey,
-    {
-      cookieOptions: adminSupabaseCookieOptions,
-      cookies: {
-        getAll() {
-          return request.cookies.getAll();
-        },
-        setAll(cookiesToSet) {
-          cookiesToSet.forEach(({ name, value, options }) => request.cookies.set(name, value));
-          supabaseResponse = NextResponse.next({
-            request,
-          });
-          cookiesToSet.forEach(({ name, value, options }) =>
-            supabaseResponse.cookies.set(name, value, options)
-          );
-        },
-      },
-    }
-  );
-
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  const requestHeaders = new Headers(request.headers);
+  requestHeaders.set("x-orsight-admin-next", normalizedPath);
+  const response = NextResponse.next({
+    request: {
+      headers: requestHeaders,
+    },
+  });
 
   const isPublicPath =
     request.nextUrl.pathname.startsWith("/login") ||
     request.nextUrl.pathname.startsWith("/auth") ||
-    request.nextUrl.pathname.startsWith("/api/health") ||
-    request.nextUrl.pathname.startsWith("/viz");
+    request.nextUrl.pathname.startsWith("/api/health");
 
-  if (!user && !isPublicPath) {
+  const hasLocalAdminSession = await hasValidLocalAdminCookieFromRequest(request);
+
+  if (!hasLocalAdminSession && !isPublicPath) {
     const url = request.nextUrl.clone();
     url.pathname = "/login";
-    const nextPath = `${request.nextUrl.pathname}${request.nextUrl.search}`;
-    url.searchParams.set("next", nextPath);
+    url.searchParams.set("next", normalizedPath);
     return NextResponse.redirect(url);
   }
 
-  if (user) {
-    const path = request.nextUrl.pathname;
-    // 公开可视化页 + 管理员信息页：已登录用户可访问，不做 admin_users 拦截
-    const skipAdminGate = path.startsWith("/viz") || path.startsWith("/account");
-
-    if (!skipAdminGate) {
-      const { data: adminUser } = await supabase
-        .from("admin_users")
-        .select("id")
-        .eq("id", user.id)
-        .maybeSingle();
-
-      if (!adminUser && !path.startsWith("/login")) {
-        const url = request.nextUrl.clone();
-        url.pathname = "/login";
-        url.searchParams.set("error", "not_admin");
-        await supabase.auth.signOut();
-        return NextResponse.redirect(url);
-      }
-
-      if (adminUser && path.startsWith("/login")) {
-        const url = request.nextUrl.clone();
-        url.pathname = "/viz";
-        return NextResponse.redirect(url);
-      }
-    }
+  if (hasLocalAdminSession && request.nextUrl.pathname.startsWith("/login")) {
+    const url = request.nextUrl.clone();
+    url.pathname = "/";
+    return NextResponse.redirect(url);
   }
 
-  return supabaseResponse;
+  return response;
 }

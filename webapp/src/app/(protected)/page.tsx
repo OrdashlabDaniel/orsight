@@ -23,6 +23,13 @@ import {
   organizeRecords,
 } from "@/lib/pod";
 import {
+  RECOGNITION_MODEL_OPTIONS,
+  canUseRecognitionModel,
+  fallbackRecognitionModelName,
+  type RecognitionBillingStatus,
+  type RecognitionModelKey,
+} from "@/lib/recognition-models";
+import {
   broadcastTableFieldsChanged,
   createCustomField,
   getActiveTableFields,
@@ -372,8 +379,9 @@ function HomeContent() {
   const { locale, t } = useLocale();
   const router = useRouter();
   const searchParams = useSearchParams();
-  const primaryModelName = "gpt-5-mini";
-  const reviewModelName = "gpt-5";
+  const primaryModelName = fallbackRecognitionModelName("fast");
+  const reviewModelName = fallbackRecognitionModelName("accurate");
+  const maxModelName = fallbackRecognitionModelName("max");
   const currentFormId = useMemo(
     () => normalizeFormId(searchParams.get("formId") || DEFAULT_FORM_ID),
     [searchParams],
@@ -400,6 +408,9 @@ function HomeContent() {
   const [progress, setProgress] = useState<{ completed: number; total: number } | null>(null);
   const [trainingExamplesLoaded, setTrainingExamplesLoaded] = useState(0);
   const [trainingStatus, setTrainingStatus] = useState<TrainingStatusResponse | null>(null);
+  const [billingStatus, setBillingStatus] = useState<RecognitionBillingStatus>(null);
+  const [billingStatusLoaded, setBillingStatusLoaded] = useState(false);
+  const [selectedRecognitionModel, setSelectedRecognitionModel] = useState<RecognitionModelKey>("fast");
   const [annotatingRecord, setAnnotatingRecord] = useState<PodRecord | null>(null);
   const [annotationImageSrc, setAnnotationImageSrc] = useState("");
   const [annotationImageName, setAnnotationImageName] = useState("");
@@ -469,6 +480,45 @@ function HomeContent() {
   useEffect(() => {
     setSelectedUploadIds((current) => current.filter((id) => uploads.some((upload) => upload.id === id)));
   }, [uploads]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadBillingStatus() {
+      try {
+        const response = await fetch("/api/billing/status", {
+          cache: "no-store",
+          credentials: "same-origin",
+        });
+        const payload = (await response.json().catch(() => ({}))) as {
+          billing?: RecognitionBillingStatus;
+        };
+        if (!cancelled && response.ok) {
+          setBillingStatus(payload.billing ?? null);
+        }
+      } finally {
+        if (!cancelled) {
+          setBillingStatusLoaded(true);
+        }
+      }
+    }
+
+    void loadBillingStatus();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (
+      selectedRecognitionModel === "max" &&
+      billingStatusLoaded &&
+      !canUseRecognitionModel("max", billingStatus)
+    ) {
+      setSelectedRecognitionModel("accurate");
+    }
+  }, [billingStatus, billingStatusLoaded, selectedRecognitionModel]);
 
   useEffect(() => {
     uploadPanelWidthRef.current = uploadPanelWidthPx;
@@ -1261,13 +1311,18 @@ function HomeContent() {
     }
   }
 
+  const canUseMaxRecognitionModel = canUseRecognitionModel("max", billingStatus);
+  const bestAvailableRecognitionModel: RecognitionModelKey = canUseMaxRecognitionModel ? "max" : "accurate";
+
   async function requestExtraction(
     files: File[],
     mode: "primary" | "review" = "primary",
+    recognitionModel: RecognitionModelKey = selectedRecognitionModel,
   ): Promise<ExtractionResponse> {
     const formData = new FormData();
     files.forEach((file) => formData.append("files", file));
     formData.append("mode", mode);
+    formData.append("recognitionModel", recognitionModel);
     formData.append("formId", currentFormId);
 
     const response = await fetch("/api/extract", {
@@ -1290,10 +1345,12 @@ function HomeContent() {
     files: File[],
     concurrency = 3,
     mode: "primary" | "review" = "primary",
+    recognitionModel: RecognitionModelKey = selectedRecognitionModel,
   ): Promise<ExtractionResponse> {
     const allRecords: PodRecord[] = [];
     const allIssues: ExtractionIssue[] = [];
     let loadedTrainingExamples = 0;
+    let modelUsed = fallbackRecognitionModelName(recognitionModel);
     const batches = Array.from(
       { length: Math.ceil(files.length / EXTRACTION_BATCH_SIZE) },
       (_, index) => files.slice(index * EXTRACTION_BATCH_SIZE, (index + 1) * EXTRACTION_BATCH_SIZE),
@@ -1309,9 +1366,12 @@ function HomeContent() {
         const batch = batches[batchIndex];
 
         try {
-          const payload = await requestExtraction(batch, mode);
+          const payload = await requestExtraction(batch, mode, recognitionModel);
           allRecords.push(...(payload.records || []));
           allIssues.push(...(payload.issues || []));
+          if (payload.modelUsed) {
+            modelUsed = payload.modelUsed;
+          }
           loadedTrainingExamples = Math.max(loadedTrainingExamples, payload.trainingExamplesLoaded || 0);
         } catch (error) {
           batch.forEach((file) => {
@@ -1339,7 +1399,8 @@ function HomeContent() {
     return {
       records: ensureUniquePodRecordIds(allRecords),
       issues: allIssues,
-      modelUsed: mode === "review" ? reviewModelName : primaryModelName,
+      modelUsed,
+      recognitionModel,
       trainingExamplesLoaded: loadedTrainingExamples,
       mode,
     };
@@ -1638,10 +1699,13 @@ function HomeContent() {
     setSelectedUploadId(uploads[0]?.id ?? null);
 
     try {
+      const recognitionModel = bestAvailableRecognitionModel;
+      setSelectedRecognitionModel(recognitionModel);
       const payload = await runParallelExtraction(
         uploads.map((upload) => upload.file),
         3,
         "review",
+        recognitionModel,
       );
 
       setRecords(payload.records || []);
@@ -1655,7 +1719,7 @@ function HomeContent() {
         t("home.noticeExtractHighQualityDone", {
           n: organized.records.length,
           dedupe: dedupeMessage,
-          model: payload.modelUsed || reviewModelName,
+          model: payload.modelUsed || fallbackRecognitionModelName(recognitionModel),
         }),
       );
     } catch (error) {
@@ -1724,6 +1788,7 @@ function HomeContent() {
         uploads.map((upload) => upload.file),
         3,
         "primary",
+        selectedRecognitionModel,
       );
 
       setRecords(payload.records || []);
@@ -1737,7 +1802,7 @@ function HomeContent() {
         t("home.noticeExtractDone", {
           n: organized.records.length,
           dedupe: dedupeMessage,
-          model: payload.modelUsed || primaryModelName,
+          model: payload.modelUsed || fallbackRecognitionModelName(selectedRecognitionModel),
         }),
       );
     } catch (error) {
@@ -1763,9 +1828,11 @@ function HomeContent() {
     setSelectedUploadId(matchedUploads[0].id);
 
     try {
+      const recognitionModel = bestAvailableRecognitionModel;
       const payload = await requestExtraction(
         matchedUploads.map((upload) => upload.file),
         "review",
+        recognitionModel,
       );
 
       const nextRecords = [
@@ -1789,7 +1856,7 @@ function HomeContent() {
         organized.duplicateCount > 0 ? t("home.dedupe", { n: organized.duplicateCount }) : "";
       setNoticeMessage(
         t("home.noticeRetry", {
-          model: payload.modelUsed || reviewModelName,
+          model: payload.modelUsed || fallbackRecognitionModelName(recognitionModel),
           n: sourceImageNames.length,
           dedupe: dedupeMessage,
         }),
@@ -1825,10 +1892,12 @@ function HomeContent() {
     setSelectedUploadId(matchedUploads[0]?.id ?? null);
 
     try {
+      const recognitionModel = bestAvailableRecognitionModel;
       const payload = await runParallelExtraction(
         matchedUploads.map((upload) => upload.file),
         3,
         "review",
+        recognitionModel,
       );
 
       const nextRecords = [
@@ -1852,7 +1921,7 @@ function HomeContent() {
         organized.duplicateCount > 0 ? t("home.dedupe", { n: organized.duplicateCount }) : "";
       setNoticeMessage(
         t("home.noticeBatchRetry", {
-          model: payload.modelUsed || reviewModelName,
+          model: payload.modelUsed || fallbackRecognitionModelName(recognitionModel),
           n: matchedUploads.length,
           dedupe: dedupeMessage,
         }),
@@ -2415,6 +2484,7 @@ function HomeContent() {
                 {t("home.statsLine", {
                   primary: primaryModelName,
                   review: reviewModelName,
+                  max: maxModelName,
                   samples: trainingExamplesLoaded,
                   images: trainingStatus?.totalImages ?? 0,
                 })}
@@ -2631,55 +2701,118 @@ function HomeContent() {
               className="flex min-h-0 shrink-0 flex-col px-4 py-3"
               style={isDesktopLayout ? { height: Math.max(uploadTopSectionHeightPx, uploadTopSectionMinHeightPx) } : undefined}
             >
-              <div ref={uploadTopActionsRef} className="flex flex-wrap gap-2">
-                <button
-                  className="rounded-md bg-[var(--foreground)] px-3 py-2 text-sm text-[var(--background)] hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
-                  onClick={extractData}
-                  disabled={isExtracting || isHighQualityReextracting || isRetryingReviewAll || !uploads.length}
-                >
-                  {isExtracting ? t("home.extracting") : t("home.extract")}
-                </button>
-                <button
-                  className="rounded-md border border-[var(--border)] px-3 py-2 text-sm hover:bg-[var(--background)] disabled:cursor-not-allowed disabled:opacity-40"
-                  onClick={() => void reextractAllWithHigherModel()}
-                  disabled={isExtracting || isHighQualityReextracting || isRetryingReviewAll || !uploads.length}
-                >
-                  {isHighQualityReextracting ? t("home.extractingHighQuality") : t("home.extractHighQuality")}
-                </button>
-                <button
-                  className="rounded-md border border-[var(--border)] px-3 py-2 text-sm hover:bg-[var(--background)]"
-                  onClick={async () => {
-                    try {
-                      const items = await navigator.clipboard.read();
-                      const files: File[] = [];
-                      for (const item of items) {
-                        const imageTypes = item.types.filter((type) => type.startsWith("image/"));
-                        for (const type of imageTypes) {
-                          const blob = await item.getType(type);
-                          const ext = type.split("/")[1] || "png";
-                          files.push(
-                            new File([blob], `pasted-image-${Date.now()}-${files.length}.${ext}`, {
-                              type,
-                              lastModified: Date.now(),
-                            }),
-                          );
+              <div ref={uploadTopActionsRef} className="flex flex-col gap-2">
+                <div className="rounded-xl border border-[var(--border)] bg-[var(--background)]/80 p-2.5">
+                  <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-[11px] font-semibold uppercase tracking-[0.18em] text-[var(--muted-foreground)]">
+                      {t("home.modelSelectorLabel")}
+                    </span>
+                    <span className="text-[11px] text-[var(--muted-foreground)]">{t("home.modelLargeTableTip")}</span>
+                  </div>
+                  <div className="grid gap-2 sm:grid-cols-3">
+                    {RECOGNITION_MODEL_OPTIONS.map((option) => {
+                      const locked = !canUseRecognitionModel(option.key, billingStatus);
+                      const active = selectedRecognitionModel === option.key;
+                      const titleKey =
+                        option.key === "fast"
+                          ? "home.modelFastName"
+                          : option.key === "accurate"
+                            ? "home.modelAccurateName"
+                            : "home.modelMaxName";
+                      const hintKey =
+                        option.key === "fast"
+                          ? "home.modelFastHint"
+                          : option.key === "accurate"
+                            ? "home.modelAccurateHint"
+                            : "home.modelMaxHint";
+
+                      return (
+                        <button
+                          key={option.key}
+                          type="button"
+                          aria-pressed={active}
+                          className={`rounded-lg border px-2.5 py-2 text-left transition ${
+                            active
+                              ? "border-[var(--foreground)] bg-[var(--foreground)] text-[var(--background)]"
+                              : "border-[var(--border)] bg-[var(--surface)] hover:bg-[var(--background)]"
+                          } ${locked ? "cursor-not-allowed opacity-60" : ""}`}
+                          onClick={() => {
+                            if (locked) {
+                              setErrorMessage(t("home.errPremiumModelRequiresNormal"));
+                              return;
+                            }
+                            setSelectedRecognitionModel(option.key);
+                            setErrorMessage("");
+                          }}
+                        >
+                          <span className="flex items-center justify-between gap-2">
+                            <span className="text-xs font-semibold">{t(titleKey)}</span>
+                            {locked ? (
+                              <span className="rounded-full border border-current/30 px-1.5 py-0.5 text-[10px]">
+                                {t("home.modelPaidOnly")}
+                              </span>
+                            ) : null}
+                          </span>
+                          <span className="mt-1 block text-[11px] opacity-75">{option.fallbackModel}</span>
+                          <span className="mt-1 block text-[11px] leading-4 opacity-75">{t(hintKey)}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    className="rounded-md bg-[var(--foreground)] px-3 py-2 text-sm text-[var(--background)] hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+                    onClick={extractData}
+                    disabled={isExtracting || isHighQualityReextracting || isRetryingReviewAll || !uploads.length}
+                  >
+                    {isExtracting ? t("home.extracting") : t("home.extract")}
+                  </button>
+                  <button
+                    className="rounded-md border border-[var(--border)] px-3 py-2 text-sm hover:bg-[var(--background)] disabled:cursor-not-allowed disabled:opacity-40"
+                    onClick={() => void reextractAllWithHigherModel()}
+                    disabled={isExtracting || isHighQualityReextracting || isRetryingReviewAll || !uploads.length}
+                  >
+                    {isHighQualityReextracting ? t("home.extractingHighQuality") : t("home.extractHighQuality")}
+                  </button>
+                  <button
+                    className="rounded-md border border-[var(--border)] px-3 py-2 text-sm hover:bg-[var(--background)]"
+                    onClick={async () => {
+                      try {
+                        const items = await navigator.clipboard.read();
+                        const files: File[] = [];
+                        for (const item of items) {
+                          const imageTypes = item.types.filter((type) => type.startsWith("image/"));
+                          for (const type of imageTypes) {
+                            const blob = await item.getType(type);
+                            const ext = type.split("/")[1] || "png";
+                            files.push(
+                              new File([blob], `pasted-image-${Date.now()}-${files.length}.${ext}`, {
+                                type,
+                                lastModified: Date.now(),
+                              }),
+                            );
+                          }
                         }
+                        if (files.length > 0) {
+                          void handleFiles(files);
+                        } else {
+                          setErrorMessage(t("home.noClipboardImage"));
+                        }
+                      } catch {
+                        setErrorMessage(t("home.errClipboard"));
                       }
-                      if (files.length > 0) {
-                        void handleFiles(files);
-                      } else {
-                        setErrorMessage(t("home.noClipboardImage"));
-                      }
-                    } catch {
-                      setErrorMessage(t("home.errClipboard"));
-                    }
-                  }}
-                >
-                  {t("home.pasteScreenshot")}
-                </button>
-                <button className="rounded-md border border-[var(--border)] px-3 py-2 text-sm hover:bg-[var(--background)]" onClick={clearAll}>
-                  {t("home.clear")}
-                </button>
+                    }}
+                  >
+                    {t("home.pasteScreenshot")}
+                  </button>
+                  <button
+                    className="rounded-md border border-[var(--border)] px-3 py-2 text-sm hover:bg-[var(--background)]"
+                    onClick={clearAll}
+                  >
+                    {t("home.clear")}
+                  </button>
+                </div>
               </div>
               <div className="mt-2 min-h-0 flex-1 overflow-y-auto pr-1">
                 <div ref={uploadTopInfoContentRef} className="flex flex-col gap-2">

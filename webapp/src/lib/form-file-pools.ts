@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { DEFAULT_FORM_ID, FORM_META_PREFIX, normalizeFormId } from "@/lib/forms";
-import { scopeTrainingBucketPath, scopeTrainingExamplesImageName } from "@/lib/storage-tenant";
+import { scopeTrainingBucketPath, scopeTrainingExamplesImageName, tenantActive } from "@/lib/storage-tenant";
 import {
   isMissingSupabaseBucketError,
   isMissingSupabaseTableError,
@@ -292,6 +292,9 @@ async function loadLegacyRemotePoolItems(formId: string, pool: FormFilePoolName)
 async function saveLegacyRemotePoolItems(formId: string, pool: FormFilePoolName, files: FormFilePoolItem[]) {
   const admin = getSupabaseAdmin();
   if (!admin) {
+    if (tenantActive()) {
+      throw new Error("Tenant-scoped form file pool storage is unavailable.");
+    }
     saveLocalPoolItems(formId, pool, files);
     return;
   }
@@ -310,6 +313,9 @@ async function saveLegacyRemotePoolItems(formId: string, pool: FormFilePoolName,
 async function saveLegacyRemotePoolFile(record: FormFilePoolItem, buffer: Buffer, formId: string) {
   const admin = getSupabaseAdmin();
   if (!admin) {
+    if (tenantActive()) {
+      throw new Error("Tenant-scoped form file pool storage is unavailable.");
+    }
     const dirPath = resolveLocalFileDir(formId, record.pool);
     fs.mkdirSync(dirPath, { recursive: true });
     fs.writeFileSync(path.join(dirPath, record.storageName), buffer);
@@ -358,6 +364,9 @@ async function loadRemotePoolItems(formId: string, pool: FormFilePoolName): Prom
 }
 
 export async function listFormFilePool(pool: FormFilePoolName, formId = DEFAULT_FORM_ID) {
+  if (!hasTenantDbAccess() && tenantActive()) {
+    return [];
+  }
   return hasTenantDbAccess() ? loadRemotePoolItems(formId, pool) : loadLocalPoolItems(formId, pool);
 }
 
@@ -388,6 +397,9 @@ export async function saveFormFileToPool(
   };
 
   if (!hasTenantDbAccess()) {
+    if (tenantActive()) {
+      throw new Error("Tenant-scoped form file pool storage is unavailable.");
+    }
     const dirPath = resolveLocalFileDir(normalizedFormId, input.pool);
     fs.mkdirSync(dirPath, { recursive: true });
     fs.writeFileSync(path.join(dirPath, storageName), input.buffer);
@@ -447,6 +459,9 @@ export async function getFormFileFromPool(
   }
 
   if (!hasTenantDbAccess()) {
+    if (tenantActive()) {
+      return null;
+    }
     const filePath = path.join(resolveLocalFileDir(normalizedFormId, pool), record.storageName);
     if (!fs.existsSync(filePath)) {
       return null;
@@ -514,6 +529,9 @@ export async function deleteFormFileFromPool(pool: FormFilePoolName, fileId: str
   }
 
   if (!hasTenantDbAccess()) {
+    if (tenantActive()) {
+      throw new Error("Tenant-scoped form file pool storage is unavailable.");
+    }
     const filePath = path.join(resolveLocalFileDir(normalizedFormId, pool), record.storageName);
     if (fs.existsSync(filePath)) {
       fs.unlinkSync(filePath);

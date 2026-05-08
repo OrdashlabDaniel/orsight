@@ -37,6 +37,7 @@ export type ExtractionResponse = {
   records: PodRecord[];
   issues: ExtractionIssue[];
   modelUsed?: string;
+  recognitionModel?: string;
   mode?: "primary" | "review" | string;
   trainingExamplesLoaded?: number;
 };

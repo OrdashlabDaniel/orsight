@@ -30,13 +30,15 @@ export function UserTimeRangeControls() {
   const [to, setTo] = useState(clampDateStr(toQ));
 
   useEffect(() => {
-    setMounted(true);
+    queueMicrotask(() => setMounted(true));
   }, []);
 
   useEffect(() => {
     if (!mounted) return;
-    setFrom(clampDateStr(fromQ));
-    setTo(clampDateStr(toQ));
+    queueMicrotask(() => {
+      setFrom(clampDateStr(fromQ));
+      setTo(clampDateStr(toQ));
+    });
   }, [fromQ, toQ, mounted]);
 
   function push(next: URLSearchParams) {

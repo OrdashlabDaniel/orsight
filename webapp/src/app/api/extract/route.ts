@@ -4,10 +4,25 @@ import sharp from "sharp";
 import { withAuthedStorageTenant } from "@/lib/storage-tenant";
 import { getFormIdFromFormData } from "@/lib/form-request";
 import {
+  OPENAI_PRICING_BASIS_VERSION,
+  resolveOpenAIApiKeyId,
+  resolveOpenAIProjectId,
+} from "@/lib/openai-accounting";
+import {
   buildRecognitionFieldGuidancePromptSection,
   extractRecognitionFieldGuidanceFromWorkingRules,
 } from "@/lib/recognition-field-guidance";
-import { getSupabaseAdmin } from "@/lib/supabase";
+import {
+  estimateBillingTokensForAction,
+  recordBillingUsage,
+  requireBillingEntitlement,
+  type BillingStatus,
+} from "@/lib/billing";
+import {
+  canUseRecognitionModel,
+  normalizeRecognitionModelKey,
+  type RecognitionModelKey,
+} from "@/lib/recognition-models";
 import {
   ensureUniquePodRecordIds,
   type ExtractionIssue,
@@ -57,6 +72,7 @@ import {
 const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || "https://api.openai.com/v1";
 const OPENAI_PRIMARY_MODEL = process.env.OPENAI_PRIMARY_MODEL || process.env.OPENAI_MODEL || "gpt-5-mini";
 const OPENAI_REVIEW_MODEL = process.env.OPENAI_REVIEW_MODEL || "gpt-5";
+const OPENAI_MAX_MODEL = process.env.OPENAI_MAX_MODEL || process.env.OPENAI_PREMIUM_MODEL || "gpt-5.5";
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_REASONING_EFFORT = process.env.OPENAI_REASONING_EFFORT || "minimal";
 // Coordinate-guided refinement is unstable for camera framing; keep it opt-in.
@@ -64,6 +80,16 @@ const COORD_GUIDED_REFINE_ENABLED = process.env.EXTRACT_COORD_GUIDED_REFINE === 
 const RECOVERY_UPSCALE_MIN_EDGE = 1600;
 const RECOVERY_UPSCALE_TARGET_EDGE = 2000;
 const RECOVERY_UPSCALE_MAX_SCALE = 2.5;
+
+function resolveOpenAIModelForRecognition(key: RecognitionModelKey): string {
+  if (key === "max") {
+    return OPENAI_MAX_MODEL;
+  }
+  if (key === "accurate") {
+    return OPENAI_REVIEW_MODEL;
+  }
+  return OPENAI_PRIMARY_MODEL;
+}
 
 const SIMPLE_EXTRACTION_PROMPT = `你是 OrSight。你会先看到几张人工标注参考图，再看到最后一张当前待识别图片。请严格遵守：
 1. 参考图只用于理解界面布局、字段标签和示例，不得抄参考图中的任何数字或文字。
@@ -104,6 +130,17 @@ const TASK_CODE_RECOVERY_APPENDIX = `
 2. 常见合法格式是 TASK + 12位数字，例如 TASK202604024045。
 3. 像 TASK202604C、TASK20260、TASK20260402O405 这种残缺或尾部含非数字字符的结果都视为无效。
 4. 如果看不清完整 taskCode，就返回 null，不要保留半截结果。`;
+
+const LARGE_WEB_TABLE_EXTRACTION_APPENDIX = `
+
+Large WEB_TABLE extraction rules:
+1. For screenshots with 20 or more visible table rows, preserve the visible row order from top to bottom.
+2. Extract one record for each visible data row. Do not merge adjacent rows, even when the route or date repeats.
+3. Keep each row's cells aligned to the column headers. Never shift a driver, route, count, or date from the row above or below.
+4. If a cell is blank, keep the corresponding field empty instead of copying a nearby value.
+5. Ignore sort arrows, filters, scrollbar handles, links such as "查看", and decorative UI text unless they are configured target fields.
+6. When a column is hidden or truncated, leave only that field blank and still return the rest of the row.
+7. For dense screenshots, it is better to return a reviewRequired row with partial values than to drop the row.`;
 
 function getConsistencyAttemptCount(): number {
   const raw = process.env.EXTRACT_CONSISTENCY_ATTEMPTS;
@@ -228,6 +265,8 @@ function buildPrimaryExtractionPrompt(
   if (customPrompt) {
     lines.push("", customPrompt);
   }
+
+  lines.push("", LARGE_WEB_TABLE_EXTRACTION_APPENDIX);
 
   lines.push(
     "",
@@ -710,8 +749,15 @@ type CounterVerificationResult = {
 
 type OpenAIUsage = {
   prompt_tokens?: number;
+  cached_input_tokens?: number;
   completion_tokens?: number;
   total_tokens?: number;
+  request_count?: number;
+  openai_project_id?: string | null;
+  openai_api_key_id?: string | null;
+  service_tier?: string | null;
+  pricing_tier?: string | null;
+  openai_endpoint?: string | null;
 };
 
 const TRAINING_FIELD_CN: Record<TrainingField, string> = {
@@ -2507,10 +2553,13 @@ async function detectDenseWebTableRowBands(
   initialRecordsCount: number,
   imageType: string,
 ): Promise<DenseRowBand[]> {
-  if (!width || !height || imageType !== "WEB_TABLE") {
+  const canScanForDenseRows =
+    imageType === "WEB_TABLE" ||
+    (height >= 900 && width >= 900 && initialRecordsCount >= 4);
+  if (!width || !height || !canScanForDenseRows) {
     return [];
   }
-  if (height < 720 || initialRecordsCount < 12) {
+  if (height < 620) {
     return [];
   }
 
@@ -2608,6 +2657,26 @@ function buildDenseWebTableRowRegions(bands: DenseRowBand[], height: number) {
   });
 }
 
+function buildDenseWebTableHeaderRegion(bands: DenseRowBand[], height: number) {
+  if (bands.length === 0) {
+    return null as { top: number; height: number } | null;
+  }
+
+  const firstRowStart = Math.max(0, bands[0]!.start);
+  const headerBottom = Math.min(
+    height,
+    Math.max(48, Math.min(260, firstRowStart + 4)),
+  );
+  if (headerBottom < 32) {
+    return null;
+  }
+
+  return {
+    top: 0,
+    height: headerBottom,
+  };
+}
+
 async function cropVerticalRegionsToPngDataUrls(
   bytes: Buffer,
   width: number,
@@ -2627,6 +2696,7 @@ async function cropVerticalRegionsToPngDataUrls(
 async function callVisionModelForDenseWebTableRow(
   model: string,
   ctx: ExtractVisionContext,
+  headerDataUrl: string | null,
   dataUrl: string,
   rowIndex: number,
   totalRows: number,
@@ -2648,7 +2718,23 @@ async function callVisionModelForDenseWebTableRow(
 2. 只要当前裁剪里有有效数据行，就必须提取；看不清的字段留空，并将 reviewRequired 设为 true、reviewReason 简要说明。
 3. 只有在确认当前裁剪只是表头、空白、分隔线、分页控件时，才允许返回空数组。
 4. 不要把列标题、操作按钮、分页、滚动条、装饰文字当成字段值。
-5. imageType 固定返回 WEB_TABLE。`;
+5. imageType 固定返回 WEB_TABLE。
+6. Preserve the visible row order from top to bottom.
+7. Do not merge adjacent table rows; if route/date repeats, still output separate records.
+8. Keep every value aligned to the same row. Do not copy a blank cell from neighboring rows.
+9. If a cell is blank or clipped, leave that field empty and set reviewRequired when needed.
+10. If two images are provided, the first image is only the table header/column reference. Use it only to understand column names and positions. Extract records only from the second image.`;
+
+  const imageContent: OpenAIMessageContent[] = headerDataUrl
+    ? [
+        {
+          type: "text",
+          text: "First image: table header/column reference only. Second image: current table row crop to extract.",
+        },
+        { type: "image_url", image_url: { url: headerDataUrl } },
+        { type: "image_url", image_url: { url: dataUrl } },
+      ]
+    : [{ type: "image_url", image_url: { url: dataUrl } }];
 
   const response = await fetch(`${OPENAI_BASE_URL}/chat/completions`, {
     method: "POST",
@@ -2665,7 +2751,7 @@ async function callVisionModelForDenseWebTableRow(
           role: "user",
           content: [
             { type: "text", text: prompt },
-            { type: "image_url", image_url: { url: dataUrl } },
+            ...imageContent,
           ] satisfies OpenAIMessageContent[],
         },
       ],
@@ -2731,6 +2817,11 @@ async function extractDenseWebTableRows(
 ) {
   return getDenseWebTableCache(file, model, ctx, async () => {
     const regions = buildDenseWebTableRowRegions(rowBands, height);
+    const headerRegion = buildDenseWebTableHeaderRegion(rowBands, height);
+    const headerUrls = headerRegion
+      ? await cropVerticalRegionsToPngDataUrls(bytes, width, [headerRegion])
+      : [];
+    const headerDataUrl = headerUrls[0] || null;
     const rowUrls = await cropVerticalRegionsToPngDataUrls(bytes, width, regions);
 
     const rowResults: Array<{ records: RawModelRecord[]; imageType: string; usage?: OpenAIUsage }> = new Array(rowUrls.length);
@@ -2742,6 +2833,7 @@ async function extractDenseWebTableRows(
         rowResults[index] = await callVisionModelForDenseWebTableRow(
           model,
           ctx,
+          headerDataUrl,
           rowUrls[index]!,
           index + 1,
           rowUrls.length,
@@ -4209,34 +4301,60 @@ export async function POST(request: Request) {
         }
 
         const formData = await request.formData();
-      const formId = getFormIdFromFormData(formData);
-      const mode = String(formData.get("mode") || "primary");
-      const files = formData
-        .getAll("files")
-        .filter((value): value is File => value instanceof File);
-      const model = mode === "review" ? OPENAI_REVIEW_MODEL : OPENAI_PRIMARY_MODEL;
+        const formId = getFormIdFromFormData(formData);
+        const mode = String(formData.get("mode") || "primary") === "review" ? "review" : "primary";
+        const requestedRecognitionModel =
+          normalizeRecognitionModelKey(formData.get("recognitionModel")) ||
+          (mode === "review" ? "accurate" : "fast");
+        const files = formData
+          .getAll("files")
+          .filter((value): value is File => value instanceof File);
+        const model = resolveOpenAIModelForRecognition(requestedRecognitionModel);
 
-      if (!files.length) {
-        return NextResponse.json({ error: "No files uploaded." }, { status: 400 });
-      }
+        if (!files.length) {
+          return NextResponse.json({ error: "No files uploaded." }, { status: 400 });
+        }
 
-      const records: PodRecord[] = [];
-      const issues: ExtractionIssue[] = [];
-      const validLabels = new Set(["应领件数", "应收件数", "运单数量"]);
+        let billingStatus: BillingStatus | null = null;
+        if (user?.id) {
+          const entitlement = await requireBillingEntitlement(
+            user.id,
+            estimateBillingTokensForAction("extract_table", files.length),
+          );
+          if (!entitlement.ok) {
+            return entitlement.response!;
+          }
+          billingStatus = entitlement.status;
+        }
 
-      const visionCtx = await buildExtractVisionContext(formId);
-      const examples = visionCtx.examples;
-      const activeBuiltInFieldIds = visionCtx.activeBuiltInFieldIds;
-      const routeStationBuiltInActive =
-        activeBuiltInFieldIds.has("route") || activeBuiltInFieldIds.has("stationTeam");
-      const taskCodeBuiltInActive = activeBuiltInFieldIds.has("taskCode");
-      const counterFieldsActive =
-        activeBuiltInFieldIds.has("total") || activeBuiltInFieldIds.has("unscanned");
-      const podSpecificBuiltInsActive =
-        routeStationBuiltInActive ||
-        taskCodeBuiltInActive ||
-        counterFieldsActive ||
-        activeBuiltInFieldIds.has("exceptions");
+        if (requestedRecognitionModel === "max" && !canUseRecognitionModel("max", billingStatus)) {
+          return NextResponse.json(
+            {
+              error: "The gpt-5.5 recognition model is available to active Normal subscribers only.",
+              code: "premium_model_requires_normal",
+              billing: billingStatus,
+            },
+            { status: 403 },
+          );
+        }
+
+        const records: PodRecord[] = [];
+        const issues: ExtractionIssue[] = [];
+        const validLabels = new Set(["应领件数", "应收件数", "运单数量"]);
+
+        const visionCtx = await buildExtractVisionContext(formId);
+        const examples = visionCtx.examples;
+        const activeBuiltInFieldIds = visionCtx.activeBuiltInFieldIds;
+        const routeStationBuiltInActive =
+          activeBuiltInFieldIds.has("route") || activeBuiltInFieldIds.has("stationTeam");
+        const taskCodeBuiltInActive = activeBuiltInFieldIds.has("taskCode");
+        const counterFieldsActive =
+          activeBuiltInFieldIds.has("total") || activeBuiltInFieldIds.has("unscanned");
+        const podSpecificBuiltInsActive =
+          routeStationBuiltInActive ||
+          taskCodeBuiltInActive ||
+          counterFieldsActive ||
+          activeBuiltInFieldIds.has("exceptions");
 
       for (const file of files) {
         if (isStructuredDocumentFileName(file.name)) {
@@ -4313,6 +4431,7 @@ export async function POST(request: Request) {
           const totalPromptTokens = docPromptTokens;
           const totalCompletionTokens = docCompletionTokens;
           const totalTokens = docTotalTokens;
+          const totalRequestCount = docAttempts.length;
 
           checkedRecords = checkedRecords.map((record) => ({
             ...record,
@@ -4363,23 +4482,21 @@ export async function POST(request: Request) {
           checkedRecords = consistencyAnalysis.records;
 
           if (user?.id) {
-            const admin = getSupabaseAdmin();
-            if (admin) {
-              admin!
-                .from("usage_logs")
-                .insert({
-                  user_id: user!.id,
-                  action_type: "extract_table",
-                  image_count: 1,
-                  prompt_tokens: totalPromptTokens,
-                  completion_tokens: totalCompletionTokens,
-                  total_tokens: totalTokens,
-                  model_used: model,
-                })
-                .then(({ error }) => {
-                  if (error) console.error("Failed to log usage:", error);
-                });
-            }
+            await recordBillingUsage({
+              userId: user.id,
+              actionType: "extract_table",
+              formId,
+              quantity: 1,
+              requestCount: totalRequestCount,
+              promptTokens: totalPromptTokens,
+              completionTokens: totalCompletionTokens,
+              totalTokens,
+              modelUsed: model,
+              openAIProjectId: resolveOpenAIProjectId(formId),
+              openAIApiKeyId: resolveOpenAIApiKeyId(formId),
+              pricingBasisVersion: OPENAI_PRICING_BASIS_VERSION,
+              openAIEndpoint: "/v1/chat/completions",
+            });
           }
 
           if (docParseWarning) {
@@ -4453,6 +4570,7 @@ export async function POST(request: Request) {
         let totalPromptTokens = consistencyResult.usage?.prompt_tokens || 0;
         let totalCompletionTokens = consistencyResult.usage?.completion_tokens || 0;
         let totalTokens = consistencyResult.usage?.total_tokens || 0;
+        let totalRequestCount = getConsistencyAttemptCount();
 
         // Only run counter verification for POD images
         if (consistencyResult.imageType === "POD" && counterFieldsActive) {
@@ -4472,6 +4590,7 @@ export async function POST(request: Request) {
             totalPromptTokens += counterVerification.usage?.prompt_tokens || 0;
             totalCompletionTokens += counterVerification.usage?.completion_tokens || 0;
             totalTokens += counterVerification.usage?.total_tokens || 0;
+            totalRequestCount += counterVerification.usage?.request_count || 1;
           }
         }
 
@@ -4525,25 +4644,27 @@ export async function POST(request: Request) {
         totalPromptTokens += recoveryResult.usage?.prompt_tokens || 0;
         totalCompletionTokens += recoveryResult.usage?.completion_tokens || 0;
         totalTokens += recoveryResult.usage?.total_tokens || 0;
+        if (recoveryResult.usage) {
+          totalRequestCount += recoveryResult.usage?.request_count || 1;
+        }
 
-      // Log usage to Supabase if user is logged in
-      if (user?.id) {
-        const admin = getSupabaseAdmin();
-        if (admin) {
-          // Fire and forget, don't await to block the response
-          admin!.from('usage_logs').insert({
-            user_id: user!.id,
-            action_type: 'extract_table',
-            image_count: 1,
-            prompt_tokens: totalPromptTokens,
-            completion_tokens: totalCompletionTokens,
-            total_tokens: totalTokens,
-            model_used: model,
-          }).then(({ error }) => {
-            if (error) console.error("Failed to log usage:", error);
+        if (user?.id) {
+          await recordBillingUsage({
+            userId: user.id,
+            actionType: "extract_table",
+            formId,
+            quantity: 1,
+            requestCount: totalRequestCount,
+            promptTokens: totalPromptTokens,
+            completionTokens: totalCompletionTokens,
+            totalTokens,
+            modelUsed: model,
+            openAIProjectId: resolveOpenAIProjectId(formId),
+            openAIApiKeyId: resolveOpenAIApiKeyId(formId),
+            pricingBasisVersion: OPENAI_PRICING_BASIS_VERSION,
+            openAIEndpoint: "/v1/chat/completions",
           });
         }
-      }
 
         if (!checkedRecords.length) {
           issues.push({
@@ -4573,6 +4694,7 @@ export async function POST(request: Request) {
       records: ensureUniquePodRecordIds(records),
       issues,
       modelUsed: model,
+      recognitionModel: requestedRecognitionModel,
       mode,
       trainingExamplesLoaded: examples.length,
     });

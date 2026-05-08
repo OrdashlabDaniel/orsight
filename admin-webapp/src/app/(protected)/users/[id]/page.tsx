@@ -1,233 +1,598 @@
 import Link from "next/link";
-import { format } from "date-fns";
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, CreditCard, ShieldCheck, Trash2, UserRound } from "lucide-react";
 
+import { AdminMetricCard } from "@/components/AdminMetricCard";
+import { AdminPageHeader } from "@/components/AdminPageHeader";
+import { AdminUsageCharts } from "@/components/AdminUsageCharts";
 import { VizIdentityBadges } from "@/components/VizIdentityBadges";
-import { getRegisteredUserById } from "@/lib/viz-auth-user-rpc";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { TOKEN_PRICING } from "@/lib/usage-metrics";
-import { createAdminClient } from "@/lib/supabase/server";
+import {
+  billingSourceLabel,
+  formatMoney,
+  isAdminOverrideSubscription,
+  paymentStatusLabel,
+  shortId,
+} from "@/lib/billing-admin";
+import { loadAdminUserDetailSnapshot } from "@/lib/admin-data";
 
 import {
+  changeStripePlanAction,
+  clearBillingOverrideAction,
+  setBillingOverrideAction,
+  setStripeCancelAtPeriodEndAction,
+} from "../../billing/actions";
+import {
+  cancelStripeSubscriptionNowFromUserPageAction,
+  clearFreeQuotaResetFromUserPageAction,
   deleteUserFromUserPageAction,
   grantAdminFromUserPageAction,
+  resetFreeQuotaFromUserPageAction,
   revokeAdminFromUserPageAction,
+  setFreeQuotaBlockedFromUserPageAction,
+  setLifetimeFreeFromUserPageAction,
 } from "./actions";
 
 type SearchParams = Record<string, string | string[] | undefined>;
 
-function costForLog(log: any) {
-  const model = (log.model_used || "gpt-4o-mini") as keyof typeof TOKEN_PRICING;
-  const rates = TOKEN_PRICING[model] || TOKEN_PRICING["gpt-4o-mini"];
-  return (log.prompt_tokens || 0) * rates.prompt + (log.completion_tokens || 0) * rates.completion;
+function asText(value: string | string[] | undefined) {
+  return typeof value === "string" ? value : null;
 }
 
-export default async function UserDetailsPage({
+function planPillClass(planId: string) {
+  if (planId === "lifetime") return "bg-rose-50 text-rose-700 ring-rose-200";
+  if (planId === "normal") return "bg-emerald-50 text-emerald-700 ring-emerald-200";
+  if (planId === "usage") return "bg-amber-50 text-amber-800 ring-amber-200";
+  if (planId === "business") return "bg-violet-50 text-violet-700 ring-violet-200";
+  if (planId === "pro") return "bg-blue-50 text-blue-700 ring-blue-200";
+  return "bg-slate-50 text-slate-700 ring-slate-200";
+}
+
+function subscriptionStatusLabel(status: string | null | undefined) {
+  if (!status) return "free";
+  return status;
+}
+
+export default async function UserDetailPage({
   params,
   searchParams,
 }: {
   params: Promise<{ id: string }>;
   searchParams?: Promise<SearchParams>;
 }) {
-  const resolvedParams = await params;
-  const userId = resolvedParams.id;
-  const supabase = await createAdminClient();
+  const { id } = await params;
+  const snapshot = await loadAdminUserDetailSnapshot(id);
   const sp = searchParams ? await searchParams : {};
-  const noticeMsg = typeof sp.notice === "string" ? sp.notice : null;
-  const errMsg = typeof sp.err === "string" ? sp.err : null;
+  const notice = asText(sp.notice);
+  const err = asText(sp.err);
 
-  // Fetch user details via SQL RPC to avoid admin API failures on broken auth rows.
-  const user = await getRegisteredUserById(supabase, userId);
-
-  // Fetch user's usage logs
-  const { data: logs } = await supabase
-    .from("usage_logs")
-    .select("*")
-    .eq("user_id", userId)
-    .order("created_at", { ascending: false });
-
-  const { data: admins } = await supabase.from("admin_users").select("id").order("created_at", { ascending: false });
-  const isAdmin = Boolean(admins?.some((a) => a.id === userId));
-  const soleAdmin = (admins?.length || 0) === 1;
-
-  const totalImages = (logs ?? []).reduce((n, l) => n + (l.image_count || 0), 0);
-  const totalTokens = (logs ?? []).reduce((n, l) => n + (l.total_tokens || 0), 0);
-  const totalCost = (logs ?? []).reduce((n, l) => n + costForLog(l), 0);
-
-  if (!user) {
+  if (!snapshot) {
     return (
       <div className="space-y-6">
-        <div className="p-4 bg-rose-50 text-rose-700 rounded-xl border border-rose-200">
+        <Link
+          href="/users"
+          className="inline-flex items-center gap-2 text-sm font-medium text-blue-700 hover:text-blue-900"
+        >
+          <ArrowLeft className="h-4 w-4" />
+          Back to Users
+        </Link>
+        <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-900">
           User not found.
         </div>
-        <Link href="/users" className="text-blue-600 hover:underline flex items-center gap-2">
-          <ArrowLeft className="w-4 h-4" /> Back to Users
-        </Link>
       </div>
     );
   }
 
+  const { summary } = snapshot;
+  const paymentCurrency =
+    summary.effectiveSubscription?.currency || summary.planConfig.currency || "usd";
+  const returnTo = `/users/${summary.user.id}`;
+  const displayPlan = summary.lifetimeFree ? "lifetime" : summary.effectivePlan;
+  const displaySubscription = summary.lifetimeFree
+    ? "lifetime_free"
+    : subscriptionStatusLabel(summary.effectiveSubscription?.status);
+  const freeQuotaResetLabel = summary.freeQuotaResetAfterIso
+    ? new Date(summary.freeQuotaResetAfterIso).toLocaleString("en-US")
+    : "Not set";
+
   return (
-    <div className="space-y-6">
-      <div className="flex items-center gap-4">
+    <div className="space-y-8">
+      <div className="flex items-center gap-3">
         <Link
           href="/users"
-          className="rounded-lg p-2 text-slate-500 transition-all duration-150 hover:-translate-y-px hover:bg-slate-200 hover:text-slate-900 active:translate-y-0 active:scale-[0.98]"
+          className="inline-flex items-center gap-2 rounded-2xl border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 shadow-sm hover:bg-slate-50"
         >
-          <ArrowLeft className="w-5 h-5" />
+          <ArrowLeft className="h-4 w-4" />
+          Users
         </Link>
-        <div>
-          <h1 className="text-3xl font-bold tracking-tight text-slate-900">{user.email}</h1>
-          <p className="mt-1 text-slate-600">用户详细信息与用量明细</p>
-        </div>
+        <Link
+          href={`/usage-board?userId=${summary.user.id}`}
+          className="inline-flex items-center gap-2 rounded-2xl border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 shadow-sm hover:bg-slate-50"
+        >
+          Open Usage Board
+        </Link>
       </div>
 
-      {noticeMsg ? (
-        <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-900">
-          {noticeMsg}
-        </div>
-      ) : null}
-      {errMsg ? (
-        <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-900">
-          {errMsg}
-        </div>
-      ) : null}
+      <AdminPageHeader
+        eyebrow="User Control Center"
+        title={summary.label}
+        description="Single place for identity, billing controls, usage visibility, and destructive user operations."
+      />
 
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <Card>
-          <CardHeader className="space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium text-slate-600">处理图片数</CardTitle>
+      {notice ? (
+        <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-950">
+          {notice}
+        </div>
+      ) : null}
+      {err ? (
+        <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-900">
+          {err}
+        </div>
+      ) : null}
+      {snapshot.warnings.map((warning) => (
+        <div
+          key={warning}
+          className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-950"
+        >
+          {warning}
+        </div>
+      ))}
+
+      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <AdminMetricCard
+          label="Images"
+          value={summary.usage.images.toLocaleString("en-US")}
+          description="Images processed across tracked usage_logs for this user."
+          icon={<UserRound className="h-5 w-5" />}
+        />
+        <AdminMetricCard
+          label="Tokens"
+          value={summary.usage.tokens.toLocaleString("en-US")}
+          description="Prompt + completion token footprint in recorded usage events."
+          icon={<ShieldCheck className="h-5 w-5" />}
+        />
+        <AdminMetricCard
+          label="Estimated Cost"
+          value={`$${summary.usage.costUsd.toFixed(2)}`}
+          description="Usage-based estimate using the internal token pricing table."
+          icon={<CreditCard className="h-5 w-5" />}
+        />
+        <AdminMetricCard
+          label="Current Plan"
+          value={summary.planConfig.displayName}
+          description={`Used ${summary.planUsage.used.toLocaleString("en-US")} ${summary.planConfig.overageUnitName} this period.`}
+          icon={<CreditCard className="h-5 w-5" />}
+        />
+      </div>
+
+      <AdminUsageCharts daily={snapshot.dailyTokens} modelShares={snapshot.modelShares} />
+
+      <div className="grid gap-6 xl:grid-cols-[0.8fr_1.2fr]">
+        <Card className="border-slate-200">
+          <CardHeader className="border-b border-slate-100 bg-white">
+            <CardTitle className="text-lg text-slate-950">Identity & Access</CardTitle>
           </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold text-slate-900">{totalImages.toLocaleString()}</div>
-            <p className="text-xs text-slate-500">image_count 合计</p>
+          <CardContent className="space-y-5 p-5 pt-5">
+            <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+              <div className="text-sm font-medium text-slate-900">{summary.label}</div>
+              <div className="mt-2 break-all text-sm text-slate-600">{summary.user.email || "-"}</div>
+              <div className="mt-2 font-mono text-xs text-slate-400">{summary.user.id}</div>
+              <div className="mt-3 text-xs text-slate-500">
+                Created {summary.user.created_at ? new Date(summary.user.created_at).toLocaleString("en-US") : "-"}
+              </div>
+            </div>
+
+            <VizIdentityBadges isRegisteredUser={true} isAdmin={summary.isAdmin} />
+
+            <div className="grid gap-3">
+              {!summary.isAdmin ? (
+                <form action={grantAdminFromUserPageAction} className="grid gap-2">
+                  <input type="hidden" name="userId" value={summary.user.id} />
+                  <input type="hidden" name="email" value={summary.user.email || ""} />
+                  <button
+                    type="submit"
+                    className="rounded-2xl bg-slate-950 px-4 py-3 text-sm font-medium text-white hover:bg-slate-800"
+                  >
+                    Grant Admin Access
+                  </button>
+                </form>
+              ) : (
+                <form action={revokeAdminFromUserPageAction} className="grid gap-2">
+                  <input type="hidden" name="userId" value={summary.user.id} />
+                  <input type="hidden" name="label" value={summary.label} />
+                  <button
+                    type="submit"
+                    className="rounded-2xl border border-slate-300 bg-white px-4 py-3 text-sm font-medium text-slate-700 hover:bg-slate-50"
+                  >
+                    Revoke Admin Access
+                  </button>
+                </form>
+              )}
+            </div>
+
+            <div className="rounded-2xl border border-slate-200 bg-white p-4">
+              <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Account State</div>
+              <div className="mt-3 text-sm text-slate-700">
+                Suspended: {summary.isSuspended ? "Yes" : "No"}
+              </div>
+              <div className="mt-1 text-sm text-slate-700">
+                Last seen: {summary.usage.lastSeenAt ? new Date(summary.usage.lastSeenAt).toLocaleString("en-US") : "-"}
+              </div>
+            </div>
           </CardContent>
         </Card>
-        <Card>
-          <CardHeader className="space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium text-slate-600">Token 总量</CardTitle>
+
+        <Card className="border-slate-200">
+          <CardHeader className="border-b border-slate-100 bg-white">
+            <CardTitle className="text-lg text-slate-950">Billing Control Center</CardTitle>
           </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold text-slate-900">{totalTokens.toLocaleString()}</div>
-            <p className="text-xs text-slate-500">total_tokens 合计</p>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium text-slate-600">估算费用</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold text-slate-900">${totalCost.toFixed(4)}</div>
-            <p className="text-xs text-slate-500">按内置单价估算</p>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium text-slate-600">身份</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            <VizIdentityBadges isRegisteredUser={true} isAdmin={isAdmin} />
-            {!isAdmin ? (
-              <form action={grantAdminFromUserPageAction}>
-                <input type="hidden" name="userId" value={userId} />
-                <input type="hidden" name="email" value={user.email || ""} />
-                <button
-                  type="submit"
-                  className="w-full cursor-pointer rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white shadow-sm transition-all duration-150 hover:bg-blue-700 hover:shadow-md hover:shadow-blue-600/25 active:scale-[0.98]"
-                >
-                  设为管理员
-                </button>
-              </form>
-            ) : (
-              <form action={revokeAdminFromUserPageAction}>
-                <input type="hidden" name="userId" value={userId} />
-                <input type="hidden" name="label" value={user.email || userId} />
-                <button
-                  type="submit"
-                  disabled={soleAdmin}
-                  title={soleAdmin ? "至少需要保留一位管理员" : "仅从 admin_users 移除，不删除登录账号"}
-                  className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-800 shadow-sm transition-all duration-150 enabled:cursor-pointer enabled:hover:border-slate-400 enabled:hover:bg-slate-50 enabled:hover:shadow-md enabled:active:scale-[0.98] disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-400"
-                >
-                  移除管理员权限
-                </button>
-              </form>
-            )}
+          <CardContent className="space-y-6 p-5 pt-5">
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+              <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Plan</div>
+                <div className="mt-3">
+                  <span
+                    className={`rounded-full px-3 py-1 text-xs font-semibold uppercase ring-1 ${planPillClass(displayPlan)}`}
+                  >
+                    {displayPlan}
+                  </span>
+                </div>
+                <div className="mt-3 text-sm text-slate-700">{summary.planConfig.displayName}</div>
+              </div>
+              <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Source</div>
+                <div className="mt-3 text-sm font-medium text-slate-900">
+                  {billingSourceLabel(summary.effectiveSubscription)}
+                </div>
+                <div className="mt-2 text-xs text-slate-500">
+                  {summary.lifetimeFree
+                    ? "Lifetime free entitlement is active for this account."
+                    : isAdminOverrideSubscription(summary.effectiveSubscription)
+                    ? "Internal admin override is currently active."
+                    : "Effective plan is coming from the real Stripe subscription state."}
+                </div>
+              </div>
+              <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Subscription</div>
+                <div className="mt-3 text-sm font-medium text-slate-900">
+                  {displaySubscription}
+                </div>
+                <div className="mt-2 text-xs text-slate-500">
+                  Payment: {paymentStatusLabel(summary.effectiveSubscription?.latest_invoice_status)}
+                </div>
+              </div>
+              <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Current Period</div>
+                <div className="mt-3 text-sm font-medium text-slate-900">
+                  {summary.planUsage.used.toLocaleString("en-US")} used
+                </div>
+                <div className="mt-2 text-xs text-slate-500">
+                  Estimated overage {formatMoney(summary.planUsage.estimatedOverageCents, paymentCurrency)}
+                </div>
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-slate-200 p-4">
+              <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                <div>
+                  <h3 className="text-base font-semibold text-slate-900">Admin Billing Entitlements</h3>
+                  <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-600">
+                    Use these controls for account-level exceptions. They change OrSight access rules directly without
+                    deleting historical usage logs, so accounting stays auditable.
+                  </p>
+                </div>
+                <div className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-semibold text-slate-600">
+                  Free reset: {freeQuotaResetLabel}
+                </div>
+              </div>
+
+              <div className="mt-4 grid gap-4 md:grid-cols-3">
+                <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                  <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Lifetime Free</div>
+                  <div className="mt-2 text-sm font-medium text-slate-900">
+                    {summary.lifetimeFree ? "Active" : "Inactive"}
+                  </div>
+                  <p className="mt-2 min-h-12 text-xs leading-5 text-slate-500">
+                    Active accounts bypass Normal, Usage Credits, and free quota limits.
+                  </p>
+                  <form action={setLifetimeFreeFromUserPageAction} className="mt-3">
+                    <input type="hidden" name="userId" value={summary.user.id} />
+                    <input type="hidden" name="label" value={summary.label} />
+                    <input type="hidden" name="active" value={summary.lifetimeFree ? "0" : "1"} />
+                    <button
+                      type="submit"
+                      className={
+                        summary.lifetimeFree
+                          ? "w-full rounded-2xl border border-rose-300 bg-white px-4 py-3 text-sm font-medium text-rose-800 hover:bg-rose-50"
+                          : "w-full rounded-2xl bg-slate-950 px-4 py-3 text-sm font-medium text-white hover:bg-slate-800"
+                      }
+                    >
+                      {summary.lifetimeFree ? "Revoke Lifetime Free" : "Grant Lifetime Free"}
+                    </button>
+                  </form>
+                </div>
+
+                <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                  <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Free Quota Access</div>
+                  <div className="mt-2 text-sm font-medium text-slate-900">
+                    {summary.freeQuotaBlocked ? "Disabled" : "Allowed"}
+                  </div>
+                  <p className="mt-2 min-h-12 text-xs leading-5 text-slate-500">
+                    Disable free quota to force upgrade or prepaid credits. Prepaid credits can still unlock usage.
+                  </p>
+                  <form action={setFreeQuotaBlockedFromUserPageAction} className="mt-3">
+                    <input type="hidden" name="userId" value={summary.user.id} />
+                    <input type="hidden" name="label" value={summary.label} />
+                    <input type="hidden" name="active" value={summary.freeQuotaBlocked ? "0" : "1"} />
+                    <button
+                      type="submit"
+                      className={
+                        summary.freeQuotaBlocked
+                          ? "w-full rounded-2xl bg-slate-950 px-4 py-3 text-sm font-medium text-white hover:bg-slate-800"
+                          : "w-full rounded-2xl border border-amber-300 bg-white px-4 py-3 text-sm font-medium text-amber-900 hover:bg-amber-50"
+                      }
+                    >
+                      {summary.freeQuotaBlocked ? "Restore Free Quota" : "Disable Free Quota"}
+                    </button>
+                  </form>
+                </div>
+
+                <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                  <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Current Free Month</div>
+                  <div className="mt-2 text-sm font-medium text-slate-900">{freeQuotaResetLabel}</div>
+                  <p className="mt-2 min-h-12 text-xs leading-5 text-slate-500">
+                    Reset starts free-budget accounting from now. Historical usage stays in the ledger.
+                  </p>
+                  <div className="mt-3 grid gap-2">
+                    <form action={resetFreeQuotaFromUserPageAction}>
+                      <input type="hidden" name="userId" value={summary.user.id} />
+                      <input type="hidden" name="label" value={summary.label} />
+                      <button
+                        type="submit"
+                        className="w-full rounded-2xl border border-slate-300 bg-white px-4 py-3 text-sm font-medium text-slate-700 hover:bg-slate-50"
+                      >
+                        Reset Free Quota Now
+                      </button>
+                    </form>
+                    <form action={clearFreeQuotaResetFromUserPageAction}>
+                      <input type="hidden" name="userId" value={summary.user.id} />
+                      <input type="hidden" name="label" value={summary.label} />
+                      <button
+                        type="submit"
+                        disabled={!summary.freeQuotaResetAfterIso}
+                        className="w-full rounded-2xl border border-slate-300 bg-white px-4 py-3 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        Clear Reset Marker
+                      </button>
+                    </form>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="grid gap-6 xl:grid-cols-[1fr_1fr_0.8fr]">
+              <div className="rounded-2xl border border-slate-200 p-4">
+                <h3 className="text-base font-semibold text-slate-900">Internal Plan Override</h3>
+                <p className="mt-2 text-sm leading-6 text-slate-600">
+                  Change the effective plan inside OrSight without touching the user&apos;s real Stripe subscription.
+                </p>
+
+                <form action={setBillingOverrideAction} className="mt-4 space-y-3">
+                  <input type="hidden" name="ownerId" value={summary.user.id} />
+                  <input type="hidden" name="label" value={summary.label} />
+                  <input type="hidden" name="returnTo" value={returnTo} />
+                  <select
+                    name="plan"
+                    defaultValue={isAdminOverrideSubscription(summary.effectiveSubscription) ? summary.effectivePlan : "free"}
+                    className="w-full rounded-2xl border border-slate-300 px-3 py-2 text-sm text-slate-900"
+                  >
+                    {snapshot.planConfigs.map((plan) => (
+                      <option key={plan.planId} value={plan.planId}>
+                        {plan.displayName}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    type="submit"
+                    className="w-full rounded-2xl bg-slate-950 px-4 py-3 text-sm font-medium text-white hover:bg-slate-800"
+                  >
+                    Save Internal Override
+                  </button>
+                </form>
+
+                <form action={clearBillingOverrideAction} className="mt-3">
+                  <input type="hidden" name="ownerId" value={summary.user.id} />
+                  <input type="hidden" name="label" value={summary.label} />
+                  <input type="hidden" name="returnTo" value={returnTo} />
+                  <button
+                    type="submit"
+                    disabled={!isAdminOverrideSubscription(summary.effectiveSubscription)}
+                    className="w-full rounded-2xl border border-slate-300 bg-white px-4 py-3 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Clear Internal Override
+                  </button>
+                </form>
+              </div>
+
+              <div className="rounded-2xl border border-slate-200 p-4">
+                <h3 className="text-base font-semibold text-slate-900">Real Stripe Subscription</h3>
+                <p className="mt-2 text-sm leading-6 text-slate-600">
+                  Manage the user&apos;s real Normal subscription. Prepaid Usage Credits are one-time checkout purchases, not a subscription plan.
+                </p>
+
+                {summary.realStripeSubscription?.stripe_subscription_id ? (
+                  <>
+                    <form action={changeStripePlanAction} className="mt-4 space-y-3">
+                      <input type="hidden" name="ownerId" value={summary.user.id} />
+                      <input type="hidden" name="label" value={summary.label} />
+                      <input type="hidden" name="returnTo" value={returnTo} />
+                      <select
+                        name="plan"
+                        defaultValue="normal"
+                        className="w-full rounded-2xl border border-slate-300 px-3 py-2 text-sm text-slate-900"
+                      >
+                        <option value="normal">Normal</option>
+                      </select>
+                      <button
+                        type="submit"
+                        className="w-full rounded-2xl border border-slate-300 bg-white px-4 py-3 text-sm font-medium text-slate-700 hover:bg-slate-50"
+                      >
+                        Change Stripe Plan
+                      </button>
+                    </form>
+
+                    <form action={setStripeCancelAtPeriodEndAction} className="mt-3">
+                      <input type="hidden" name="ownerId" value={summary.user.id} />
+                      <input type="hidden" name="label" value={summary.label} />
+                      <input type="hidden" name="returnTo" value={returnTo} />
+                      <input
+                        type="hidden"
+                        name="cancelAtPeriodEnd"
+                        value={summary.realStripeSubscription.cancel_at_period_end ? "0" : "1"}
+                      />
+                      <button
+                        type="submit"
+                        className="w-full rounded-2xl border border-slate-300 bg-white px-4 py-3 text-sm font-medium text-slate-700 hover:bg-slate-50"
+                      >
+                        {summary.realStripeSubscription.cancel_at_period_end
+                          ? "Resume Auto-Renew"
+                          : "Cancel At Period End"}
+                      </button>
+                    </form>
+
+                    <form action={cancelStripeSubscriptionNowFromUserPageAction} className="mt-3">
+                      <input type="hidden" name="userId" value={summary.user.id} />
+                      <input type="hidden" name="label" value={summary.label} />
+                      <button
+                        type="submit"
+                        className="w-full rounded-2xl border border-rose-300 bg-white px-4 py-3 text-sm font-medium text-rose-800 hover:bg-rose-50"
+                      >
+                        Cancel Subscription Now
+                      </button>
+                    </form>
+                  </>
+                ) : (
+                  <div className="mt-4 rounded-2xl border border-dashed border-slate-300 bg-slate-50 px-4 py-4 text-sm text-slate-500">
+                    This user does not currently have a real Stripe subscription.
+                  </div>
+                )}
+              </div>
+
+              <div className="rounded-2xl border border-slate-200 p-4">
+                <h3 className="text-base font-semibold text-slate-900">Stripe Identifiers</h3>
+                <div className="mt-4 space-y-4 text-sm text-slate-700">
+                  <div>
+                    <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Customer</div>
+                    <div className="mt-1 break-all font-mono text-xs text-slate-900">
+                      {shortId(summary.effectiveSubscription?.stripe_customer_id)}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Subscription</div>
+                    <div className="mt-1 break-all font-mono text-xs text-slate-900">
+                      {shortId(summary.realStripeSubscription?.stripe_subscription_id)}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Latest Invoice</div>
+                    <div className="mt-1 break-all font-mono text-xs text-slate-900">
+                      {shortId(summary.effectiveSubscription?.latest_invoice_id)}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Invoice Summary</div>
+                    <div className="mt-1 text-sm text-slate-700">
+                      Paid {formatMoney(summary.effectiveSubscription?.latest_invoice_amount_paid, paymentCurrency)}
+                    </div>
+                    <div className="mt-1 text-sm text-slate-700">
+                      Remaining{" "}
+                      {formatMoney(summary.effectiveSubscription?.latest_invoice_amount_remaining, paymentCurrency)}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
           </CardContent>
         </Card>
       </div>
 
-      <div className="rounded-xl border border-rose-200 bg-rose-50/60 p-4">
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <p className="font-medium text-rose-900">危险操作</p>
-            <p className="text-sm text-rose-800">删除用户会移除 auth.users + admin_users + usage_logs，不可恢复。</p>
+      <Card className="border-slate-200">
+        <CardHeader className="border-b border-slate-100 bg-white">
+          <CardTitle className="text-lg text-slate-950">Recent Usage Events</CardTitle>
+        </CardHeader>
+        <CardContent className="p-0">
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[1080px] text-left text-sm">
+              <thead className="border-b border-slate-200 bg-slate-50 text-slate-500">
+                <tr>
+                  <th className="px-5 py-3 font-medium">Timestamp</th>
+                  <th className="px-5 py-3 font-medium">Action</th>
+                  <th className="px-5 py-3 font-medium">Model</th>
+                  <th className="px-5 py-3 font-medium text-right">Images</th>
+                  <th className="px-5 py-3 font-medium text-right">Prompt</th>
+                  <th className="px-5 py-3 font-medium text-right">Completion</th>
+                  <th className="px-5 py-3 font-medium text-right">Total</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {snapshot.usageLogs.map((log) => (
+                  <tr key={log.id} className="hover:bg-slate-50">
+                    <td className="px-5 py-4 text-slate-600">
+                      {log.created_at ? new Date(log.created_at).toLocaleString("en-US") : "-"}
+                    </td>
+                    <td className="px-5 py-4 font-medium text-slate-900">{log.action_type || "-"}</td>
+                    <td className="px-5 py-4 text-slate-600">{log.model_used || "-"}</td>
+                    <td className="px-5 py-4 text-right text-slate-700">
+                      {(log.image_count || 0).toLocaleString("en-US")}
+                    </td>
+                    <td className="px-5 py-4 text-right text-slate-700">
+                      {(log.prompt_tokens || 0).toLocaleString("en-US")}
+                    </td>
+                    <td className="px-5 py-4 text-right text-slate-700">
+                      {(log.completion_tokens || 0).toLocaleString("en-US")}
+                    </td>
+                    <td className="px-5 py-4 text-right font-medium text-slate-900">
+                      {(log.total_tokens || 0).toLocaleString("en-US")}
+                    </td>
+                  </tr>
+                ))}
+                {snapshot.usageLogs.length === 0 ? (
+                  <tr>
+                    <td colSpan={7} className="px-5 py-10 text-center text-sm text-slate-500">
+                      No usage events found for this user.
+                    </td>
+                  </tr>
+                ) : null}
+              </tbody>
+            </table>
           </div>
-          <form
-            action={deleteUserFromUserPageAction}
-            onSubmit={(e) => {
-              // client confirm won't run in Server Components; kept for progressive enhancement
-              // (Next will ignore it server-side). The /viz drawer has confirm already.
-            }}
-          >
-            <input type="hidden" name="userId" value={userId} />
-            <input type="hidden" name="label" value={user.email || userId} />
+        </CardContent>
+      </Card>
+
+      <Card className="border-rose-200">
+        <CardHeader className="border-b border-rose-100 bg-rose-50/60">
+          <CardTitle className="flex items-center gap-2 text-lg text-rose-900">
+            <Trash2 className="h-5 w-5" />
+            Danger Zone
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-4 p-5 pt-5 lg:flex-row lg:items-center lg:justify-between">
+          <div className="max-w-2xl text-sm leading-6 text-rose-900">
+            Delete the auth user, admin mapping, and usage logs for this account. This action is destructive and cannot
+            be undone.
+          </div>
+          <form action={deleteUserFromUserPageAction}>
+            <input type="hidden" name="userId" value={summary.user.id} />
+            <input type="hidden" name="label" value={summary.label} />
             <button
               type="submit"
-              className="cursor-pointer rounded-lg border border-rose-300 bg-white px-4 py-2 text-sm font-medium text-rose-700 shadow-sm transition-all duration-150 hover:border-rose-400 hover:bg-rose-100 hover:shadow-md hover:shadow-rose-500/15 active:scale-[0.98]"
+              className="inline-flex items-center gap-2 rounded-2xl border border-rose-300 bg-white px-4 py-3 text-sm font-medium text-rose-800 hover:bg-rose-50"
             >
-              删除用户
+              <Trash2 className="h-4 w-4" />
+              Delete User
             </button>
           </form>
-        </div>
-      </div>
-
-      <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm text-left">
-            <thead className="bg-slate-50 border-b border-slate-200 text-slate-600 font-medium">
-              <tr>
-                <th className="px-6 py-4">Date & Time</th>
-                <th className="px-6 py-4">Action</th>
-                <th className="px-6 py-4">Model</th>
-                <th className="px-6 py-4 text-right">Images</th>
-                <th className="px-6 py-4 text-right">Prompt Tokens</th>
-                <th className="px-6 py-4 text-right">Completion Tokens</th>
-                <th className="px-6 py-4 text-right">Total Tokens</th>
-                <th className="px-6 py-4 text-right">Est. Cost</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-200">
-              {logs?.map((log) => (
-                <tr key={log.id} className="hover:bg-slate-50 transition-colors">
-                  <td className="px-6 py-4 text-slate-600">
-                    {format(new Date(log.created_at), "MMM d, yyyy HH:mm:ss")}
-                  </td>
-                  <td className="px-6 py-4 font-medium text-slate-900">{log.action_type}</td>
-                  <td className="px-6 py-4 text-slate-600">
-                    <span className="inline-flex items-center px-2 py-1 rounded-md bg-slate-100 text-xs font-medium text-slate-700">
-                      {log.model_used}
-                    </span>
-                  </td>
-                  <td className="px-6 py-4 text-right text-slate-600">{log.image_count}</td>
-                  <td className="px-6 py-4 text-right text-slate-600">{log.prompt_tokens.toLocaleString()}</td>
-                  <td className="px-6 py-4 text-right text-slate-600">{log.completion_tokens.toLocaleString()}</td>
-                  <td className="px-6 py-4 text-right font-medium text-slate-900">{log.total_tokens.toLocaleString()}</td>
-                  <td className="px-6 py-4 text-right font-medium text-slate-900">
-                    ${costForLog(log).toFixed(4)}
-                  </td>
-                </tr>
-              ))}
-              {(!logs || logs.length === 0) && (
-                <tr>
-                  <td colSpan={8} className="px-6 py-8 text-center text-slate-500">
-                    No usage logs found for this user.
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </div>
+        </CardContent>
+      </Card>
     </div>
   );
 }

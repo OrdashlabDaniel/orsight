@@ -1,6 +1,11 @@
 import { NextResponse } from "next/server";
 
+import { estimateBillingTokensForAction, recordBillingUsage, requireBillingEntitlement } from "@/lib/billing";
 import { getAuthUserOrSkip } from "@/lib/auth-server";
+import {
+  buildTrackedOpenAIHeaders,
+  extractTrackedOpenAIUsage,
+} from "@/lib/openai-accounting";
 import { buildTableFieldsFromTemplateColumns, type TemplateColumnInput } from "@/lib/forms";
 
 const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || "https://api.openai.com/v1";
@@ -56,12 +61,25 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "请先上传表格模板截图。" }, { status: 400 });
     }
 
+    if (user?.id) {
+      const entitlement = await requireBillingEntitlement(
+        user.id,
+        estimateBillingTokensForAction("template_from_image"),
+      );
+      if (!entitlement.ok) {
+        return entitlement.response!;
+      }
+    }
+
+    const tracking = buildTrackedOpenAIHeaders({
+      apiKey: OPENAI_API_KEY,
+      formId: "form-1",
+      endpoint: "/v1/chat/completions",
+    });
+
     const response = await fetch(`${OPENAI_BASE_URL}/chat/completions`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-      },
+      headers: tracking.headers,
       body: JSON.stringify({
         model: TEMPLATE_MODEL,
         reasoning_effort: OPENAI_REASONING_EFFORT,
@@ -86,11 +104,17 @@ export async function POST(request: Request) {
     const data = (await response.json()) as {
       choices?: Array<{ message?: { content?: string } }>;
       error?: { message?: string };
+      usage?: {
+        prompt_tokens?: number;
+        completion_tokens?: number;
+        total_tokens?: number;
+      };
     };
     const content = data.choices?.[0]?.message?.content;
     if (!response.ok || !content) {
       throw new Error(data.error?.message || "模板截图识别失败。");
     }
+    const trackedUsage = extractTrackedOpenAIUsage(data, response, tracking);
 
     const parsed = JSON.parse(content) as { columns?: unknown; description?: unknown };
     const columns = normalizeColumns(parsed.columns);
@@ -99,6 +123,28 @@ export async function POST(request: Request) {
     }
 
     const tableFields = buildTableFieldsFromTemplateColumns(columns);
+    if (user?.id) {
+      await recordBillingUsage({
+        userId: user.id,
+        actionType: "template_from_image",
+        formId: "form-1",
+        quantity: 1,
+        requestCount: trackedUsage.request_count,
+        promptTokens: trackedUsage.prompt_tokens,
+        cachedInputTokens: trackedUsage.cached_input_tokens,
+        completionTokens: trackedUsage.completion_tokens,
+        totalTokens: trackedUsage.total_tokens,
+        modelUsed: TEMPLATE_MODEL,
+        openAIProjectId: trackedUsage.openai_project_id,
+        openAIApiKeyId: trackedUsage.openai_api_key_id,
+        openAIRequestIds: trackedUsage.openai_request_ids,
+        clientRequestIds: trackedUsage.client_request_ids,
+        serviceTier: trackedUsage.service_tier,
+        pricingTier: trackedUsage.pricing_tier,
+        openAIEndpoint: trackedUsage.openai_endpoint,
+      });
+    }
+
     return NextResponse.json({
       ok: true,
       columns,

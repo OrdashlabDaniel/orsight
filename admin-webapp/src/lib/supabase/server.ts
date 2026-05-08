@@ -1,5 +1,5 @@
 import "@/lib/supabase/force-ipv4";
-import { createServerClient, type CookieOptions } from "@supabase/ssr";
+import { createServerClient } from "@supabase/ssr";
 import { cookies } from "next/headers";
 
 import { adminSupabaseCookieOptions } from "@/lib/supabase/cookies";
