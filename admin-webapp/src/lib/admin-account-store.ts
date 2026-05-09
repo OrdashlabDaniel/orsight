@@ -1,34 +1,40 @@
 import "server-only";
 
-import { randomBytes, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import path from "node:path";
+import { randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 
-const ADMIN_ACCOUNTS_VERSION = 1;
-const ADMIN_ACCOUNTS_DIR = path.join(process.cwd(), ".local");
-const ADMIN_ACCOUNTS_PATH = path.join(ADMIN_ACCOUNTS_DIR, "admin-accounts.json");
+import { createAdminClient } from "@/lib/supabase/server";
+
 const IDENTIFIER_PATTERN = /^[A-Za-z0-9._@-]{3,120}$/;
+const ADMIN_ACCOUNT_COLUMNS =
+  "id, identifier, display_name, email, password_hash, session_version, is_active, created_at, updated_at, password_changed_at";
 
 export const ADMIN_LOGIN_PASSWORD_MIN_LENGTH = 6;
 
-type StoredAdminAccount = {
+type AdminAccountRow = {
+  id: string;
+  identifier: string;
+  display_name: string;
+  email: string | null;
+  password_hash: string;
+  session_version: number;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+  password_changed_at: string | null;
+};
+
+export type AdminAccount = {
   id: string;
   identifier: string;
   displayName: string;
   email: string | null;
   passwordHash: string;
   sessionVersion: number;
+  isActive: boolean;
   createdAt: string;
   updatedAt: string;
   passwordChangedAt: string | null;
 };
-
-type AdminAccountsDocument = {
-  version: number;
-  accounts: StoredAdminAccount[];
-};
-
-export type AdminAccount = StoredAdminAccount;
 
 export type AdminAccountProfileInput = {
   displayName: string;
@@ -73,127 +79,123 @@ function verifyPasswordHash(passwordHash: string, password: string): boolean {
   return expected.length === derived.length && timingSafeEqual(expected, derived);
 }
 
-function createBootstrapAdminAccount(): StoredAdminAccount {
-  const identifier = (process.env.ADMIN_LOCAL_IDENTIFIER ?? "IAHAMD").trim() || "IAHAMD";
-  const displayName = (process.env.ADMIN_LOCAL_DISPLAY_NAME ?? identifier).trim() || identifier;
-  const email = normalizeEmail(process.env.ADMIN_LOCAL_EMAIL);
-  const password = (process.env.ADMIN_LOCAL_PASSWORD ?? "").trim();
-  const now = new Date().toISOString();
+function rowToAdminAccount(row: AdminAccountRow): AdminAccount {
+  return {
+    id: row.id,
+    identifier: row.identifier,
+    displayName: row.display_name,
+    email: row.email,
+    passwordHash: row.password_hash,
+    sessionVersion: row.session_version,
+    isActive: row.is_active,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    passwordChangedAt: row.password_changed_at,
+  };
+}
+
+function getBootstrapAdminInput() {
+  const identifier =
+    (process.env.ADMIN_BOOTSTRAP_IDENTIFIER ?? process.env.ADMIN_LOCAL_IDENTIFIER ?? "IAHAMD").trim() || "IAHAMD";
+  const displayName =
+    (process.env.ADMIN_BOOTSTRAP_DISPLAY_NAME ?? process.env.ADMIN_LOCAL_DISPLAY_NAME ?? identifier).trim() ||
+    identifier;
+  const email = normalizeEmail(process.env.ADMIN_BOOTSTRAP_EMAIL ?? process.env.ADMIN_LOCAL_EMAIL);
+  const password = (process.env.ADMIN_BOOTSTRAP_PASSWORD ?? process.env.ADMIN_LOCAL_PASSWORD ?? "").trim();
 
   assertValidIdentifier(identifier);
   if (!password) {
-    throw new Error("ADMIN_LOCAL_PASSWORD must be set before bootstrapping the first admin account.");
+    throw new Error(
+      "ADMIN_BOOTSTRAP_PASSWORD must be set before bootstrapping the first production admin account.",
+    );
   }
   assertValidPassword(password);
 
   return {
-    id: randomUUID(),
     identifier,
     displayName,
     email,
     passwordHash: hashPassword(password),
-    sessionVersion: 1,
-    createdAt: now,
-    updatedAt: now,
-    passwordChangedAt: now,
   };
 }
 
-function isStoredAdminAccount(value: unknown): value is StoredAdminAccount {
-  if (!value || typeof value !== "object") {
-    return false;
-  }
-
-  const candidate = value as Partial<StoredAdminAccount>;
-  return (
-    typeof candidate.id === "string" &&
-    typeof candidate.identifier === "string" &&
-    typeof candidate.displayName === "string" &&
-    (typeof candidate.email === "string" || candidate.email === null) &&
-    typeof candidate.passwordHash === "string" &&
-    typeof candidate.sessionVersion === "number" &&
-    typeof candidate.createdAt === "string" &&
-    typeof candidate.updatedAt === "string" &&
-    (typeof candidate.passwordChangedAt === "string" || candidate.passwordChangedAt === null)
-  );
+function isMissingAdminTable(error: { code?: string; message?: string } | null): boolean {
+  const message = error?.message?.toLowerCase() ?? "";
+  return error?.code === "42P01" || message.includes("admin_console_accounts");
 }
 
-function assertValidDocument(document: unknown): asserts document is AdminAccountsDocument {
-  if (!document || typeof document !== "object") {
-    throw new Error("Admin accounts file must contain an object.");
+function throwReadableDatabaseError(error: { code?: string; message?: string } | null): never {
+  if (isMissingAdminTable(error)) {
+    throw new Error(
+      "Admin console accounts table is missing. Run webapp/supabase/migrations/20260509_admin_console_accounts.sql in the current Supabase project.",
+    );
   }
 
-  const candidate = document as Partial<AdminAccountsDocument>;
-  if (candidate.version !== ADMIN_ACCOUNTS_VERSION) {
-    throw new Error(`Unsupported admin accounts file version: ${String(candidate.version)}.`);
-  }
-  if (!Array.isArray(candidate.accounts) || !candidate.accounts.every(isStoredAdminAccount)) {
-    throw new Error("Admin accounts file contains invalid account rows.");
-  }
+  throw new Error(error?.message || "Admin account database operation failed.");
 }
 
-async function writeDocument(document: AdminAccountsDocument): Promise<void> {
-  await mkdir(ADMIN_ACCOUNTS_DIR, { recursive: true });
-  const tempPath = `${ADMIN_ACCOUNTS_PATH}.${Date.now()}.tmp`;
-  await writeFile(tempPath, `${JSON.stringify(document, null, 2)}\n`, "utf8");
-  await rename(tempPath, ADMIN_ACCOUNTS_PATH);
-}
+async function ensureBootstrapAdminAccount(): Promise<void> {
+  const supabase = await createAdminClient();
+  const existing = await supabase
+    .from("admin_console_accounts")
+    .select("id")
+    .eq("is_active", true)
+    .limit(1);
 
-async function loadDocument(): Promise<AdminAccountsDocument> {
-  try {
-    const raw = await readFile(ADMIN_ACCOUNTS_PATH, "utf8");
-    const parsed = JSON.parse(raw);
-    assertValidDocument(parsed);
-
-    if (parsed.accounts.length === 0) {
-      const bootstrap = {
-        version: ADMIN_ACCOUNTS_VERSION,
-        accounts: [createBootstrapAdminAccount()],
-      } satisfies AdminAccountsDocument;
-      await writeDocument(bootstrap);
-      return bootstrap;
-    }
-
-    return parsed;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException | undefined)?.code === "ENOENT") {
-      const bootstrap = {
-        version: ADMIN_ACCOUNTS_VERSION,
-        accounts: [createBootstrapAdminAccount()],
-      } satisfies AdminAccountsDocument;
-      await writeDocument(bootstrap);
-      return bootstrap;
-    }
-
-    if (error instanceof SyntaxError) {
-      throw new Error(`Failed to parse ${ADMIN_ACCOUNTS_PATH}.`);
-    }
-
-    throw error;
+  if (existing.error) {
+    throwReadableDatabaseError(existing.error);
   }
-}
 
-async function saveAccounts(accounts: StoredAdminAccount[]): Promise<void> {
-  await writeDocument({
-    version: ADMIN_ACCOUNTS_VERSION,
-    accounts,
+  if ((existing.data ?? []).length > 0) {
+    return;
+  }
+
+  const bootstrap = getBootstrapAdminInput();
+  const inserted = await supabase.from("admin_console_accounts").insert({
+    identifier: bootstrap.identifier,
+    display_name: bootstrap.displayName,
+    email: bootstrap.email,
+    password_hash: bootstrap.passwordHash,
+    password_changed_at: new Date().toISOString(),
   });
+
+  if (inserted.error) {
+    throwReadableDatabaseError(inserted.error);
+  }
 }
 
 export async function listAdminAccounts(): Promise<AdminAccount[]> {
-  const document = await loadDocument();
-  return [...document.accounts].sort((a, b) => {
-    return (
-      a.displayName.localeCompare(b.displayName) ||
-      a.identifier.localeCompare(b.identifier) ||
-      a.createdAt.localeCompare(b.createdAt)
-    );
-  });
+  await ensureBootstrapAdminAccount();
+  const supabase = await createAdminClient();
+  const result = await supabase
+    .from("admin_console_accounts")
+    .select(ADMIN_ACCOUNT_COLUMNS)
+    .eq("is_active", true)
+    .order("display_name", { ascending: true })
+    .order("identifier", { ascending: true });
+
+  if (result.error) {
+    throwReadableDatabaseError(result.error);
+  }
+
+  return ((result.data ?? []) as AdminAccountRow[]).map(rowToAdminAccount);
 }
 
 export async function getAdminAccountById(accountId: string): Promise<AdminAccount | null> {
-  const accounts = await listAdminAccounts();
-  return accounts.find((account) => account.id === accountId) || null;
+  await ensureBootstrapAdminAccount();
+  const supabase = await createAdminClient();
+  const result = await supabase
+    .from("admin_console_accounts")
+    .select(ADMIN_ACCOUNT_COLUMNS)
+    .eq("id", accountId)
+    .eq("is_active", true)
+    .maybeSingle();
+
+  if (result.error) {
+    throwReadableDatabaseError(result.error);
+  }
+
+  return result.data ? rowToAdminAccount(result.data as AdminAccountRow) : null;
 }
 
 export async function findAdminAccountByIdentifier(identifier: string): Promise<AdminAccount | null> {
@@ -202,8 +204,20 @@ export async function findAdminAccountByIdentifier(identifier: string): Promise<
     return null;
   }
 
-  const accounts = await listAdminAccounts();
-  return accounts.find((account) => normalizeIdentifier(account.identifier) === normalized) || null;
+  await ensureBootstrapAdminAccount();
+  const supabase = await createAdminClient();
+  const result = await supabase
+    .from("admin_console_accounts")
+    .select(ADMIN_ACCOUNT_COLUMNS)
+    .eq("identifier_key", normalized)
+    .eq("is_active", true)
+    .maybeSingle();
+
+  if (result.error) {
+    throwReadableDatabaseError(result.error);
+  }
+
+  return result.data ? rowToAdminAccount(result.data as AdminAccountRow) : null;
 }
 
 export async function verifyAdminAccountPassword(
@@ -222,38 +236,36 @@ export async function updateAdminAccountProfile(
   accountId: string,
   input: AdminAccountProfileInput,
 ): Promise<AdminAccount> {
-  const accounts = await listAdminAccounts();
-  const index = accounts.findIndex((account) => account.id === accountId);
-  if (index < 0) {
-    throw new Error("Admin account not found.");
-  }
-
   const identifier = input.identifier.trim();
   const displayName = input.displayName.trim() || identifier;
   const email = normalizeEmail(input.email);
-  const normalized = normalizeIdentifier(identifier);
 
   assertValidIdentifier(identifier);
 
-  const duplicate = accounts.find(
-    (account) => account.id !== accountId && normalizeIdentifier(account.identifier) === normalized,
-  );
-  if (duplicate) {
-    throw new Error("Another admin already uses that login name.");
+  const supabase = await createAdminClient();
+  const result = await supabase
+    .from("admin_console_accounts")
+    .update({
+      identifier,
+      display_name: displayName,
+      email,
+    })
+    .eq("id", accountId)
+    .eq("is_active", true)
+    .select(ADMIN_ACCOUNT_COLUMNS)
+    .maybeSingle();
+
+  if (result.error) {
+    if (result.error.code === "23505") {
+      throw new Error("Another admin already uses that login name or email.");
+    }
+    throwReadableDatabaseError(result.error);
+  }
+  if (!result.data) {
+    throw new Error("Admin account not found.");
   }
 
-  const updatedAccount: StoredAdminAccount = {
-    ...accounts[index]!,
-    identifier,
-    displayName,
-    email,
-    updatedAt: new Date().toISOString(),
-  };
-
-  const nextAccounts = [...accounts];
-  nextAccounts[index] = updatedAccount;
-  await saveAccounts(nextAccounts);
-  return updatedAccount;
+  return rowToAdminAccount(result.data as AdminAccountRow);
 }
 
 export async function changeAdminAccountPassword(
@@ -261,13 +273,11 @@ export async function changeAdminAccountPassword(
   currentPassword: string,
   nextPassword: string,
 ): Promise<AdminAccount> {
-  const accounts = await listAdminAccounts();
-  const index = accounts.findIndex((account) => account.id === accountId);
-  if (index < 0) {
+  const currentAccount = await getAdminAccountById(accountId);
+  if (!currentAccount) {
     throw new Error("Admin account not found.");
   }
 
-  const currentAccount = accounts[index]!;
   if (!verifyPasswordHash(currentAccount.passwordHash, currentPassword)) {
     throw new Error("Current password is incorrect.");
   }
@@ -278,17 +288,27 @@ export async function changeAdminAccountPassword(
 
   assertValidPassword(nextPassword);
 
+  const supabase = await createAdminClient();
   const now = new Date().toISOString();
-  const updatedAccount: StoredAdminAccount = {
-    ...currentAccount,
-    passwordHash: hashPassword(nextPassword),
-    sessionVersion: currentAccount.sessionVersion + 1,
-    updatedAt: now,
-    passwordChangedAt: now,
-  };
+  const result = await supabase
+    .from("admin_console_accounts")
+    .update({
+      password_hash: hashPassword(nextPassword),
+      session_version: currentAccount.sessionVersion + 1,
+      password_changed_at: now,
+    })
+    .eq("id", accountId)
+    .eq("session_version", currentAccount.sessionVersion)
+    .eq("is_active", true)
+    .select(ADMIN_ACCOUNT_COLUMNS)
+    .maybeSingle();
 
-  const nextAccounts = [...accounts];
-  nextAccounts[index] = updatedAccount;
-  await saveAccounts(nextAccounts);
-  return updatedAccount;
+  if (result.error) {
+    throwReadableDatabaseError(result.error);
+  }
+  if (!result.data) {
+    throw new Error("Admin account changed while this request was running. Please sign in again.");
+  }
+
+  return rowToAdminAccount(result.data as AdminAccountRow);
 }
