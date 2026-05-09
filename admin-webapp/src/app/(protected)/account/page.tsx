@@ -76,7 +76,7 @@ export default async function AccountPage({
         <AdminMetricCard
           label="Directory Size"
           value={accounts.length.toLocaleString("en-US")}
-          description="The local admin directory is ready to hold multiple admin accounts."
+          description="The Supabase-backed admin directory is ready to hold multiple admin accounts."
           icon={<KeyRound className="h-5 w-5" />}
         />
         <AdminMetricCard
@@ -219,7 +219,7 @@ export default async function AccountPage({
         </CardHeader>
         <CardContent className="space-y-4">
           <p className="text-sm leading-6 text-slate-600">
-            The login system now keeps a local admin directory, so this console can grow beyond a single hard-coded administrator.
+            The login system now keeps a Supabase-backed admin directory, so this console can grow beyond a single hard-coded administrator.
           </p>
 
           <div className="overflow-x-auto rounded-2xl border border-slate-200">
