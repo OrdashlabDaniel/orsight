@@ -3,7 +3,7 @@
 The current OrSight billing model is deliberately cash-safe:
 
 - `Free`: capped trial access, no Stripe checkout.
-- `Normal`: $9.99/month with 1,000,000 included AI tokens, hard stop when exhausted.
+- `Normal`: $9.99/month with 10,000,000 included AI tokens, hard stop when exhausted.
 - `Prepaid Usage Credits`: one-time top-up. Customers pay first, then extra AI token usage consumes their prepaid balance.
 
 There is no public postpaid metered plan in the recommended flow. This prevents surprise invoices and keeps OrSight from fronting OpenAI cost before the customer pays.
@@ -19,7 +19,7 @@ Product name: OrSight Normal
 Pricing model: Recurring
 Amount: $9.99 USD
 Billing period: Monthly
-Description: Monthly subscription for OrSight with 1,000,000 included AI tokens.
+Description: Monthly subscription for OrSight with 10,000,000 included AI tokens.
 ```
 
 Copy the recurring monthly price id into:
@@ -47,9 +47,9 @@ Prepaid pay-as-you-go credits for extra OrSight AI tokens.
 
 Recommended price logic:
 
-- Normal effective unit price: $9.99 / 1,000,000 tokens, about $0.01 per 1,000 tokens.
+- Normal effective unit price: $9.99 / 10,000,000 tokens, about $0.001 per 1,000 tokens.
 - Prepaid credit effective unit price: $3 / 30,000 tokens through $10 / 100,000 tokens, about $0.10 per 1,000 tokens.
-- The prepaid path is roughly 10x more expensive than Normal, so recurring users are pushed toward Normal while occasional users can still continue safely.
+- The prepaid path is roughly 100x more expensive than Normal, so recurring users are pushed toward Normal while occasional users can still continue safely.
 
 ## 2. Environment Variables
 
@@ -74,7 +74,7 @@ BILLING_FREE_MONTHLY_CREDITS=750000
 BILLING_FREE_USAGE_UNIT=tokens
 
 BILLING_NORMAL_MONTHLY_FEE_CENTS=999
-BILLING_NORMAL_MONTHLY_CREDITS=1000000
+BILLING_NORMAL_MONTHLY_CREDITS=10000000
 BILLING_NORMAL_USAGE_UNIT=tokens
 
 BILLING_USAGE_CREDIT_30K_TOKENS=30000
@@ -108,6 +108,7 @@ supabase/migrations/20260504_billing_normal_test_plan.sql
 supabase/migrations/20260505_billing_token_packs.sql
 supabase/migrations/20260505_free_trial_budget_and_seat_cap.sql
 supabase/migrations/20260505_prepaid_usage_credit_pack.sql
+supabase/migrations/20260515_normal_monthly_token_quota_10m.sql
 ```
 
 If older `usage` or `metered overage` migrations were already applied, keep them applied. The prepaid migration hides that legacy usage plan from public checkout.
@@ -149,7 +150,7 @@ At launch, only expose `OrSight Normal` in the subscription portal. Prepaid Usag
 Defaults:
 
 - Free: 100 beta seats, 10 images/month, $0.30 internal AI cost cap, hard stop.
-- Normal: $9.99/month, 1,000,000 tokens/month, hard stop.
+- Normal: $9.99/month, 10,000,000 tokens/month, hard stop.
 - Prepaid Usage Credits: $3 / $5 / $7 / $10 one-time top-ups for 30,000 / 50,000 / 70,000 / 100,000 extra tokens.
 
 When a user exceeds Free or Normal quota:

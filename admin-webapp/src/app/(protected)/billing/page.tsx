@@ -91,7 +91,7 @@ export default async function BillingPage({
     <div className="space-y-6">
       <AdminPageHeader
         title="Billing"
-        description="Billing catalog is Free, Normal hard quota, and prepaid Usage Credits. Normal stops at 1,000,000 monthly AI tokens; continued pay-as-you-go usage requires prepaid balance."
+        description="Billing catalog is Free, Normal hard quota, and prepaid Usage Credits. Normal stops at 10,000,000 monthly AI tokens; continued pay-as-you-go usage requires prepaid balance."
         actions={
           <Link
             href="/users"
