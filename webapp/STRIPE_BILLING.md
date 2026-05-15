@@ -54,7 +54,7 @@ Recommended price logic:
 ## 2. Environment Variables
 
 ```env
-BILLING_ENFORCE=false
+BILLING_ENFORCE=true
 NEXT_PUBLIC_APP_URL=https://orsight.com
 STRIPE_SECRET_KEY=sk_live_...
 STRIPE_WEBHOOK_SECRET=whsec_...
@@ -92,7 +92,7 @@ BILLING_PREVIEW_ESTIMATED_TOKENS=75000
 BILLING_GUIDANCE_ESTIMATED_TOKENS=50000
 ```
 
-Only switch `BILLING_ENFORCE=true` after Stripe Checkout, webhook delivery, and Supabase migrations work in Sandbox.
+Production and Vercel Preview deployments enforce billing/quota by default, even if `BILLING_ENFORCE` is missing. To temporarily disable enforcement in a production-like environment, set both `BILLING_ENFORCE=false` and `BILLING_ALLOW_UNENFORCED_BILLING=true`. Do not use that escape hatch for normal beta operation.
 
 ## 3. Supabase Migrations
 
@@ -167,11 +167,11 @@ This makes the app conservative: it should never intentionally let billable AI u
 
 1. Run all migrations in Supabase.
 2. Put Sandbox `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_NORMAL_MONTHLY`, and all four `STRIPE_PRICE_USAGE_CREDIT_*` ids into `.env.local`.
-3. Keep `BILLING_ENFORCE=false` for the first smoke test.
+3. In local development only, you may keep `BILLING_ENFORCE=false` for the first smoke test.
 4. Sign in as a real Supabase user and open `/account`.
 5. Start Normal checkout and complete a Stripe test payment.
 6. Confirm `app_subscriptions` updates through webhooks.
 7. Start Usage Credit checkout and complete a Stripe test payment.
 8. Confirm `app_billing_token_ledger` receives a positive `token_pack_purchase` row.
-9. Turn `BILLING_ENFORCE=true` in Sandbox.
+9. Turn `BILLING_ENFORCE=true` before any Preview, staging, or beta user test.
 10. Exhaust Free or Normal quota with test usage and confirm the app blocks, then resumes only after prepaid credits exist.
