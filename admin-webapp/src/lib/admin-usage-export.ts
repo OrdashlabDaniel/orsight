@@ -121,6 +121,7 @@ async function listUsageLogsForExport(
     let query = sb
       .from("usage_logs")
       .select(USAGE_EXPORT_SELECT_FULL)
+      .neq("action_type", "billing_reservation")
       .gte("created_at", scope.range.startIso)
       .lt("created_at", scope.range.endIso)
       .order("created_at", { ascending: false })
@@ -145,6 +146,7 @@ async function listUsageLogsForExport(
             ? USAGE_EXPORT_SELECT_BASE
             : USAGE_EXPORT_SELECT_WITH_CACHE,
         )
+        .neq("action_type", "billing_reservation")
         .gte("created_at", scope.range.startIso)
         .lt("created_at", scope.range.endIso)
         .order("created_at", { ascending: false })

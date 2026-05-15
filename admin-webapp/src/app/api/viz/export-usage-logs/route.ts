@@ -40,6 +40,7 @@ export async function GET(req: NextRequest) {
     const { data, error } = await sb
       .from("usage_logs")
       .select("id,user_id,action_type,image_count,total_tokens,prompt_tokens,completion_tokens,model_used,created_at")
+      .neq("action_type", "billing_reservation")
       .order("created_at", { ascending: false })
       .limit(10000);
 
@@ -55,6 +56,7 @@ export async function GET(req: NextRequest) {
       .from("usage_logs")
       .select("id,user_id,action_type,image_count,total_tokens,prompt_tokens,completion_tokens,model_used,created_at")
       .eq("user_id", userId)
+      .neq("action_type", "billing_reservation")
       .order("created_at", { ascending: false })
       .limit(10000);
 

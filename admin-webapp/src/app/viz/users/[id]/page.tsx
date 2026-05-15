@@ -85,6 +85,7 @@ export default async function VizUserDetailsPage({
     .from("usage_logs")
     .select("*")
     .eq("user_id", userId)
+    .neq("action_type", "billing_reservation")
     .order("created_at", { ascending: false });
 
   const logsQueryRanged =
