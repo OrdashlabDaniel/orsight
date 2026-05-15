@@ -512,6 +512,7 @@ async function fetchAllLocalUsageRows(
       let query = sb
         .from("usage_logs")
         .select(plan.select)
+        .neq("action_type", "billing_reservation")
         .gte("created_at", range.startIso)
         .lt("created_at", range.endIso)
         .order("created_at", { ascending: false })

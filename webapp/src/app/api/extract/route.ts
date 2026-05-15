@@ -14,6 +14,7 @@ import {
 } from "@/lib/recognition-field-guidance";
 import {
   estimateBillingTokensForAction,
+  finalizeBillingUsageReservation,
   recordBillingUsage,
   requireBillingEntitlement,
   type BillingStatus,
@@ -4295,6 +4296,8 @@ async function runConsistencyCheck(file: File, model: string, ctx: ExtractVision
 export async function POST(request: Request) {
   return withAuthedStorageTenant(async ({ user, skipAuth }) => {
     return withTrainingImageRequestCache(async () => {
+      let billingReservationId: string | null = null;
+      let billingUsageRecorded = false;
       try {
         if (!skipAuth && !user) {
           return NextResponse.json({ error: "请先登录后再使用识别功能。" }, { status: 401 });
@@ -4316,18 +4319,44 @@ export async function POST(request: Request) {
         }
 
         let billingStatus: BillingStatus | null = null;
+        const billingUsage = {
+          quantity: 0,
+          requestCount: 0,
+          promptTokens: 0,
+          completionTokens: 0,
+          totalTokens: 0,
+        };
+        const addBillingUsage = (usage: {
+          quantity: number;
+          requestCount: number;
+          promptTokens: number;
+          completionTokens: number;
+          totalTokens: number;
+        }) => {
+          billingUsage.quantity += Math.max(0, usage.quantity);
+          billingUsage.requestCount += Math.max(0, usage.requestCount);
+          billingUsage.promptTokens += Math.max(0, usage.promptTokens);
+          billingUsage.completionTokens += Math.max(0, usage.completionTokens);
+          billingUsage.totalTokens += Math.max(0, usage.totalTokens);
+        };
         if (user?.id) {
           const entitlement = await requireBillingEntitlement(
             user.id,
             estimateBillingTokensForAction("extract_table", files.length),
+            "extract_table",
           );
           if (!entitlement.ok) {
             return entitlement.response!;
           }
           billingStatus = entitlement.status;
+          billingReservationId = entitlement.reservation?.id || null;
         }
 
         if (requestedRecognitionModel === "max" && !canUseRecognitionModel("max", billingStatus)) {
+          if (billingReservationId) {
+            await finalizeBillingUsageReservation(billingReservationId, "released");
+            billingReservationId = null;
+          }
           return NextResponse.json(
             {
               error: "The gpt-5.5 recognition model is available to active Normal subscribers only.",
@@ -4481,23 +4510,13 @@ export async function POST(request: Request) {
           );
           checkedRecords = consistencyAnalysis.records;
 
-          if (user?.id) {
-            await recordBillingUsage({
-              userId: user.id,
-              actionType: "extract_table",
-              formId,
-              quantity: 1,
-              requestCount: totalRequestCount,
-              promptTokens: totalPromptTokens,
-              completionTokens: totalCompletionTokens,
-              totalTokens,
-              modelUsed: model,
-              openAIProjectId: resolveOpenAIProjectId(formId),
-              openAIApiKeyId: resolveOpenAIApiKeyId(formId),
-              pricingBasisVersion: OPENAI_PRICING_BASIS_VERSION,
-              openAIEndpoint: "/v1/chat/completions",
-            });
-          }
+          addBillingUsage({
+            quantity: 1,
+            requestCount: totalRequestCount,
+            promptTokens: totalPromptTokens,
+            completionTokens: totalCompletionTokens,
+            totalTokens,
+          });
 
           if (docParseWarning) {
             issues.push({
@@ -4648,23 +4667,13 @@ export async function POST(request: Request) {
           totalRequestCount += recoveryResult.usage?.request_count || 1;
         }
 
-        if (user?.id) {
-          await recordBillingUsage({
-            userId: user.id,
-            actionType: "extract_table",
-            formId,
-            quantity: 1,
-            requestCount: totalRequestCount,
-            promptTokens: totalPromptTokens,
-            completionTokens: totalCompletionTokens,
-            totalTokens,
-            modelUsed: model,
-            openAIProjectId: resolveOpenAIProjectId(formId),
-            openAIApiKeyId: resolveOpenAIApiKeyId(formId),
-            pricingBasisVersion: OPENAI_PRICING_BASIS_VERSION,
-            openAIEndpoint: "/v1/chat/completions",
-          });
-        }
+        addBillingUsage({
+          quantity: 1,
+          requestCount: totalRequestCount,
+          promptTokens: totalPromptTokens,
+          completionTokens: totalCompletionTokens,
+          totalTokens,
+        });
 
         if (!checkedRecords.length) {
           issues.push({
@@ -4690,6 +4699,28 @@ export async function POST(request: Request) {
         issues.push(...counterIssues);
       }
 
+      if (user?.id && billingUsage.quantity > 0) {
+        await recordBillingUsage({
+          userId: user.id,
+          actionType: "extract_table",
+          formId,
+          billingReservationId,
+          quantity: billingUsage.quantity,
+          requestCount: billingUsage.requestCount,
+          promptTokens: billingUsage.promptTokens,
+          completionTokens: billingUsage.completionTokens,
+          totalTokens: billingUsage.totalTokens,
+          modelUsed: model,
+          openAIProjectId: resolveOpenAIProjectId(formId),
+          openAIApiKeyId: resolveOpenAIApiKeyId(formId),
+          pricingBasisVersion: OPENAI_PRICING_BASIS_VERSION,
+          openAIEndpoint: "/v1/chat/completions",
+        });
+        billingUsageRecorded = true;
+      } else if (billingReservationId) {
+        await finalizeBillingUsageReservation(billingReservationId, "released");
+      }
+
     return NextResponse.json({
       records: ensureUniquePodRecordIds(records),
       issues,
@@ -4699,6 +4730,9 @@ export async function POST(request: Request) {
       trainingExamplesLoaded: examples.length,
     });
       } catch (error) {
+        if (billingReservationId && !billingUsageRecorded) {
+          await finalizeBillingUsageReservation(billingReservationId, "released");
+        }
         return NextResponse.json(
           {
             error: error instanceof Error ? error.message : "Unknown extraction error.",

@@ -76,6 +76,8 @@ BILLING_FREE_USAGE_UNIT=tokens
 BILLING_NORMAL_MONTHLY_FEE_CENTS=999
 BILLING_NORMAL_MONTHLY_CREDITS=10000000
 BILLING_NORMAL_USAGE_UNIT=tokens
+BILLING_USAGE_RESERVATION_TTL_SECONDS=1200
+BILLING_USE_RESERVATION_RPC=false
 
 BILLING_USAGE_CREDIT_30K_TOKENS=30000
 BILLING_USAGE_CREDIT_30K_PRICE_CENTS=300
@@ -109,6 +111,7 @@ supabase/migrations/20260505_billing_token_packs.sql
 supabase/migrations/20260505_free_trial_budget_and_seat_cap.sql
 supabase/migrations/20260505_prepaid_usage_credit_pack.sql
 supabase/migrations/20260515_normal_monthly_token_quota_10m.sql
+supabase/migrations/20260515_billing_usage_reservations.sql
 ```
 
 If older `usage` or `metered overage` migrations were already applied, keep them applied. The prepaid migration hides that legacy usage plan from public checkout.
@@ -163,6 +166,8 @@ When a user exceeds Free or Normal quota:
 6. When prepaid balance reaches zero, OrSight blocks again before calling OpenAI.
 
 This makes the app conservative: it should never intentionally let billable AI usage continue without either included quota or prepaid token balance.
+
+Concurrent extraction batches reserve estimated tokens before OpenAI calls. The default implementation uses short-lived `usage_logs` reservation rows so quota checks include in-flight work; if `20260515_billing_usage_reservations.sql` has been applied and `BILLING_USE_RESERVATION_RPC=true`, the app uses the stronger Supabase RPC reservation path.
 
 ## 7. Safe Test Sequence
 

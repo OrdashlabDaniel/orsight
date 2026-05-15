@@ -301,6 +301,7 @@ async function loadRecentUsageLogs(
       let query = sb
         .from("usage_logs")
         .select(plan.select)
+        .neq("action_type", "billing_reservation")
         .order("created_at", { ascending: false })
         .range(start, start + pageSize - 1);
 

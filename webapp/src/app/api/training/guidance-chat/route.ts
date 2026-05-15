@@ -167,14 +167,17 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "没有有效的对话内容。" }, { status: 400 });
     }
 
+    let billingReservationId: string | null = null;
     if (user?.id) {
       const entitlement = await requireBillingEntitlement(
         user.id,
         estimateBillingTokensForAction("guidance_chat"),
+        "guidance_chat",
       );
       if (!entitlement.ok) {
         return entitlement.response!;
       }
+      billingReservationId = entitlement.reservation?.id || null;
     }
 
     const rules = seedWorkingRulesFromLegacy(mergeLegacyIntoAgentThreadIfEmpty(await loadGlobalRules(formId)));
@@ -397,6 +400,7 @@ ${fallbackContext}`;
         userId: user.id,
         actionType: "guidance_chat",
         formId,
+        billingReservationId,
         quantity: 1,
         requestCount: trackedUsage.request_count,
         promptTokens: trackedUsage.prompt_tokens,

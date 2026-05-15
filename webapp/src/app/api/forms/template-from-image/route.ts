@@ -61,14 +61,17 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "请先上传表格模板截图。" }, { status: 400 });
     }
 
+    let billingReservationId: string | null = null;
     if (user?.id) {
       const entitlement = await requireBillingEntitlement(
         user.id,
         estimateBillingTokensForAction("template_from_image"),
+        "template_from_image",
       );
       if (!entitlement.ok) {
         return entitlement.response!;
       }
+      billingReservationId = entitlement.reservation?.id || null;
     }
 
     const tracking = buildTrackedOpenAIHeaders({
@@ -128,6 +131,7 @@ export async function POST(request: Request) {
         userId: user.id,
         actionType: "template_from_image",
         formId: "form-1",
+        billingReservationId,
         quantity: 1,
         requestCount: trackedUsage.request_count,
         promptTokens: trackedUsage.prompt_tokens,

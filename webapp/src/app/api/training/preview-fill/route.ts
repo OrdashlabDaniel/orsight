@@ -889,14 +889,17 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "请先上传或粘贴图片。" }, { status: 400 });
     }
 
+    let billingReservationId: string | null = null;
     if (user?.id) {
       const entitlement = await requireBillingEntitlement(
         user.id,
         estimateBillingTokensForAction("preview_fill"),
+        "preview_fill",
       );
       if (!entitlement.ok) {
         return entitlement.response!;
       }
+      billingReservationId = entitlement.reservation?.id || null;
     }
 
     const requestedFields = Array.isArray(body.tableFields)
@@ -1150,6 +1153,7 @@ export async function POST(request: Request) {
           userId: user.id,
           actionType: "preview_fill",
           formId,
+          billingReservationId,
           quantity: 1,
           requestCount: trackedUsage.request_count,
           promptTokens: trackedUsage.prompt_tokens,
@@ -1239,6 +1243,7 @@ export async function POST(request: Request) {
           userId: user.id,
           actionType: "preview_fill",
           formId,
+          billingReservationId,
           quantity: 1,
           requestCount: trackedUsage.request_count,
           promptTokens: trackedUsage.prompt_tokens,

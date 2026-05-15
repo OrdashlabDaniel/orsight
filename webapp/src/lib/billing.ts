@@ -90,6 +90,7 @@ export type BillingStatus = {
   overageUnitName: string;
   tokenPack: TokenPackConfig | null;
   tokenPacks: TokenPackConfig[];
+  usagePeriodStartIso: string;
   canUseAi: boolean;
   upgradeRequired: boolean;
   message: string | null;
@@ -99,6 +100,7 @@ export type UsageLogInput = {
   userId: string;
   actionType: string;
   formId?: string;
+  billingReservationId?: string | null;
   quantity?: number;
   requestCount?: number;
   promptTokens?: number;
@@ -116,6 +118,12 @@ export type UsageLogInput = {
   estimatedCostUsd?: number | null;
   conservativeCostUsd?: number | null;
   pricingBasisVersion?: string | null;
+};
+
+export type BillingReservation = {
+  id: string;
+  usageUnits: number;
+  expiresAtIso: string | null;
 };
 
 type SubscriptionRow = {
@@ -148,6 +156,7 @@ type BillingCustomerRow = {
 type UsageRow = {
   id: string;
   created_at: string | null;
+  action_type?: string | null;
   image_count: number | null;
   total_tokens: number | null;
   estimated_cost_usd?: number | null;
@@ -192,6 +201,8 @@ type PlanConfigRow = {
 };
 
 const ADMIN_OVERRIDE_SUBSCRIPTION_PREFIX = "admin_override_";
+const BILLING_RESERVATION_ACTION = "billing_reservation";
+const USAGE_LOG_RESERVATION_PREFIX = "usage_log:";
 const DEFAULT_TOKEN_PACK_ID: TokenPackId = "usage_credit_100k";
 const USAGE_CREDIT_PACK_IDS: TokenPackId[] = [
   "usage_credit_30k",
@@ -750,6 +761,19 @@ function monthStartIso() {
   return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1, 0, 0, 0)).toISOString();
 }
 
+function usagePeriodStartIsoForPlan(
+  plan: BillingPlanId,
+  billingModel: BillingModel,
+  subscription: SubscriptionRow | null | undefined,
+  entitlements: BillingUserEntitlements,
+) {
+  const calendarMonthStart = monthStartIso();
+  const baseStart =
+    billingModel === "monthly_plus_usage" ? subscription?.current_period_start || calendarMonthStart : calendarMonthStart;
+
+  return plan === "free" ? laterIso(baseStart, entitlements.freeQuotaResetAfterIso) : baseStart;
+}
+
 function finiteUnixSeconds(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
@@ -946,19 +970,21 @@ async function loadUsageRows(ownerId: string, sinceIso: string): Promise<UsageRo
   if (!admin) return [];
 
   const richSelect =
-    "id,created_at,image_count,total_tokens,estimated_cost_usd,conservative_cost_usd";
+    "id,created_at,action_type,image_count,total_tokens,estimated_cost_usd,conservative_cost_usd";
   const { data, error } = await admin
     .from("usage_logs")
     .select(richSelect)
     .eq("user_id", ownerId)
-    .gte("created_at", sinceIso);
+    .gte("created_at", sinceIso)
+    .neq("action_type", BILLING_RESERVATION_ACTION);
 
   if (error) {
     const { data: fallbackData, error: fallbackError } = await admin
       .from("usage_logs")
-      .select("id,created_at,image_count,total_tokens")
+      .select("id,created_at,action_type,image_count,total_tokens")
       .eq("user_id", ownerId)
-      .gte("created_at", sinceIso);
+      .gte("created_at", sinceIso)
+      .neq("action_type", BILLING_RESERVATION_ACTION);
 
     if (fallbackError) {
       console.error("Failed to load billing usage:", fallbackError);
@@ -1137,6 +1163,285 @@ async function loadTokenLedgerSummary(ownerId: string) {
     balance,
     available: Math.max(0, balance),
   };
+}
+
+type BillingUsageReservationResult = {
+  ok: boolean;
+  reason: string | null;
+  reservation: BillingReservation | null;
+  usedUnits: number;
+  reservedUnits: number;
+  effectiveLimitUnits: number;
+  remainingUnits: number;
+};
+
+function numberFromRpc(value: unknown) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function parseReservationRpcResult(raw: unknown): BillingUsageReservationResult {
+  const value = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  const reservationId = typeof value.reservation_id === "string" ? value.reservation_id : "";
+  const expiresAtRaw = value.expires_at;
+  const expiresAtIso =
+    typeof expiresAtRaw === "string" && Number.isFinite(new Date(expiresAtRaw).getTime())
+      ? new Date(expiresAtRaw).toISOString()
+      : null;
+
+  return {
+    ok: value.ok === true,
+    reason: typeof value.reason === "string" ? value.reason : null,
+    reservation: reservationId
+      ? {
+          id: reservationId,
+          usageUnits: Math.max(0, numberFromRpc(value.requested_units)),
+          expiresAtIso,
+        }
+      : null,
+    usedUnits: Math.max(0, numberFromRpc(value.used_units)),
+    reservedUnits: Math.max(0, numberFromRpc(value.reserved_units)),
+    effectiveLimitUnits: Math.max(0, numberFromRpc(value.effective_limit_units)),
+    remainingUnits: Math.max(0, numberFromRpc(value.remaining_units)),
+  };
+}
+
+async function reserveBillingUsageWithUsageLog(
+  ownerId: string,
+  status: BillingStatus,
+  requestedUsage: number,
+  actionType?: string,
+): Promise<BillingUsageReservationResult> {
+  const requested = Math.max(1, Math.trunc(Number(requestedUsage) || 1));
+  const admin = getSupabaseAdmin();
+  const usesTokens = usesTokenUnits({ overageUnitName: status.overageUnitName });
+  const ttlSeconds = Math.max(60, intEnv("BILLING_USAGE_RESERVATION_TTL_SECONDS", 1200));
+  const expiresBeforeIso = new Date(Date.now() - ttlSeconds * 1000).toISOString();
+  const effectiveLimit = Math.max(0, status.monthlyQuota + status.prepaidTokensAvailable);
+  const reservationSource = (actionType || "ai_request").trim().slice(0, 80);
+
+  if (!admin) {
+    return {
+      ok: false,
+      reason: "supabase_service_role_missing",
+      reservation: null,
+      usedUnits: status.monthlyUsed,
+      reservedUnits: 0,
+      effectiveLimitUnits: effectiveLimit,
+      remainingUnits: Math.max(0, status.effectiveRemaining ?? 0),
+    };
+  }
+
+  await admin
+    .from("usage_logs")
+    .delete()
+    .eq("user_id", ownerId)
+    .eq("action_type", BILLING_RESERVATION_ACTION)
+    .lt("created_at", expiresBeforeIso);
+
+  const { data: reservationRow, error: reservationError } = await admin
+    .from("usage_logs")
+    .insert({
+      user_id: ownerId,
+      action_type: BILLING_RESERVATION_ACTION,
+      image_count: usesTokens ? 0 : requested,
+      request_count: 0,
+      prompt_tokens: 0,
+      cached_input_tokens: 0,
+      completion_tokens: 0,
+      total_tokens: usesTokens ? requested : 0,
+      model_used: "billing-reservation",
+      openai_endpoint: `billing:${reservationSource}`,
+      pricing_basis_version: OPENAI_PRICING_BASIS_VERSION,
+      created_at: new Date().toISOString(),
+    })
+    .select("id,created_at")
+    .single();
+
+  if (reservationError || !reservationRow?.id) {
+    console.error("Failed to create usage-log billing reservation:", reservationError);
+    return {
+      ok: false,
+      reason: "reservation_failed",
+      reservation: null,
+      usedUnits: status.monthlyUsed,
+      reservedUnits: 0,
+      effectiveLimitUnits: effectiveLimit,
+      remainingUnits: Math.max(0, status.effectiveRemaining ?? 0),
+    };
+  }
+
+  const { data: rows, error: usageError } = await admin
+    .from("usage_logs")
+    .select("id,action_type,image_count,total_tokens,created_at")
+    .eq("user_id", ownerId)
+    .gte("created_at", status.usagePeriodStartIso);
+
+  if (usageError) {
+    console.error("Failed to verify usage-log billing reservation:", usageError);
+    await finalizeBillingUsageReservation(`${USAGE_LOG_RESERVATION_PREFIX}${reservationRow.id}`, "released");
+    return {
+      ok: false,
+      reason: "reservation_failed",
+      reservation: null,
+      usedUnits: status.monthlyUsed,
+      reservedUnits: 0,
+      effectiveLimitUnits: effectiveLimit,
+      remainingUnits: Math.max(0, status.effectiveRemaining ?? 0),
+    };
+  }
+
+  let usedUnits = 0;
+  let reservedUnits = 0;
+  for (const row of (rows ?? []) as UsageRow[]) {
+    if (
+      row.action_type === BILLING_RESERVATION_ACTION &&
+      row.created_at &&
+      new Date(row.created_at).getTime() < new Date(expiresBeforeIso).getTime()
+    ) {
+      continue;
+    }
+    const units = usesTokens ? Number(row.total_tokens ?? 0) : Number(row.image_count ?? 0);
+    const safeUnits = Math.max(0, Number.isFinite(units) ? units : 0);
+    if (row.action_type === BILLING_RESERVATION_ACTION) {
+      reservedUnits += safeUnits;
+    } else {
+      usedUnits += safeUnits;
+    }
+  }
+
+  const remaining = effectiveLimit - usedUnits - reservedUnits;
+  if (remaining < 0) {
+    await finalizeBillingUsageReservation(`${USAGE_LOG_RESERVATION_PREFIX}${reservationRow.id}`, "released");
+    return {
+      ok: false,
+      reason: "quota_exceeded",
+      reservation: null,
+      usedUnits,
+      reservedUnits: Math.max(0, reservedUnits - requested),
+      effectiveLimitUnits: effectiveLimit,
+      remainingUnits: 0,
+    };
+  }
+
+  return {
+    ok: true,
+    reason: "reserved_usage_log",
+    reservation: {
+      id: `${USAGE_LOG_RESERVATION_PREFIX}${reservationRow.id}`,
+      usageUnits: requested,
+      expiresAtIso: new Date(Date.now() + ttlSeconds * 1000).toISOString(),
+    },
+    usedUnits,
+    reservedUnits,
+    effectiveLimitUnits: effectiveLimit,
+    remainingUnits: Math.max(0, remaining),
+  };
+}
+
+async function reserveBillingUsageForStatus(
+  ownerId: string,
+  status: BillingStatus,
+  requestedUsage: number,
+  actionType?: string,
+): Promise<BillingUsageReservationResult> {
+  const requested = Math.max(1, Math.trunc(Number(requestedUsage) || 1));
+  if (status.monthlyQuota < 0) {
+    return {
+      ok: true,
+      reason: "unlimited",
+      reservation: null,
+      usedUnits: status.monthlyUsed,
+      reservedUnits: 0,
+      effectiveLimitUnits: Number.MAX_SAFE_INTEGER,
+      remainingUnits: Number.MAX_SAFE_INTEGER,
+    };
+  }
+
+  if (!boolEnv("BILLING_USE_RESERVATION_RPC", false)) {
+    return reserveBillingUsageWithUsageLog(ownerId, status, requested, actionType);
+  }
+
+  const admin = getSupabaseAdmin();
+  if (!admin) {
+    return {
+      ok: false,
+      reason: "supabase_service_role_missing",
+      reservation: null,
+      usedUnits: status.monthlyUsed,
+      reservedUnits: 0,
+      effectiveLimitUnits: Math.max(0, status.monthlyQuota + status.prepaidTokensAvailable),
+      remainingUnits: Math.max(0, status.effectiveRemaining ?? 0),
+    };
+  }
+
+  const { data, error } = await admin.rpc("reserve_billing_usage", {
+    p_owner_id: ownerId,
+    p_plan_id: status.plan,
+    p_billing_model: status.billingModel,
+    p_period_start: status.usagePeriodStartIso,
+    p_quota_units: status.monthlyQuota,
+    p_prepaid_available_units: status.prepaidTokensAvailable,
+    p_requested_units: requested,
+    p_uses_token_units: usesTokenUnits({ overageUnitName: status.overageUnitName }),
+    p_action_type: actionType || null,
+    p_reservation_ttl_seconds: intEnv("BILLING_USAGE_RESERVATION_TTL_SECONDS", 1200),
+    p_metadata: {
+      source: "require_billing_entitlement",
+      requested_usage: requested,
+      plan: status.plan,
+      billing_model: status.billingModel,
+    },
+  });
+
+  if (error) {
+    console.error("Failed to reserve billing usage:", error);
+    return reserveBillingUsageWithUsageLog(ownerId, status, requested, actionType);
+  }
+
+  return parseReservationRpcResult(data);
+}
+
+export async function finalizeBillingUsageReservation(
+  reservationId: string | null | undefined,
+  status: "consumed" | "released" = "consumed",
+  usageLogId?: string | null,
+) {
+  if (!reservationId) return;
+  const admin = getSupabaseAdmin();
+  if (!admin) return;
+
+  if (reservationId.startsWith(USAGE_LOG_RESERVATION_PREFIX)) {
+    const usageReservationId = reservationId.slice(USAGE_LOG_RESERVATION_PREFIX.length);
+    if (!usageReservationId) return;
+    const { error } = await admin
+      .from("usage_logs")
+      .delete()
+      .eq("id", usageReservationId)
+      .eq("action_type", BILLING_RESERVATION_ACTION);
+    if (error) {
+      console.error("Failed to delete usage-log billing reservation:", error);
+    }
+    return;
+  }
+
+  const update: Record<string, string | null> = {
+    status,
+    updated_at: new Date().toISOString(),
+  };
+  if (usageLogId) {
+    update.usage_log_id = usageLogId;
+  }
+
+  const { error } = await admin
+    .from("app_billing_usage_reservations")
+    .update(update)
+    .eq("id", reservationId)
+    .eq("status", "active");
+
+  if (error) {
+    console.error("Failed to finalize billing usage reservation:", error);
+  }
 }
 
 function orderedUsageRows(rows: UsageRow[]) {
@@ -1456,10 +1761,7 @@ export async function getBillingStatusForUser(ownerId: string): Promise<BillingS
         stripeMeterEventName: null,
       }
     : basePlanConfig;
-  const periodStart = subscription?.current_period_start || monthStartIso();
-  const usageStart = !lifetimeFree && plan === "free"
-    ? laterIso(periodStart, billingEntitlements.freeQuotaResetAfterIso)
-    : periodStart;
+  const usageStart = usagePeriodStartIsoForPlan(plan, planConfig.billingModel, subscription, billingEntitlements);
   const usageRows = await loadUsageRows(ownerId, usageStart);
   const used = sumUsage(usageRows, planConfig);
   const monthlyImagesUsed = sumUsageImages(usageRows);
@@ -1583,6 +1885,7 @@ export async function getBillingStatusForUser(ownerId: string): Promise<BillingS
     overageUnitName: planConfig.overageUnitName,
     tokenPack: defaultTokenPack,
     tokenPacks: availableTokenPacks,
+    usagePeriodStartIso: usageStart,
     canUseAi: lifetimeFree ? true : !configured ? !enforced : canUseAi,
     upgradeRequired: lifetimeFree ? false : configured ? !canUseAi : enforced,
     message:
@@ -1595,13 +1898,15 @@ export async function getBillingStatusForUser(ownerId: string): Promise<BillingS
 export async function requireBillingEntitlement(
   ownerId: string,
   quantity = 1,
+  actionType?: BillingUsageAction | string,
 ): Promise<{
   ok: boolean;
   status: BillingStatus;
+  reservation?: BillingReservation | null;
   response?: Response;
 }> {
   const status = await getBillingStatusForUser(ownerId);
-  const requested = Math.max(1, quantity);
+  const requested = Math.max(1, Math.trunc(Number(quantity) || 1));
 
   if (status.lifetimeFree) {
     return { ok: true, status };
@@ -1616,6 +1921,9 @@ export async function requireBillingEntitlement(
       return { ok: true, status };
     }
   } else {
+    let effectiveStatus = status;
+    let prepaidOverride = false;
+
     if (status.plan === "free") {
       const requestCostCents = centsFromUsd(
         estimateFreeRequestCostUsd(requested, {
@@ -1691,38 +1999,67 @@ export async function requireBillingEntitlement(
         }
 
         if (!claimedSeat.available && hasPrepaidForRequest) {
-          return {
-            ok: true,
-            status: {
-              ...status,
-              freeSeatLimit: claimedSeat.limit,
-              freeSeatsUsed: claimedSeat.used,
-              freeSeatClaimed: claimedSeat.claimed,
-              freeSeatAvailable: false,
-              canUseAi: true,
-              upgradeRequired: false,
-              message: null,
-            },
+          prepaidOverride = true;
+          effectiveStatus = {
+            ...effectiveStatus,
+            freeSeatLimit: claimedSeat.limit,
+            freeSeatsUsed: claimedSeat.used,
+            freeSeatClaimed: claimedSeat.claimed,
+            freeSeatAvailable: false,
+            canUseAi: true,
+            upgradeRequired: false,
+            message: null,
           };
         }
       }
 
       if (needsPrepaidTokens && hasPrepaidForRequest) {
-        return {
-          ok: true,
-          status: {
-            ...status,
-            canUseAi: true,
-            upgradeRequired: false,
-            message: null,
-          },
+        prepaidOverride = true;
+        effectiveStatus = {
+          ...effectiveStatus,
+          canUseAi: true,
+          upgradeRequired: false,
+          message: null,
         };
       }
     }
 
-    const enough = status.effectiveRemaining == null || status.effectiveRemaining >= requested;
-    if (status.canUseAi && enough) {
-      return { ok: true, status };
+    const enough = effectiveStatus.effectiveRemaining == null || effectiveStatus.effectiveRemaining >= requested;
+    if ((effectiveStatus.canUseAi || prepaidOverride) && enough) {
+      const reservationResult = await reserveBillingUsageForStatus(ownerId, effectiveStatus, requested, actionType);
+      if (reservationResult.ok) {
+        return { ok: true, status: effectiveStatus, reservation: reservationResult.reservation };
+      }
+
+      const message =
+        reservationResult.reason === "quota_exceeded"
+          ? "Your monthly AI token quota has been used. Buy prepaid usage credits or manage your subscription to continue."
+          : "Billing quota could not be reserved. Please try again before continuing.";
+
+      const blockedStatus = {
+        ...effectiveStatus,
+        canUseAi: false,
+        upgradeRequired: true,
+        message,
+      };
+
+      return {
+        ok: false,
+        status: blockedStatus,
+        response: Response.json(
+          {
+            error: message,
+            code: reservationResult.reason === "quota_exceeded" ? "billing_required" : "billing_reservation_failed",
+            requestedTokens: requested,
+            usedTokens: reservationResult.usedUnits,
+            reservedTokens: reservationResult.reservedUnits,
+            effectiveLimitTokens: reservationResult.effectiveLimitUnits,
+            remainingTokens: reservationResult.remainingUnits,
+            billing: blockedStatus,
+          },
+          { status: 402 },
+        ),
+      };
     }
   }
 
@@ -1802,8 +2139,11 @@ export async function recordBillingUsage(input: UsageLogInput) {
 
   if (error) {
     console.error("Failed to record billing usage:", error);
+    await finalizeBillingUsageReservation(input.billingReservationId, "released");
     return;
   }
+
+  await finalizeBillingUsageReservation(input.billingReservationId, "consumed", data.id);
 
   const billingEntitlements = await loadBillingUserEntitlements(input.userId);
   if (billingEntitlements.lifetimeFree) {
@@ -1814,9 +2154,7 @@ export async function recordBillingUsage(input: UsageLogInput) {
   const usableSubscription = isSubscriptionUsable(subscription?.status);
   const plan = usableSubscription ? normalizeBillingPlan(subscription?.plan) || "free" : "free";
   const planConfig = await getBillingPlanConfig(plan);
-  const currentPeriodStart = usableSubscription ? subscription?.current_period_start || monthStartIso() : monthStartIso();
-  const usageStart =
-    plan === "free" ? laterIso(currentPeriodStart, billingEntitlements.freeQuotaResetAfterIso) : currentPeriodStart;
+  const usageStart = usagePeriodStartIsoForPlan(plan, planConfig.billingModel, subscription, billingEntitlements);
   const usageRows = await loadUsageRows(input.userId, usageStart);
 
   if (planConfig.billingModel === "free_quota" || planConfig.billingModel === "monthly_quota") {
