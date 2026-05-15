@@ -492,10 +492,10 @@ function fallbackPlanConfig(planId: BillingPlanId): BillingPlanConfig {
     return {
       planId,
       displayName: "Normal",
-      description: "Monthly subscription with a hard 1,000,000 AI token quota.",
+      description: "Monthly subscription with a hard 10,000,000 AI token quota.",
       billingModel: "monthly_quota",
       monthlyBaseCents: intEnv("BILLING_NORMAL_MONTHLY_FEE_CENTS", 999),
-      includedCredits: intEnv("BILLING_NORMAL_MONTHLY_CREDITS", 1_000_000),
+      includedCredits: intEnv("BILLING_NORMAL_MONTHLY_CREDITS", 10_000_000),
       overageUnitCents: 0,
       overageUnitName: env("BILLING_NORMAL_USAGE_UNIT") || "tokens",
       currency: normalizeCurrency(env("BILLING_CURRENCY") || "usd"),

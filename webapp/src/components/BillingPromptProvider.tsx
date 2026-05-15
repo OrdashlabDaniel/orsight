@@ -216,7 +216,7 @@ export function BillingPromptProvider({ children }: { children: ReactNode }) {
   const tokenPacks = billing?.tokenPacks || [];
   const hasNormalPlan = billing?.plan === "normal";
   const normalPriceLabel = formatCurrency(billing?.plan === "normal" ? billing.monthlyBaseCents : 999);
-  const normalQuota = billing?.plan === "normal" ? billing.monthlyQuota : 1_000_000;
+  const normalQuota = billing?.plan === "normal" ? billing.monthlyQuota : 10_000_000;
 
   return (
     <>
