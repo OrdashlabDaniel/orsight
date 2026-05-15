@@ -457,6 +457,7 @@ function buildAdminUserSummary(
   planConfigs: BillingPlanConfig[],
   usageLogs: AdminUsageLogRow[],
   billingControlFlagsByOwner: Map<string, BillingControlFlags>,
+  planUsageStartIso?: string | null,
 ): AdminUserSummary {
   const subscriptions = subscriptionsByOwner.get(user.id) || [];
   const effectiveSubscription = pickEffectiveSubscription(subscriptions);
@@ -467,7 +468,7 @@ function buildAdminUserSummary(
     billingControlFlagsByOwner.get(user.id.toLowerCase()) || defaultBillingControlFlags();
   const lifetimeFree = billingControlFlags.lifetimeFree;
   const planConfig = getPlanConfigMap(planConfigs).get(effectivePlan) || planConfigs[0]!;
-  const periodStart = effectiveSubscription?.current_period_start || monthStartIso();
+  const periodStart = planUsageStartIso || effectiveSubscription?.current_period_start || monthStartIso();
   const usedThisPeriod = usageLogs.reduce((sum, log) => {
     if (log.user_id !== user.id) {
       return sum;
@@ -598,6 +599,7 @@ async function loadAdminDataset(
         billingBundle.planConfigs,
         usageLogs,
         billingControlFlagsByOwner,
+        usageRange?.startIso,
       ),
     )
     .sort((a, b) => {
@@ -722,6 +724,7 @@ export async function loadAdminUsageBoardSnapshot(
 
 export async function loadAdminUserDetailSnapshot(
   userId: string,
+  usageRange?: AdminTimeRange,
 ): Promise<AdminUserDetailSnapshot | null> {
   const sb = await createAdminClient();
   const warnings: string[] = [];
@@ -732,7 +735,7 @@ export async function loadAdminUserDetailSnapshot(
   }
 
   const [usageLogs, adminRows, billingBundle] = await Promise.all([
-    loadRecentUsageLogs(sb, USER_DETAIL_LOG_LIMIT, userId),
+    loadRecentUsageLogs(sb, USER_DETAIL_LOG_LIMIT, userId, usageRange),
     sb.from("admin_users").select("id"),
     loadBillingBundle(sb, [userId]).catch((error) => {
       pushWarning(warnings, error instanceof Error ? error.message : "无法读取 billing 数据");
@@ -778,6 +781,7 @@ export async function loadAdminUserDetailSnapshot(
     billingBundle.planConfigs,
     usageLogs.rows,
     billingControlFlagsByOwner,
+    usageRange?.startIso,
   );
 
   return {

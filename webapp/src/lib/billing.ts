@@ -449,8 +449,34 @@ export function isBillingConfigured() {
   return Boolean(env("STRIPE_SECRET_KEY") && env("STRIPE_WEBHOOK_SECRET") && isSupabaseServiceRoleConfigured());
 }
 
+function isProductionLikeRuntime() {
+  const vercelEnv = env("VERCEL_ENV").toLowerCase();
+  return (
+    env("VERCEL") === "1" ||
+    vercelEnv === "production" ||
+    vercelEnv === "preview" ||
+    process.env.NODE_ENV === "production"
+  );
+}
+
+function isExplicitFalse(value: string) {
+  const normalized = value.trim().toLowerCase();
+  return normalized === "0" || normalized === "false" || normalized === "no" || normalized === "off";
+}
+
 export function isBillingEnforced() {
-  return boolEnv("BILLING_ENFORCE", false);
+  const raw = env("BILLING_ENFORCE");
+  const productionLike = isProductionLikeRuntime();
+
+  if (!raw) {
+    return productionLike;
+  }
+
+  if (isExplicitFalse(raw)) {
+    return productionLike ? boolEnv("BILLING_ALLOW_UNENFORCED_BILLING", false) : false;
+  }
+
+  return boolEnv("BILLING_ENFORCE", productionLike);
 }
 
 export function getStripe(): Stripe | null {
@@ -988,7 +1014,11 @@ function getFreeSeatLimit() {
 }
 
 function getFreeMonthlyImageLimit() {
+  const rawExplicit = env("BILLING_FREE_MONTHLY_IMAGE_LIMIT");
   const explicit = intEnv("BILLING_FREE_MONTHLY_IMAGE_LIMIT", 0);
+  if (rawExplicit && explicit <= 0) {
+    return null;
+  }
   if (explicit > 0) {
     return explicit;
   }

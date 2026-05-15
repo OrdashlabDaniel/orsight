@@ -81,18 +81,18 @@ export function BillingPromptProvider({ children }: { children: ReactNode }) {
 
         setBilling(payload.billing);
 
+        if (payload.billing.enabled && !payload.billing.lifetimeFree && payload.billing.upgradeRequired) {
+          setReason("quota");
+          setOpen(true);
+          return payload.billing;
+        }
+
         if (!shouldPromoteBilling(payload.billing)) {
           if (!options?.keepOpen) {
             setOpen(false);
             setBusy(null);
             setError(null);
           }
-          return payload.billing;
-        }
-
-        if (payload.billing.upgradeRequired) {
-          setReason("quota");
-          setOpen(true);
           return payload.billing;
         }
 

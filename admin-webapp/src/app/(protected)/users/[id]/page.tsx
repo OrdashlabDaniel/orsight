@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { ArrowLeft, CreditCard, ShieldCheck, Trash2, UserRound } from "lucide-react";
+import { ArrowLeft, CalendarRange, CreditCard, ShieldCheck, Trash2, UserRound } from "lucide-react";
 
 import { AdminMetricCard } from "@/components/AdminMetricCard";
 import { AdminPageHeader } from "@/components/AdminPageHeader";
@@ -14,6 +14,14 @@ import {
   shortId,
 } from "@/lib/billing-admin";
 import { loadAdminUserDetailSnapshot } from "@/lib/admin-data";
+import {
+  ADMIN_RANGE_PRESET_OPTIONS,
+  buildCurrentBillingMonthRange,
+  buildAdminTimeRange,
+  currentUtcBillingMonth,
+  listRecentUtcBillingMonths,
+  type AdminTimeRange,
+} from "@/lib/admin-time-range";
 
 import {
   changeStripePlanAction,
@@ -38,6 +46,152 @@ function asText(value: string | string[] | undefined) {
   return typeof value === "string" ? value : null;
 }
 
+function asNumber(value: string | string[] | undefined) {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function buildUserDetailHref(params: {
+  userId: string;
+  month?: string | null;
+  days?: number | null;
+  startDate?: string | null;
+  endDate?: string | null;
+}) {
+  const search = new URLSearchParams();
+  if (params.month) {
+    search.set("month", params.month);
+  } else if (params.startDate && params.endDate) {
+    search.set("startDate", params.startDate);
+    search.set("endDate", params.endDate);
+  } else if (params.days) {
+    search.set("days", String(params.days));
+  }
+  const query = search.toString();
+  return query ? `/users/${params.userId}?${query}` : `/users/${params.userId}`;
+}
+
+function buildUsageBoardHref(params: { userId: string; range: AdminTimeRange }) {
+  const search = new URLSearchParams();
+  search.set("userId", params.userId);
+  search.set("startDate", params.range.startDateLabel);
+  search.set("endDate", params.range.endDateLabel);
+  return `/usage-board?${search.toString()}`;
+}
+
+function UserTimeRangeControls({
+  userId,
+  range,
+}: {
+  userId: string;
+  range: AdminTimeRange;
+}) {
+  const selectedPresetDays = range.mode === "preset" ? range.days : null;
+  const selectedMonth = range.mode === "month" ? range.startDateLabel.slice(0, 7) : null;
+  const recentBillingMonths = listRecentUtcBillingMonths(6);
+
+  return (
+    <Card className="border-slate-200">
+      <CardHeader className="border-b border-slate-100 bg-white">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+          <div>
+            <CardTitle className="text-base text-slate-950">User Usage Window</CardTitle>
+            <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-600">
+              Filter this user&apos;s usage cards, charts, model mix, and recent usage events by billing month or UTC
+              date range. Monthly shortcuts use the same calendar-month boundaries as Free/Normal quota accounting.
+            </p>
+          </div>
+          <div className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-[12px] text-slate-600">
+            <CalendarRange className="h-4 w-4" />
+            Current UTC range: <span className="font-medium text-slate-900">{range.rangeLabel}</span>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-4 p-4">
+        <div>
+          <div className="mb-2 text-[12px] font-semibold uppercase tracking-wide text-slate-500">Billing months</div>
+          <div className="flex flex-wrap gap-2">
+            {recentBillingMonths.map((month) => {
+              const selected = month === selectedMonth;
+              return (
+                <Link
+                  key={month}
+                  href={buildUserDetailHref({ userId, month })}
+                  className={`inline-flex items-center rounded-xl border px-3 py-1.5 text-[12px] font-medium transition ${
+                    selected
+                      ? "border-slate-950 bg-slate-950 text-white"
+                      : "border-slate-300 bg-white text-slate-600 hover:bg-slate-50"
+                  }`}
+                >
+                  {month}
+                </Link>
+              );
+            })}
+          </div>
+        </div>
+
+        <div className="flex flex-wrap gap-2">
+          <span className="inline-flex items-center px-1 text-[12px] font-semibold uppercase tracking-wide text-slate-500">
+            Rolling
+          </span>
+          {ADMIN_RANGE_PRESET_OPTIONS.map((days) => {
+            const selected = days === selectedPresetDays;
+            return (
+              <Link
+                key={days}
+                href={buildUserDetailHref({ userId, days })}
+                className={`inline-flex items-center rounded-xl border px-3 py-1.5 text-[12px] font-medium transition ${
+                  selected
+                    ? "border-slate-950 bg-slate-950 text-white"
+                    : "border-slate-300 bg-white text-slate-600 hover:bg-slate-50"
+                }`}
+              >
+                {days}d
+              </Link>
+            );
+          })}
+          <Link
+            href={buildUserDetailHref({ userId, month: currentUtcBillingMonth() })}
+            className="inline-flex items-center rounded-xl border border-slate-300 bg-white px-3 py-1.5 text-[12px] font-medium text-slate-600 hover:bg-slate-50"
+          >
+            Current month
+          </Link>
+        </div>
+
+        <form method="GET" className="grid gap-3 rounded-2xl border border-slate-200 bg-slate-50/60 p-4 md:grid-cols-2 xl:grid-cols-[1fr_1fr_auto] xl:items-end">
+          <label className="grid gap-1.5 text-[12px] font-medium text-slate-600">
+            Start date (UTC)
+            <input
+              type="date"
+              name="startDate"
+              defaultValue={range.startDateLabel}
+              className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-[13px] text-slate-900 outline-none transition focus:border-slate-950"
+            />
+          </label>
+          <label className="grid gap-1.5 text-[12px] font-medium text-slate-600">
+            End date (UTC)
+            <input
+              type="date"
+              name="endDate"
+              defaultValue={range.endDateLabel}
+              className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-[13px] text-slate-900 outline-none transition focus:border-slate-950"
+            />
+          </label>
+          <button
+            type="submit"
+            className="inline-flex h-[40px] items-center justify-center rounded-xl bg-slate-950 px-4 text-[13px] font-medium text-white shadow-sm hover:bg-slate-800"
+          >
+            Apply time window
+          </button>
+        </form>
+      </CardContent>
+    </Card>
+  );
+}
+
 function planPillClass(planId: string) {
   if (planId === "lifetime") return "bg-rose-50 text-rose-700 ring-rose-200";
   if (planId === "normal") return "bg-emerald-50 text-emerald-700 ring-emerald-200";
@@ -60,8 +214,16 @@ export default async function UserDetailPage({
   searchParams?: Promise<SearchParams>;
 }) {
   const { id } = await params;
-  const snapshot = await loadAdminUserDetailSnapshot(id);
   const sp = searchParams ? await searchParams : {};
+  const month = asText(sp.month);
+  const days = asNumber(sp.days);
+  const startDate = asText(sp.startDate);
+  const endDate = asText(sp.endDate);
+  const range =
+    month || days || (startDate && endDate)
+      ? buildAdminTimeRange({ month, days, startDate, endDate })
+      : buildCurrentBillingMonthRange();
+  const snapshot = await loadAdminUserDetailSnapshot(id, range);
   const notice = asText(sp.notice);
   const err = asText(sp.err);
 
@@ -105,7 +267,7 @@ export default async function UserDetailPage({
           Users
         </Link>
         <Link
-          href={`/usage-board?userId=${summary.user.id}`}
+          href={buildUsageBoardHref({ userId: summary.user.id, range })}
           className="inline-flex items-center gap-2 rounded-2xl border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 shadow-sm hover:bg-slate-50"
         >
           Open Usage Board
@@ -117,6 +279,8 @@ export default async function UserDetailPage({
         title={summary.label}
         description="Single place for identity, billing controls, usage visibility, and destructive user operations."
       />
+
+      <UserTimeRangeControls userId={summary.user.id} range={range} />
 
       {notice ? (
         <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-950">
