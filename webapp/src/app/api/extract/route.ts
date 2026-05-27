@@ -8,20 +8,21 @@ import {
   resolveOpenAIApiKeyId,
   resolveOpenAIProjectId,
 } from "@/lib/openai-accounting";
+import { openAIReasoningEffortForModel } from "@/lib/openai-reasoning";
 import {
   buildRecognitionFieldGuidancePromptSection,
   extractRecognitionFieldGuidanceFromWorkingRules,
 } from "@/lib/recognition-field-guidance";
 import {
-  estimateBillingTokensForAction,
+  estimateBillingCreditsForAction,
   finalizeBillingUsageReservation,
+  getBillingStatusForUser,
   recordBillingUsage,
   requireBillingEntitlement,
-  type BillingStatus,
 } from "@/lib/billing";
 import {
-  canUseRecognitionModel,
   normalizeRecognitionModelKey,
+  RECOGNITION_MODEL_OPTIONS,
   type RecognitionModelKey,
 } from "@/lib/recognition-models";
 import {
@@ -82,6 +83,12 @@ const RECOVERY_UPSCALE_MIN_EDGE = 1600;
 const RECOVERY_UPSCALE_TARGET_EDGE = 2000;
 const RECOVERY_UPSCALE_MAX_SCALE = 2.5;
 
+function planRank(plan: string | null | undefined) {
+  if (plan === "pro") return 2;
+  if (plan === "normal") return 1;
+  return 0;
+}
+
 function resolveOpenAIModelForRecognition(key: RecognitionModelKey): string {
   if (key === "max") {
     return OPENAI_MAX_MODEL;
@@ -91,46 +98,6 @@ function resolveOpenAIModelForRecognition(key: RecognitionModelKey): string {
   }
   return OPENAI_PRIMARY_MODEL;
 }
-
-const SIMPLE_EXTRACTION_PROMPT = `你是 OrSight。你会先看到几张人工标注参考图，再看到最后一张当前待识别图片。请严格遵守：
-1. 参考图只用于理解界面布局、字段标签和示例，不得抄参考图中的任何数字或文字。
-2. 最终输出只能依据最后一张“当前待识别图片”的可见内容。
-3. 不要猜测；看不清、标签不明确、值和字段对不上时，就留空并把 reviewRequired 设为 true，reviewReason 写清原因。
-4. 如果当前图里存在多个任务或多行记录，请为每个清晰可见的任务输出一条 records。
-5. route 只填写快递员路线；像 IAH-BAA、IAH-BCE 这类站点车队代码应写入 stationTeam，不要误填 route。
-6. total 只填写与“应领件数 / 应收件数 / 运单数量”等直接对应的值，并把原标签写入 totalSourceLabel。
-7. unscanned 只填写与“未领取 / 未收”直接对应的值。
-8. exceptions 只填写与“错扫 / 错分 / 误扫”直接对应的值。
-9. customFieldValues 只填写当前图中有清晰标签和值、且与当前表格项目对应的字段；键必须严格使用字段 id。
-
-返回 JSON：
-{
-  "imageType": "POD" | "WEB_TABLE" | "OTHER",
-  "records": []
-}
-
-不要输出 Markdown，不要额外解释。`;
-
-/** 四次一致性识别次数；设为 3 可略提速，2 更快但更易不一致。默认 4。 */
-const SIMPLE_EXTRACTION_STRICT_APPENDIX = `
-
-补充要求：
-1. 如果当前图片里某个字段的标签和值清晰可见，就必须填写出来，不要无故留空。
-2. 如果页眉或顶部清晰显示了站点车队（例如 IAH-BCE、IAH-LEN），就填写 stationTeam。
-3. 如果任务编码（例如 TASK2026...）清晰可见，就填写 taskCode。
-4. unscanned 只能读取“未领取 / 未收”旁边直接对应的数字，绝不能从旁边的“已领 / 应领件数 / 实领件数”里截取前缀或后缀。
-5. 如果图上未收数量是 1，就只能写 1，不能把附近的 150 / 151 误拼成 15。
-6. 对每个字段都先看标签，再看标签直接对应的值，不要按位置猜。
-7. 如果当前图片是网页输入表格/系统列表，而画面里没有明确的“站点车队/站点/车队”列或顶部站点标签，stationTeam 必须留空；绝不能从 route、线路区域名称或其他列猜一个 stationTeam。
-8. exceptions 不是默认 0 字段。只有当你明确看到“错扫/错分/误扫”列或标签，且其值确实为 0 时，才允许返回 0；如果当前图根本没有这类列/标签，必须返回 null/空。`;
-
-const TASK_CODE_RECOVERY_APPENDIX = `
-
-任务编码专项要求：
-1. taskCode 只有在能看清完整字符串时才允许填写。
-2. 常见合法格式是 TASK + 12位数字，例如 TASK202604024045。
-3. 像 TASK202604C、TASK20260、TASK20260402O405 这种残缺或尾部含非数字字符的结果都视为无效。
-4. 如果看不清完整 taskCode，就返回 null，不要保留半截结果。`;
 
 const LARGE_WEB_TABLE_EXTRACTION_APPENDIX = `
 
@@ -1722,7 +1689,7 @@ async function refinePODFromTrainingExampleBoxes(
     },
     body: JSON.stringify({
       model,
-      reasoning_effort: OPENAI_REASONING_EFFORT,
+      reasoning_effort: openAIReasoningEffortForModel(model, OPENAI_REASONING_EFFORT),
       response_format: { type: "json_object" },
       messages: [
         { role: "system", content: systemText },
@@ -1922,7 +1889,7 @@ async function refinePODRouteFromTrainingCrop(
 
   const body = {
     model,
-    reasoning_effort: OPENAI_REASONING_EFFORT,
+    reasoning_effort: openAIReasoningEffortForModel(model, OPENAI_REASONING_EFFORT),
     response_format: { type: "json_object" },
     messages: [
       {
@@ -2020,7 +1987,7 @@ async function refinePODTotalFromTrainingCrop(
 
   const body = {
     model,
-    reasoning_effort: OPENAI_REASONING_EFFORT,
+    reasoning_effort: openAIReasoningEffortForModel(model, OPENAI_REASONING_EFFORT),
     response_format: { type: "json_object" },
     messages: [
       {
@@ -2112,7 +2079,7 @@ async function refinePODUnscannedFromTrainingCrop(
 
   const body = {
     model,
-    reasoning_effort: OPENAI_REASONING_EFFORT,
+    reasoning_effort: openAIReasoningEffortForModel(model, OPENAI_REASONING_EFFORT),
     response_format: { type: "json_object" },
     messages: [
       {
@@ -2200,7 +2167,7 @@ async function refinePODExceptionsFromTrainingCrop(
 
   const body = {
     model,
-    reasoning_effort: OPENAI_REASONING_EFFORT,
+    reasoning_effort: openAIReasoningEffortForModel(model, OPENAI_REASONING_EFFORT),
     response_format: { type: "json_object" },
     messages: [
       {
@@ -2370,7 +2337,7 @@ async function callVisionModelWithPreparedImage(
 
   const body = {
     model,
-    reasoning_effort: OPENAI_REASONING_EFFORT,
+    reasoning_effort: openAIReasoningEffortForModel(model, OPENAI_REASONING_EFFORT),
     response_format: { type: "json_object" },
     messages: [
       {
@@ -2745,7 +2712,7 @@ async function callVisionModelForDenseWebTableRow(
     },
     body: JSON.stringify({
       model,
-      reasoning_effort: OPENAI_REASONING_EFFORT,
+      reasoning_effort: openAIReasoningEffortForModel(model, OPENAI_REASONING_EFFORT),
       response_format: { type: "json_object" },
       messages: [
         {
@@ -3022,7 +2989,7 @@ ${clipped}
 
   const body = {
     model,
-    reasoning_effort: OPENAI_REASONING_EFFORT,
+    reasoning_effort: openAIReasoningEffortForModel(model, OPENAI_REASONING_EFFORT),
     response_format: { type: "json_object" },
     messages: [
       {
@@ -3548,7 +3515,7 @@ async function recoverMissingFieldsFromVision(
     },
     body: JSON.stringify({
       model,
-      reasoning_effort: OPENAI_REASONING_EFFORT,
+      reasoning_effort: openAIReasoningEffortForModel(model, OPENAI_REASONING_EFFORT),
       response_format: { type: "json_object" },
       messages: [
         {
@@ -3649,7 +3616,7 @@ async function callCounterVerifier(
 
   const body = {
     model,
-    reasoning_effort: "minimal",
+    reasoning_effort: openAIReasoningEffortForModel(model, OPENAI_REASONING_EFFORT),
     response_format: { type: "json_object" },
     messages: [
       {
@@ -4312,13 +4279,45 @@ export async function POST(request: Request) {
         const files = formData
           .getAll("files")
           .filter((value): value is File => value instanceof File);
-        const model = resolveOpenAIModelForRecognition(requestedRecognitionModel);
 
         if (!files.length) {
           return NextResponse.json({ error: "No files uploaded." }, { status: 400 });
         }
 
-        let billingStatus: BillingStatus | null = null;
+        if (requestedRecognitionModel === "max") {
+          return NextResponse.json(
+            {
+              error:
+                "gpt-5.5 is reserved for Recognition Butler, rule generation, and special manual approvals. Use gpt-5 for ordinary recognition.",
+              code: "premium_model_reserved_for_rule_building",
+            },
+            { status: 403 },
+          );
+        }
+
+        const model = resolveOpenAIModelForRecognition(requestedRecognitionModel);
+        if (user?.id) {
+          const modelOption = RECOGNITION_MODEL_OPTIONS.find((option) => option.key === requestedRecognitionModel);
+          const minimumPlan = modelOption?.minimumPlan || "free";
+          if (minimumPlan !== "free") {
+            const status = await getBillingStatusForUser(user.id);
+            if (!status.lifetimeFree && planRank(status.plan) < planRank(minimumPlan)) {
+              return NextResponse.json(
+                {
+                  error:
+                    minimumPlan === "pro"
+                      ? "This recognition model requires Pro."
+                      : "gpt-5 recognition requires Normal or Pro.",
+                  code: "model_plan_required",
+                  requiredPlan: minimumPlan,
+                  billing: status,
+                },
+                { status: 402 },
+              );
+            }
+          }
+        }
+
         const billingUsage = {
           quantity: 0,
           requestCount: 0,
@@ -4342,29 +4341,13 @@ export async function POST(request: Request) {
         if (user?.id) {
           const entitlement = await requireBillingEntitlement(
             user.id,
-            estimateBillingTokensForAction("extract_table", files.length),
+            estimateBillingCreditsForAction("extract_table", files.length, model),
             "extract_table",
           );
           if (!entitlement.ok) {
             return entitlement.response!;
           }
-          billingStatus = entitlement.status;
           billingReservationId = entitlement.reservation?.id || null;
-        }
-
-        if (requestedRecognitionModel === "max" && !canUseRecognitionModel("max", billingStatus)) {
-          if (billingReservationId) {
-            await finalizeBillingUsageReservation(billingReservationId, "released");
-            billingReservationId = null;
-          }
-          return NextResponse.json(
-            {
-              error: "The gpt-5.5 recognition model is available to active Normal subscribers only.",
-              code: "premium_model_requires_normal",
-              billing: billingStatus,
-            },
-            { status: 403 },
-          );
         }
 
         const records: PodRecord[] = [];

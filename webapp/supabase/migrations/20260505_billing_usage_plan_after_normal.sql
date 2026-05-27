@@ -1,6 +1,6 @@
 -- Three-tier billing catalog:
 -- Free: hard trial quota, no Stripe checkout.
--- Normal: $9.99/month, hard 1,000,000-token monthly quota.
+-- Historical Normal setup, superseded by 20260526_launch_subscription_prices_1499_4999.sql.
 -- Usage: separate Stripe metered subscription, billed from the first 1K-token unit.
 
 alter table public.app_billing_plan_configs

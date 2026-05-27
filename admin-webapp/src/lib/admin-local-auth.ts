@@ -52,12 +52,30 @@ function base64UrlToBytes(value: string): Uint8Array | null {
   }
 }
 
-async function sha256Hex(input: string): Promise<string> {
-  const data = new TextEncoder().encode(input);
-  const digest = await crypto.subtle.digest("SHA-256", data);
+async function hmacSha256Hex(secret: string, input: string): Promise<string> {
+  const encoder = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    "raw",
+    encoder.encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const digest = await crypto.subtle.sign("HMAC", key, encoder.encode(input));
   return Array.from(new Uint8Array(digest))
     .map((value) => value.toString(16).padStart(2, "0"))
     .join("");
+}
+
+function constantTimeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) {
+    return false;
+  }
+  let diff = 0;
+  for (let i = 0; i < a.length; i += 1) {
+    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return diff === 0;
 }
 
 function isLocalAdminSession(value: unknown): value is LocalAdminSession {
@@ -75,7 +93,7 @@ function isLocalAdminSession(value: unknown): value is LocalAdminSession {
 }
 
 async function signPayload(payloadBase64: string): Promise<string> {
-  return sha256Hex(`${getBaseSecret()}::${payloadBase64}`);
+  return hmacSha256Hex(getBaseSecret(), payloadBase64);
 }
 
 function cookieOptions() {
@@ -84,6 +102,7 @@ function cookieOptions() {
     sameSite: "lax",
     secure: SHOULD_USE_SECURE_COOKIE,
     path: "/",
+    maxAge: 60 * 60 * 8,
   } as const;
 }
 
@@ -109,7 +128,7 @@ export async function decodeLocalAdminSession(token: string | null | undefined):
     return null;
   }
 
-  if (signature !== (await signPayload(payloadBase64))) {
+  if (!constantTimeEqual(signature, await signPayload(payloadBase64))) {
     return null;
   }
 

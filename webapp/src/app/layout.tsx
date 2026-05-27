@@ -14,6 +14,7 @@ const notoSans = Noto_Sans({
 const notoSansSC = Noto_Sans_SC({
   variable: "--font-noto-sans-sc",
   display: "swap",
+  preload: false,
 });
 
 const notoSansMono = Noto_Sans_Mono({

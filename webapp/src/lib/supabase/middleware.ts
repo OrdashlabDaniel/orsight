@@ -20,10 +20,11 @@ export async function updateSession(request: NextRequest) {
   const pathname = request.nextUrl.pathname;
   const isLogin = pathname === "/login";
   const isAuthCallback = pathname.startsWith("/auth/callback");
+  const isAuthConfirm = pathname === "/auth/confirm";
   const isAuthVerified = pathname === "/auth/verified";
   const isPublicLegal = pathname === "/privacy" || pathname === "/terms";
   const isShareLanding = pathname === "/share";
-  const isPublicRoute = isPublicLegal || isShareLanding || isAuthVerified;
+  const isPublicRoute = isPublicLegal || isShareLanding || isAuthConfirm || isAuthVerified;
 
   /**
    * 开发环境假登录：不配 Supabase 也可测登录页与会话。

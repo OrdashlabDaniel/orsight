@@ -1,6 +1,6 @@
 import { redirect } from "next/navigation";
 
-import { getDisplayUsernameFromUser, getGofoProfileFromUser } from "@/lib/auth-username";
+import { getDisplayUsernameFromUser } from "@/lib/auth-username";
 import { getAuthUserOrSkip } from "@/lib/auth-server";
 import {
   ensureStripeCustomerForUser,
@@ -40,7 +40,6 @@ export default async function AccountPage({ searchParams }: AccountPageProps) {
   }
 
   const isDevMockSession = devMock && !supabaseOn;
-  const gofoProfile = getGofoProfileFromUser(user);
 
   if (billingNotice === "success") {
     try {
@@ -61,8 +60,6 @@ export default async function AccountPage({ searchParams }: AccountPageProps) {
         email: user.email ?? null,
         id: user.id,
         createdAtIso: user.created_at ?? null,
-        isGofoEmployee: gofoProfile.isGofoEmployee,
-        gofoSite: gofoProfile.gofoSite ?? null,
         isDevMockSession,
         billing,
         availablePlans,

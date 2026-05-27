@@ -314,6 +314,30 @@ function TrainingModeContent() {
     setOutputRightPanelWidthPx(rightWidth);
   }
 
+  const loadTableFieldConfig = useCallback(async () => {
+    try {
+      const res = await fetch(withFormId("/api/table-fields"));
+      const data = (await res.json()) as { error?: string; tableFields?: TableFieldDefinition[] };
+      if (!res.ok) {
+        setTableFields([]);
+        setFieldDrafts([]);
+        return;
+      }
+      const nextFields = Array.isArray(data.tableFields) ? data.tableFields : [];
+      setTableFields(nextFields);
+      setFieldDrafts(nextFields.map((field) => ({ ...field })));
+    } catch {
+      setTableFields([]);
+      setFieldDrafts([]);
+    }
+  }, [withFormId]);
+
+  const buildTrainingImageThumbnailUrl = useCallback((imageName: string, cacheBust?: number) => {
+    return withFormId(
+      `/api/training/image?imageName=${encodeURIComponent(imageName)}&raw=1&thumbnail=1${cacheBust ? `&v=${cacheBust}` : ""}`,
+    );
+  }, [withFormId]);
+
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     setSetupField(params.get("setupField") || "");
@@ -321,7 +345,7 @@ function TrainingModeContent() {
 
   useEffect(() => {
     void loadTableFieldConfig();
-  }, [currentFormId]);
+  }, [loadTableFieldConfig]);
 
   useEffect(() => {
     function handleTableFieldsChanged() {
@@ -340,7 +364,7 @@ function TrainingModeContent() {
       window.removeEventListener(TABLE_FIELDS_SYNC_EVENT, handleTableFieldsChanged as EventListener);
       window.removeEventListener("storage", handleStorage);
     };
-  }, []);
+  }, [loadTableFieldConfig]);
 
   useEffect(() => {
     if (setupField && !activeTableFields.some((field) => field.id === setupField)) {
@@ -376,25 +400,7 @@ function TrainingModeContent() {
         Object.entries(current).filter(([imageName, failed]) => imageNames.includes(imageName) && failed),
       ),
     );
-  }, [trainingStatus, withFormId]);
-
-  async function loadTableFieldConfig() {
-    try {
-      const res = await fetch(withFormId("/api/table-fields"));
-      const data = (await res.json()) as { error?: string; tableFields?: TableFieldDefinition[] };
-      if (!res.ok) {
-        setTableFields([]);
-        setFieldDrafts([]);
-        return;
-      }
-      const nextFields = Array.isArray(data.tableFields) ? data.tableFields : [];
-      setTableFields(nextFields);
-      setFieldDrafts(nextFields.map((field) => ({ ...field })));
-    } catch {
-      setTableFields([]);
-      setFieldDrafts([]);
-    }
-  }
+  }, [trainingStatus, buildTrainingImageThumbnailUrl]);
 
 
   const uploadPanelRef = useRef<HTMLDivElement | null>(null);
@@ -574,10 +580,37 @@ function TrainingModeContent() {
     };
   }, []);
 
+  const loadTrainingStatus = useCallback(async () => {
+    try {
+      const response = await fetch(withFormId("/api/training/status"), { cache: "no-store" });
+      const payload = (await response.json()) as TrainingStatusResponse & { error?: string };
+      if (!response.ok) {
+        throw new Error(payload.error || t("training.errStatus"));
+      }
+      setTrainingStatus(payload);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : t("training.errStatus"));
+    }
+  }, [t, withFormId]);
+
+  const loadTemplatePoolFiles = useCallback(async () => {
+    try {
+      const response = await fetch(withFormId(`/api/form-file-pools?pool=templates`));
+      const payload = (await response.json()) as FormFilePoolResponse;
+      if (!response.ok) {
+        throw new Error(payload.error || t("filePool.errLoad"));
+      }
+      const nextFiles = Array.isArray(payload.files) ? payload.files : [];
+      setTemplatePoolFiles(nextFiles);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : t("filePool.errLoad"));
+    }
+  }, [t, withFormId]);
+
   useEffect(() => {
     void loadTrainingStatus();
     void loadTemplatePoolFiles();
-  }, [currentFormId]);
+  }, [loadTrainingStatus, loadTemplatePoolFiles]);
 
   const handleFilesRef = useRef<((fileList: FileList | File[] | null) => Promise<void>) | null>(null);
 
@@ -616,19 +649,6 @@ function TrainingModeContent() {
     };
   }, []);
 
-  async function loadTrainingStatus() {
-    try {
-      const response = await fetch(withFormId("/api/training/status"), { cache: "no-store" });
-      const payload = (await response.json()) as TrainingStatusResponse & { error?: string };
-      if (!response.ok) {
-        throw new Error(payload.error || t("training.errStatus"));
-      }
-      setTrainingStatus(payload);
-    } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : t("training.errStatus"));
-    }
-  }
-
   async function refreshTrainingStatusUntilImage(imageName: string, timeoutMs = 2500) {
     const deadline = Date.now() + Math.max(250, timeoutMs);
     let lastPayload: TrainingStatusResponse | null = null;
@@ -655,20 +675,6 @@ function TrainingModeContent() {
       setTrainingStatus(lastPayload);
     }
     return false;
-  }
-
-  async function loadTemplatePoolFiles() {
-    try {
-      const response = await fetch(withFormId(`/api/form-file-pools?pool=templates`));
-      const payload = (await response.json()) as FormFilePoolResponse;
-      if (!response.ok) {
-        throw new Error(payload.error || t("filePool.errLoad"));
-      }
-      const nextFiles = Array.isArray(payload.files) ? payload.files : [];
-      setTemplatePoolFiles(nextFiles);
-    } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : t("filePool.errLoad"));
-    }
   }
 
   async function uploadTemplatePoolFiles(files: File[], source: string) {
@@ -1052,12 +1058,6 @@ function TrainingModeContent() {
     return withFormId(`/api/training/image?imageName=${encodeURIComponent(imageName)}&raw=1`);
   }
 
-  function buildTrainingImageThumbnailUrl(imageName: string, cacheBust?: number) {
-    return withFormId(
-      `/api/training/image?imageName=${encodeURIComponent(imageName)}&raw=1&thumbnail=1${cacheBust ? `&v=${cacheBust}` : ""}`,
-    );
-  }
-
   function retryTrainingThumbnail(imageName: string) {
     setTrainingThumbnailErrorMap((current) => {
       if (!current[imageName]) {
@@ -1203,7 +1203,7 @@ function TrainingModeContent() {
 
     const response = await fetch(source);
     const blob = await response.blob();
-    return await new Promise<string>((resolve, reject) => {
+    return await new Promise<string>((resolve) => {
       const reader = new FileReader();
       reader.onloadend = () => resolve(String(reader.result));
 
@@ -2013,7 +2013,7 @@ function TrainingModeContent() {
             onClose={closeRecordPopup}
             onNotice={setNoticeMessage}
             onError={setErrorMessage}
-            onSaved={async ({ totalExamples }) => {
+            onSaved={async () => {
               const ensured = annotationImageName ? await refreshTrainingStatusUntilImage(annotationImageName) : false;
               if (!ensured) {
                 await loadTrainingStatus();

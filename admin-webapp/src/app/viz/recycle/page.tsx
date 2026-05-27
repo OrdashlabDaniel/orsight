@@ -1,9 +1,9 @@
 import Link from "next/link";
+import type { User } from "@supabase/supabase-js";
 import { ArrowLeft } from "lucide-react";
 import { unstable_noStore as noStore } from "next/cache";
 
-import { listRegisteredUsersWithStatus } from "@/lib/viz-auth-user-rpc";
-import { listRecycledUsers } from "@/lib/viz-recycle-store";
+import { deleteRecycledUser, listRecycledUsers } from "@/lib/viz-recycle-store";
 import { createServiceRoleClient } from "@/lib/supabase/service";
 import { purgeExpiredRecycledUsers } from "@/lib/viz-recycle-purge";
 
@@ -19,18 +19,10 @@ export const dynamic = "force-dynamic";
 
 type SearchParams = Record<string, string | string[] | undefined>;
 
-function deriveDeletedAtFromBannedUntil(bannedUntil: string | null | undefined): string | null {
-  if (!bannedUntil) return null;
-  const d = new Date(bannedUntil);
-  if (Number.isNaN(d.getTime())) return null;
-  d.setUTCFullYear(d.getUTCFullYear() - 10);
-  return d.toISOString();
-}
-
-function derivePurgeAtFromDeletedAt(deletedAt: string): string {
-  const d = new Date(deletedAt);
-  d.setUTCDate(d.getUTCDate() + 30);
-  return d.toISOString();
+function userLabel(user: User, fallback: string | null) {
+  const metadata = user.user_metadata ?? {};
+  const podUsername = typeof metadata.pod_username === "string" ? metadata.pod_username.trim() : "";
+  return podUsername || user.email || fallback || user.id;
 }
 
 export default async function VizRecyclePage({ searchParams }: { searchParams?: Promise<SearchParams> }) {
@@ -51,35 +43,20 @@ export default async function VizRecyclePage({ searchParams }: { searchParams?: 
 
   try {
     await purgeExpiredRecycledUsers(sb);
-    rows = await listRecycledUsers(sb);
-    const users = await listRegisteredUsersWithStatus(sb);
-    const usernameById = new Map<string, string>();
-    for (const u of users) {
-      const label = (u.pod_username && u.pod_username.trim()) || (u.email && u.email.trim()) || "";
-      if (label) {
-        usernameById.set(u.id, label);
+    const recycledRows = await listRecycledUsers(sb);
+    const validRows: typeof rows = [];
+    for (const row of recycledRows) {
+      const { data, error } = await sb.auth.admin.getUserById(row.id);
+      if (error || !data.user) {
+        await deleteRecycledUser(sb, row.id).catch(() => {});
+        continue;
       }
-    }
-
-    // Prefer showing username (pod_username) over recycled row email.
-    rows = rows.map((row) => ({
-      ...row,
-      email: usernameById.get(row.id) || row.email,
-    }));
-    const existingIds = new Set(rows.map((row) => row.id));
-    const derivedRows = users
-      .filter((user) => !existingIds.has(user.id) && (user.banned_until || user.deleted_at))
-      .map((user) => {
-        const deletedAt = user.deleted_at || deriveDeletedAtFromBannedUntil(user.banned_until) || new Date().toISOString();
-        return {
-          id: user.id,
-          email: (user.pod_username && user.pod_username.trim()) || user.email,
-          deleted_at: deletedAt,
-          purge_at: derivePurgeAtFromDeletedAt(deletedAt),
-          deleted_by_email: "system-recovered",
-        };
+      validRows.push({
+        ...row,
+        email: userLabel(data.user, row.email),
       });
-    rows = [...rows, ...derivedRows].sort((a, b) => b.deleted_at.localeCompare(a.deleted_at));
+    }
+    rows = validRows.sort((a, b) => b.deleted_at.localeCompare(a.deleted_at));
   } catch (e) {
     loadError = e instanceof Error ? e.message : "加载失败";
   }

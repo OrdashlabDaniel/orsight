@@ -1,5 +1,5 @@
 -- Raise the Normal plan monthly quota to roughly a $3 internal AI cost budget.
--- Normal remains $9.99/month and still hard-stops once the included token quota
+-- Historical Normal quota tuning, superseded by 20260526_launch_subscription_prices_1499_4999.sql.
 -- plus any prepaid token balance is exhausted.
 
 update public.app_billing_plan_configs

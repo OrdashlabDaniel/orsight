@@ -249,8 +249,6 @@ export function RecognitionAgentDock({
 
     setIsPreparingAttachments(true);
     const prepared: PendingAttachment[] = [];
-    const failures: string[] = [];
-
     for (const file of allowed) {
       try {
         const asset = await processFileToAsset(file);
@@ -261,7 +259,7 @@ export function RecognitionAgentDock({
             asset,
           });
         }
-      } catch (error) {
+      } catch {
 
       }
     }
@@ -270,10 +268,6 @@ export function RecognitionAgentDock({
       setPendingAttachments((current) => [...current, ...prepared]);
 
     }
-    if (failures.length > 0) {
-
-    }
-
     setIsPreparingAttachments(false);
   }
 
@@ -602,6 +596,8 @@ export function RecognitionAgentDock({
               onClick={() => setImagePreview(null)}
             />
             <div className="relative z-[1] flex min-h-0 flex-1 items-center justify-center p-4">
+              {/* Preview may use data/blob URLs, so the plain img element is intentional here. */}
+              {/* eslint-disable-next-line @next/next/no-img-element */}
               <img
                 src={imagePreview.src}
                 alt={imagePreview.name}

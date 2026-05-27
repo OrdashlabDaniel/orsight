@@ -8,9 +8,9 @@ import {
   isMissingBillingTableErrorMessage,
   type BillingSubscriptionRow,
 } from "@/lib/billing-admin";
-import { hardDeleteAuthUser } from "@/lib/viz-auth-user-rpc";
 import { createAdminClient } from "@/lib/supabase/server";
-import { requireAdminActor } from "@/lib/viz-admin-verify";
+import { assertAdminLoginPassword, requireAdminActor } from "@/lib/viz-admin-verify";
+import { softDeleteUserToRecycle } from "@/lib/viz-user-soft-delete";
 
 function redirectBack(userId: string, qs: Record<string, string>) {
   const search = new URLSearchParams(qs).toString();
@@ -22,10 +22,10 @@ function redirectBack(userId: string, qs: Record<string, string>) {
 }
 
 async function requireUserPageAdmin(userId: string) {
-  await requireAdminActor(userId ? `/users/${encodeURIComponent(userId)}` : "/users");
+  return await requireAdminActor(userId ? `/users/${encodeURIComponent(userId)}` : "/users");
 }
 
-type UserEntitlement = "lifetime_free" | "free_quota_blocked" | "free_quota_reset_after";
+type UserEntitlement = "lifetime_free";
 
 function formText(formData: FormData, name: string) {
   return String(formData.get(name) ?? "").trim();
@@ -115,95 +115,6 @@ export async function setLifetimeFreeFromUserPageAction(formData: FormData) {
 
   redirectBack(userId, {
     notice: active ? `Lifetime free enabled for ${label}` : `Lifetime free revoked for ${label}`,
-  });
-}
-
-export async function setFreeQuotaBlockedFromUserPageAction(formData: FormData) {
-  const userId = formText(formData, "userId");
-  const label = formText(formData, "label") || userId;
-  const active = formText(formData, "active") === "1";
-
-  if (!userId) {
-    redirect("/users?err=missing_user");
-  }
-
-  await requireUserPageAdmin(userId);
-
-  try {
-    await upsertUserEntitlement(
-      userId,
-      "free_quota_blocked",
-      active,
-      active
-        ? "Free quota manually disabled from admin control center."
-        : "Free quota manually restored from admin control center.",
-    );
-  } catch (error) {
-    redirectBack(userId, { err: error instanceof Error ? error.message : "set_free_quota_block_failed" });
-    return;
-  }
-
-  redirectBack(userId, {
-    notice: active ? `Free quota disabled for ${label}` : `Free quota restored for ${label}`,
-  });
-}
-
-export async function resetFreeQuotaFromUserPageAction(formData: FormData) {
-  const userId = formText(formData, "userId");
-  const label = formText(formData, "label") || userId;
-  const resetAt = new Date().toISOString();
-
-  if (!userId) {
-    redirect("/users?err=missing_user");
-  }
-
-  await requireUserPageAdmin(userId);
-
-  try {
-    const sb = await upsertUserEntitlement(
-      userId,
-      "free_quota_reset_after",
-      true,
-      resetAt,
-    );
-    const { error: seatError } = await sb.from("app_free_plan_seats").delete().eq("owner_id", userId);
-    if (seatError && !isMissingBillingTableErrorMessage(seatError.message)) {
-      throw new Error(`app_free_plan_seats:${seatError.message}`);
-    }
-  } catch (error) {
-    redirectBack(userId, { err: error instanceof Error ? error.message : "reset_free_quota_failed" });
-    return;
-  }
-
-  redirectBack(userId, {
-    notice: `Free quota reset for ${label}`,
-  });
-}
-
-export async function clearFreeQuotaResetFromUserPageAction(formData: FormData) {
-  const userId = formText(formData, "userId");
-  const label = formText(formData, "label") || userId;
-
-  if (!userId) {
-    redirect("/users?err=missing_user");
-  }
-
-  await requireUserPageAdmin(userId);
-
-  try {
-    await upsertUserEntitlement(
-      userId,
-      "free_quota_reset_after",
-      false,
-      null,
-    );
-  } catch (error) {
-    redirectBack(userId, { err: error instanceof Error ? error.message : "clear_free_quota_reset_failed" });
-    return;
-  }
-
-  redirectBack(userId, {
-    notice: `Free quota reset marker cleared for ${label}`,
   });
 }
 
@@ -331,9 +242,9 @@ export async function revokeAdminFromUserPageAction(formData: FormData) {
   redirectBack(userId, { notice: `已移除管理员权限：${label || userId}` });
 }
 
-export async function deleteUserFromUserPageAction(formData: FormData) {
-  const userId = String(formData.get("userId") ?? "").trim();
-  const label = String(formData.get("label") ?? "").trim() || userId;
+export async function clearUserUsageRecordsFromUserPageAction(formData: FormData) {
+  const userId = formText(formData, "userId");
+  const label = formText(formData, "label") || userId;
 
   if (!userId) {
     redirect("/users?err=missing_user");
@@ -342,47 +253,63 @@ export async function deleteUserFromUserPageAction(formData: FormData) {
   await requireUserPageAdmin(userId);
 
   const sb = await createAdminClient();
+  const { count: usageCount, error: usageError } = await sb
+    .from("usage_logs")
+    .delete({ count: "exact" })
+    .eq("user_id", userId);
 
-  const { error: usageDeleteError } = await sb.from("usage_logs").delete().eq("user_id", userId);
-  if (usageDeleteError) {
-    redirectBack(userId, { err: `delete_usage:${usageDeleteError.message}` });
+  if (usageError) {
+    redirectBack(userId, { err: `clear_usage_logs:${usageError.message}` });
     return;
   }
 
-  const { error: adminDeleteError } = await sb.from("admin_users").delete().eq("id", userId);
-  if (adminDeleteError) {
-    redirectBack(userId, { err: `delete_admin:${adminDeleteError.message}` });
+  const { count: ledgerCount, error: ledgerError } = await sb
+    .from("app_billing_token_ledger")
+    .delete({ count: "exact" })
+    .eq("owner_id", userId)
+    .eq("reason", "quota_overage_consumption");
+
+  if (ledgerError && !isMissingBillingTableErrorMessage(ledgerError.message)) {
+    redirectBack(userId, { err: `clear_usage_ledger:${ledgerError.message}` });
     return;
   }
 
-  const { error: subscriptionDeleteError } = await sb.from("app_subscriptions").delete().eq("owner_id", userId);
-  if (
-    subscriptionDeleteError &&
-    !isMissingBillingTableErrorMessage(subscriptionDeleteError.message)
-  ) {
-    redirectBack(userId, { err: `delete_subscription:${subscriptionDeleteError.message}` });
-    return;
+  const usageDeleted = usageCount ?? 0;
+  const ledgerDeleted = ledgerError ? 0 : ledgerCount ?? 0;
+  redirectBack(userId, {
+    notice: `Cleared ${usageDeleted.toLocaleString("en-US")} usage records and ${ledgerDeleted.toLocaleString(
+      "en-US",
+    )} prepaid consumption records for ${label}.`,
+  });
+}
+
+export async function deleteUserFromUserPageAction(formData: FormData) {
+  const userId = String(formData.get("userId") ?? "").trim();
+  const label = String(formData.get("label") ?? "").trim() || userId;
+  const adminPassword = String(formData.get("adminPassword") ?? "");
+
+  if (!userId) {
+    redirect("/users?err=missing_user");
   }
 
-  const { error: customerDeleteError } = await sb.from("app_billing_customers").delete().eq("owner_id", userId);
-  if (
-    customerDeleteError &&
-    !isMissingBillingTableErrorMessage(customerDeleteError.message)
-  ) {
-    redirectBack(userId, { err: `delete_billing_customer:${customerDeleteError.message}` });
-    return;
-  }
-
+  const actor = await requireUserPageAdmin(userId);
   try {
-    await hardDeleteAuthUser(sb, userId);
-  } catch (e) {
-    redirectBack(userId, { err: `delete_auth:${e instanceof Error ? e.message : "unknown"}` });
+    await assertAdminLoginPassword(actor.email, adminPassword);
+  } catch (error) {
+    redirectBack(userId, { err: error instanceof Error ? error.message : "admin_password_check_failed" });
+    return;
+  }
+
+  const result = await softDeleteUserToRecycle(userId, actor, label);
+  if ("err" in result) {
+    redirectBack(userId, { err: result.err });
     return;
   }
 
   revalidatePath("/users");
+  revalidatePath("/users/recycle");
   revalidatePath("/billing");
   revalidatePath("/usage-board");
-  redirect(`/users?ok=${encodeURIComponent(label)}`);
+  redirect(`/users/recycle?notice=${encodeURIComponent(result.ok)}`);
 }
 

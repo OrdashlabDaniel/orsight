@@ -52,8 +52,6 @@ export type BillingStatus = {
   configured: boolean;
   enforced: boolean;
   lifetimeFree: boolean;
-  freeQuotaBlocked: boolean;
-  freeQuotaResetAfterIso: string | null;
   plan: BillingPlanId;
   planLabel: string;
   billingModel: BillingModel;
@@ -66,22 +64,18 @@ export type BillingStatus = {
   monthlyBaseCents: number;
   monthlyQuota: number;
   monthlyUsed: number;
-  monthlyImagesUsed: number;
   remainingIncluded: number | null;
-  freeMonthlyCostLimitCents: number;
-  freeMonthlyCostUsedCents: number;
-  freeMonthlyCostRemainingCents: number | null;
-  freeMonthlyImageLimit: number | null;
-  freeMonthlyImagesRemaining: number | null;
-  freeSeatLimit: number | null;
-  freeSeatsUsed: number | null;
-  freeSeatClaimed: boolean;
-  freeSeatAvailable: boolean;
-  prepaidTokensPurchased: number;
-  prepaidTokensConsumed: number;
-  prepaidTokensBalance: number;
-  prepaidTokensAvailable: number;
+  prepaidCreditsPurchased: number;
+  prepaidCreditsConsumed: number;
+  prepaidCreditsBalance: number;
+  prepaidCreditsAvailable: number;
   effectiveRemaining: number | null;
+  premiumModelMonthlyBudgetCents: number;
+  premiumModelUsedCents: number;
+  premiumModelRemainingCents: number | null;
+  premiumModelWarningCents: number;
+  premiumModelRequestLimitCents: number;
+  premiumModelCanUse: boolean;
   billableUsage: number;
   meteredBillableUnits: number;
   meteredUnitSize: number;
@@ -159,22 +153,13 @@ type UsageRow = {
   action_type?: string | null;
   image_count: number | null;
   total_tokens: number | null;
+  model_used?: string | null;
   estimated_cost_usd?: number | null;
   conservative_cost_usd?: number | null;
 };
 
-type FreeSeatState = {
-  limit: number | null;
-  used: number | null;
-  claimed: boolean;
-  available: boolean;
-  reason: string | null;
-};
-
 type BillingUserEntitlements = {
   lifetimeFree: boolean;
-  freeQuotaBlocked: boolean;
-  freeQuotaResetAfterIso: string | null;
 };
 
 type TokenLedgerRow = {
@@ -203,13 +188,8 @@ type PlanConfigRow = {
 const ADMIN_OVERRIDE_SUBSCRIPTION_PREFIX = "admin_override_";
 const BILLING_RESERVATION_ACTION = "billing_reservation";
 const USAGE_LOG_RESERVATION_PREFIX = "usage_log:";
-const DEFAULT_TOKEN_PACK_ID: TokenPackId = "usage_credit_100k";
-const USAGE_CREDIT_PACK_IDS: TokenPackId[] = [
-  "usage_credit_30k",
-  "usage_credit_50k",
-  "usage_credit_70k",
-  "usage_credit_100k",
-];
+const DEFAULT_TOKEN_PACK_ID: TokenPackId = "usage_credit_30k";
+const USAGE_CREDIT_PACK_IDS: TokenPackId[] = ["usage_credit_30k"];
 const DEFAULT_LIFETIME_FREE_USER_IDS = new Set([
   "618aa87b-9cab-482d-9fa0-fda3558c2a42",
   "6fe48ae3-9c72-4be2-a731-2822969928a7",
@@ -231,9 +211,60 @@ function intEnv(name: string, fallback: number) {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
-function numberEnv(name: string, fallback: number) {
-  const parsed = Number.parseFloat(env(name));
-  return Number.isFinite(parsed) ? parsed : fallback;
+export function billingCreditMultiplierForModel(modelUsed: string | null | undefined) {
+  const model = (modelUsed || "").trim().toLowerCase();
+  if (!model || model === "billing-reservation") return 1;
+  if (model.startsWith("gpt-5.5")) return 0;
+  if (model.startsWith("gpt-5-mini")) return 1;
+  if (model === "gpt-5" || model.startsWith("gpt-5-")) return 5;
+  return 1;
+}
+
+export function isPremiumModel(modelUsed: string | null | undefined) {
+  const model = (modelUsed || "").trim().toLowerCase();
+  return model.startsWith("gpt-5.5");
+}
+
+export function billingCreditsForTokenCount(totalTokens: number | null | undefined, modelUsed: string | null | undefined) {
+  const raw = Math.max(0, Math.trunc(Number(totalTokens) || 0));
+  if (raw <= 0) return 0;
+  return Math.ceil(raw * billingCreditMultiplierForModel(modelUsed));
+}
+
+export function canUseModelForBillingStatus(modelUsed: string | null | undefined, status: Pick<BillingStatus, "lifetimeFree" | "plan"> | null | undefined) {
+  if (!isPremiumModel(modelUsed)) return true;
+  return Boolean(status?.lifetimeFree || status?.plan === "pro");
+}
+
+function premiumModelMonthlyBudgetCentsForPlan(plan: BillingPlanId) {
+  return plan === "pro" ? intEnv("BILLING_PRO_PREMIUM_MODEL_MONTHLY_COST_CENTS", 600) : 0;
+}
+
+function premiumModelWarningCentsForPlan(plan: BillingPlanId) {
+  return plan === "pro" ? intEnv("BILLING_PRO_PREMIUM_MODEL_WARNING_CENTS", 540) : 0;
+}
+
+function premiumModelRequestLimitCents() {
+  return intEnv("BILLING_GPT55_REQUEST_COST_LIMIT_CENTS", 75);
+}
+
+export function estimatePremiumModelCostCentsForAction(
+  actionType: BillingUsageAction,
+  units = 1,
+  modelUsed?: string | null,
+) {
+  if (!isPremiumModel(modelUsed)) return 0;
+  const count = Math.max(1, Math.trunc(Number(units) || 1));
+  const estimatedCostCents =
+    actionType === "guidance_chat"
+      ? intEnv("BILLING_GPT55_GUIDANCE_ESTIMATED_COST_CENTS", 75)
+      : actionType === "template_from_image"
+        ? intEnv("BILLING_GPT55_TEMPLATE_ESTIMATED_COST_CENTS", 75)
+        : actionType === "preview_fill"
+          ? intEnv("BILLING_GPT55_PREVIEW_ESTIMATED_COST_CENTS", 75)
+          : intEnv("BILLING_GPT55_EXTRACT_ESTIMATED_COST_CENTS", 75);
+
+  return Math.max(1, count * Math.max(1, estimatedCostCents));
 }
 
 function normalizeCurrency(value: string | null | undefined) {
@@ -259,8 +290,6 @@ function fallbackBillingUserEntitlements(ownerId: string): BillingUserEntitlemen
     lifetimeFree:
       DEFAULT_LIFETIME_FREE_USER_IDS.has(ownerId) ||
       envIdSet("BILLING_LIFETIME_FREE_USER_IDS").has(ownerId),
-    freeQuotaBlocked: false,
-    freeQuotaResetAfterIso: null,
   };
 }
 
@@ -273,29 +302,11 @@ function isMissingEntitlementTableError(error: { code?: string; message?: string
   );
 }
 
-function normalizeResetAfterIso(value: string | null | undefined) {
-  const raw = (value || "").trim();
-  if (!raw) return null;
-  const time = new Date(raw).getTime();
-  if (!Number.isFinite(time)) return null;
-  return new Date(time).toISOString();
-}
-
-function laterIso(left: string, right: string | null) {
-  if (!right) return left;
-  const leftTime = new Date(left).getTime();
-  const rightTime = new Date(right).getTime();
-  if (!Number.isFinite(leftTime) || !Number.isFinite(rightTime)) return left;
-  return rightTime > leftTime ? new Date(rightTime).toISOString() : left;
-}
-
 export async function loadBillingUserEntitlements(ownerId: string): Promise<BillingUserEntitlements> {
   const normalizedOwnerId = normalizeOwnerId(ownerId);
   if (!normalizedOwnerId) {
     return {
       lifetimeFree: false,
-      freeQuotaBlocked: false,
-      freeQuotaResetAfterIso: null,
     };
   }
 
@@ -307,7 +318,7 @@ export async function loadBillingUserEntitlements(ownerId: string): Promise<Bill
     .from("app_billing_user_entitlements")
     .select("entitlement,active,notes")
     .eq("owner_id", normalizedOwnerId)
-    .in("entitlement", ["lifetime_free", "free_quota_blocked", "free_quota_reset_after"]);
+    .in("entitlement", ["lifetime_free"]);
 
   if (error) {
     if (!isMissingEntitlementTableError(error)) {
@@ -318,8 +329,6 @@ export async function loadBillingUserEntitlements(ownerId: string): Promise<Bill
 
   const entitlements: BillingUserEntitlements = {
     lifetimeFree: false,
-    freeQuotaBlocked: false,
-    freeQuotaResetAfterIso: null,
   };
 
   for (const row of data ?? []) {
@@ -327,10 +336,6 @@ export async function loadBillingUserEntitlements(ownerId: string): Promise<Bill
     const entitlement = String(row.entitlement || "");
     if (entitlement === "lifetime_free") {
       entitlements.lifetimeFree = active;
-    } else if (entitlement === "free_quota_blocked") {
-      entitlements.freeQuotaBlocked = active;
-    } else if (entitlement === "free_quota_reset_after") {
-      entitlements.freeQuotaResetAfterIso = active ? normalizeResetAfterIso(row.notes as string | null) : null;
     }
   }
 
@@ -371,45 +376,45 @@ export function normalizeTokenPackId(value: string | null | undefined): TokenPac
 function usageCreditPackDefaults(packId: Exclude<TokenPackId, "token_pack_1m">) {
   if (packId === "usage_credit_30k") {
     return {
-      displayName: "Usage Credit 30K",
-      description: "Prepaid pay-as-you-go credits for 30,000 extra AI tokens.",
+      displayName: "Usage Credits 3M",
+      description: "Prepaid pay-as-you-go balance for 3,000,000 AI credits.",
       creditsEnv: "BILLING_USAGE_CREDIT_30K_TOKENS",
       priceEnv: "BILLING_USAGE_CREDIT_30K_PRICE_CENTS",
       stripePriceEnv: "STRIPE_PRICE_USAGE_CREDIT_30K",
-      credits: 30_000,
+      credits: 3_000_000,
       priceCents: 300,
     };
   }
   if (packId === "usage_credit_50k") {
     return {
-      displayName: "Usage Credit 50K",
-      description: "Prepaid pay-as-you-go credits for 50,000 extra AI tokens.",
+      displayName: "Usage Credits 500K",
+      description: "Prepaid pay-as-you-go balance for 500,000 AI credits.",
       creditsEnv: "BILLING_USAGE_CREDIT_50K_TOKENS",
       priceEnv: "BILLING_USAGE_CREDIT_50K_PRICE_CENTS",
       stripePriceEnv: "STRIPE_PRICE_USAGE_CREDIT_50K",
-      credits: 50_000,
+      credits: 500_000,
       priceCents: 500,
     };
   }
   if (packId === "usage_credit_70k") {
     return {
-      displayName: "Usage Credit 70K",
-      description: "Prepaid pay-as-you-go credits for 70,000 extra AI tokens.",
+      displayName: "Usage Credits 700K",
+      description: "Prepaid pay-as-you-go balance for 700,000 AI credits.",
       creditsEnv: "BILLING_USAGE_CREDIT_70K_TOKENS",
       priceEnv: "BILLING_USAGE_CREDIT_70K_PRICE_CENTS",
       stripePriceEnv: "STRIPE_PRICE_USAGE_CREDIT_70K",
-      credits: 70_000,
+      credits: 700_000,
       priceCents: 700,
     };
   }
 
   return {
-    displayName: "Usage Credit 100K",
-    description: "Prepaid pay-as-you-go credits for 100,000 extra AI tokens.",
+    displayName: "Usage Credits 1M",
+    description: "Prepaid pay-as-you-go balance for 1,000,000 AI credits.",
     creditsEnv: "BILLING_USAGE_CREDIT_100K_TOKENS",
     priceEnv: "BILLING_USAGE_CREDIT_100K_PRICE_CENTS",
     stripePriceEnv: "STRIPE_PRICE_USAGE_CREDIT_100K",
-    credits: 100_000,
+    credits: 1_000_000,
     priceCents: 1000,
   };
 }
@@ -418,8 +423,8 @@ export function getTokenPackConfig(packId: TokenPackId = DEFAULT_TOKEN_PACK_ID):
   if (packId === "token_pack_1m") {
     return {
       packId,
-      displayName: "Legacy Token Pack 1M",
-      description: "Legacy one-time prepaid add-on for 1,000,000 extra AI tokens.",
+      displayName: "Legacy Usage Credits 1M",
+      description: "Legacy one-time prepaid add-on for 1,000,000 AI credits.",
       credits: intEnv("BILLING_TOKEN_PACK_1M_CREDITS", 1_000_000),
       priceCents: intEnv("BILLING_TOKEN_PACK_1M_PRICE_CENTS", 999),
       currency: normalizeCurrency(env("BILLING_CURRENCY") || "usd"),
@@ -503,12 +508,12 @@ function fallbackPlanConfig(planId: BillingPlanId): BillingPlanConfig {
     return {
       planId,
       displayName: "Normal",
-      description: "Monthly subscription with a hard 10,000,000 AI token quota.",
+      description: "Monthly subscription with a hard 30,000,000 ordinary AI credit quota.",
       billingModel: "monthly_quota",
-      monthlyBaseCents: intEnv("BILLING_NORMAL_MONTHLY_FEE_CENTS", 999),
-      includedCredits: intEnv("BILLING_NORMAL_MONTHLY_CREDITS", 10_000_000),
+      monthlyBaseCents: intEnv("BILLING_NORMAL_MONTHLY_FEE_CENTS", 1499),
+      includedCredits: intEnv("BILLING_NORMAL_MONTHLY_CREDITS", 30_000_000),
       overageUnitCents: 0,
-      overageUnitName: env("BILLING_NORMAL_USAGE_UNIT") || "tokens",
+      overageUnitName: env("BILLING_NORMAL_USAGE_UNIT") || "credits",
       currency: normalizeCurrency(env("BILLING_CURRENCY") || "usd"),
       stripeBasePriceId: env("STRIPE_PRICE_NORMAL_MONTHLY") || null,
       stripeUsagePriceId: null,
@@ -523,12 +528,12 @@ function fallbackPlanConfig(planId: BillingPlanId): BillingPlanConfig {
     return {
       planId,
       displayName: "Pay as you go",
-      description: "Metered AI token billing for continued usage after Normal quota is exhausted.",
+      description: "Hidden legacy metered AI credit billing after Normal quota is exhausted.",
       billingModel: "monthly_plus_usage",
       monthlyBaseCents: intEnv("BILLING_USAGE_MONTHLY_FEE_CENTS", 0),
       includedCredits: intEnv("BILLING_USAGE_INCLUDED_CREDITS", 0),
       overageUnitCents: intEnv("BILLING_USAGE_OVERAGE_UNIT_CENTS", 1),
-      overageUnitName: env("BILLING_USAGE_UNIT") || "1K tokens",
+      overageUnitName: env("BILLING_USAGE_UNIT") || "1K credits",
       currency: normalizeCurrency(env("BILLING_CURRENCY") || "usd"),
       stripeBasePriceId: env("STRIPE_PRICE_USAGE_MONTHLY") || null,
       stripeUsagePriceId: env("STRIPE_PRICE_USAGE_METERED") || null,
@@ -563,31 +568,31 @@ function fallbackPlanConfig(planId: BillingPlanId): BillingPlanConfig {
     return {
       planId,
       displayName: "Pro",
-      description: "Pro monthly subscription plus usage-based billing.",
-      billingModel: "monthly_plus_usage",
-      monthlyBaseCents: intEnv("BILLING_PRO_MONTHLY_FEE_CENTS", 2900),
-      includedCredits: intEnv("BILLING_PRO_MONTHLY_CREDITS", 1000),
-      overageUnitCents: intEnv("BILLING_PRO_OVERAGE_UNIT_CENTS", 2),
-      overageUnitName: env("BILLING_PRO_USAGE_UNIT") || "image",
+      description: "Pro subscription with 100,000,000 ordinary AI credits plus a separate gpt-5.5 expert pool.",
+      billingModel: "monthly_quota",
+      monthlyBaseCents: intEnv("BILLING_PRO_MONTHLY_FEE_CENTS", 4999),
+      includedCredits: intEnv("BILLING_PRO_MONTHLY_CREDITS", 100_000_000),
+      overageUnitCents: 0,
+      overageUnitName: env("BILLING_PRO_USAGE_UNIT") || "credits",
       currency: normalizeCurrency(env("BILLING_CURRENCY") || "usd"),
       stripeBasePriceId: env("STRIPE_PRICE_PRO_MONTHLY") || null,
-      stripeUsagePriceId: env("STRIPE_PRICE_PRO_USAGE") || null,
-      stripeMeterEventName: env("STRIPE_METER_EVENT_PRO") || null,
-      isPublic: false,
-      isActive: false,
-      sortOrder: 10,
+      stripeUsagePriceId: null,
+      stripeMeterEventName: null,
+      isPublic: true,
+      isActive: true,
+      sortOrder: 20,
     };
   }
 
   return {
     planId: "free",
     displayName: "Free",
-    description: "Starter access with a hard monthly quota.",
+    description: "Starter access with a hard 1,000,000 ordinary AI credit monthly quota.",
     billingModel: "free_quota",
     monthlyBaseCents: 0,
-    includedCredits: intEnv("BILLING_FREE_MONTHLY_CREDITS", 750_000),
+    includedCredits: intEnv("BILLING_FREE_MONTHLY_CREDITS", 1_000_000),
     overageUnitCents: 0,
-    overageUnitName: env("BILLING_FREE_USAGE_UNIT") || "tokens",
+    overageUnitName: env("BILLING_FREE_USAGE_UNIT") || "credits",
     currency: normalizeCurrency(env("BILLING_CURRENCY") || "usd"),
     stripeBasePriceId: null,
     stripeUsagePriceId: null,
@@ -602,6 +607,11 @@ const PLAN_IDS: BillingPlanId[] = ["free", "normal", "usage", "pro", "business"]
 
 function fallbackCatalogMap(): Map<BillingPlanId, BillingPlanConfig> {
   return new Map(PLAN_IDS.map((planId) => [planId, fallbackPlanConfig(planId)]));
+}
+
+function usesCreditOrTokenUnits(planConfig: Pick<BillingPlanConfig, "overageUnitName">) {
+  const unit = planConfig.overageUnitName.toLowerCase();
+  return unit.includes("credit") || unit.includes("token");
 }
 
 function coercePlanConfig(row: PlanConfigRow): BillingPlanConfig | null {
@@ -627,20 +637,27 @@ function coercePlanConfig(row: PlanConfigRow): BillingPlanConfig | null {
     sortOrder: Number.isFinite(Number(row.sort_order)) ? Number(row.sort_order) : fallback.sortOrder,
   };
 
-  if (planId === "free" || planId === "normal" || planId === "usage") {
-    const usesTokens = config.overageUnitName.toLowerCase().includes("token");
+  if (planId === "free" || planId === "normal" || planId === "pro" || planId === "usage") {
+    const meteredByUsage = usesCreditOrTokenUnits(config);
     const billingModel =
       planId === "free" ? "free_quota" : planId === "usage" ? "monthly_plus_usage" : "monthly_quota";
+    const fixedLaunchPlan = planId === "free" || planId === "normal" || planId === "pro";
     return {
       ...config,
+      description: fixedLaunchPlan ? fallback.description : config.description,
       billingModel,
-      monthlyBaseCents: planId === "free" ? 0 : config.monthlyBaseCents,
-      includedCredits: usesTokens && config.includedCredits > 0 ? config.includedCredits : fallback.includedCredits,
+      monthlyBaseCents: planId === "free" ? 0 : fixedLaunchPlan ? fallback.monthlyBaseCents : config.monthlyBaseCents,
+      includedCredits:
+        fixedLaunchPlan
+          ? fallback.includedCredits
+          : meteredByUsage && config.includedCredits > 0
+            ? config.includedCredits
+            : fallback.includedCredits,
       overageUnitCents: planId === "usage" ? config.overageUnitCents : 0,
-      overageUnitName: usesTokens ? config.overageUnitName : fallback.overageUnitName,
+      overageUnitName: fixedLaunchPlan ? fallback.overageUnitName : meteredByUsage ? config.overageUnitName : fallback.overageUnitName,
       stripeUsagePriceId: planId === "usage" ? config.stripeUsagePriceId : null,
       stripeMeterEventName: planId === "usage" ? config.stripeMeterEventName || fallback.stripeMeterEventName : null,
-      isPublic: planId === "normal",
+      isPublic: planId === "normal" || planId === "pro",
       isActive: true,
       sortOrder: fallback.sortOrder,
     };
@@ -684,7 +701,7 @@ export async function listBillingPlanCatalog(): Promise<BillingPlanConfig[]> {
 
 export async function listPublicBillingPlans(): Promise<BillingPlanConfig[]> {
   return (await listBillingPlanCatalog()).filter(
-    (plan) => plan.isActive && plan.isPublic && plan.planId === "normal",
+    (plan) => plan.isActive && plan.isPublic && (plan.planId === "normal" || plan.planId === "pro"),
   );
 }
 
@@ -694,7 +711,7 @@ async function getBillingPlanConfig(planId: BillingPlanId): Promise<BillingPlanC
 
 export async function getCheckoutPlanConfig(planId: BillingPlanId): Promise<BillingPlanConfig> {
   const config = await getBillingPlanConfig(planId);
-  if (!config.isActive || !config.isPublic || planId !== "normal") {
+  if (!config.isActive || !config.isPublic || (planId !== "normal" && planId !== "pro")) {
     throw new Error(`Plan ${planId} is not available for checkout.`);
   }
   const requiresBasePrice = config.monthlyBaseCents > 0 || config.billingModel !== "monthly_plus_usage";
@@ -762,16 +779,13 @@ function monthStartIso() {
 }
 
 function usagePeriodStartIsoForPlan(
-  plan: BillingPlanId,
   billingModel: BillingModel,
   subscription: SubscriptionRow | null | undefined,
-  entitlements: BillingUserEntitlements,
 ) {
   const calendarMonthStart = monthStartIso();
-  const baseStart =
-    billingModel === "monthly_plus_usage" ? subscription?.current_period_start || calendarMonthStart : calendarMonthStart;
-
-  return plan === "free" ? laterIso(baseStart, entitlements.freeQuotaResetAfterIso) : baseStart;
+  return billingModel === "monthly_plus_usage"
+    ? subscription?.current_period_start || calendarMonthStart
+    : calendarMonthStart;
 }
 
 function finiteUnixSeconds(value: unknown): number | null {
@@ -970,7 +984,7 @@ async function loadUsageRows(ownerId: string, sinceIso: string): Promise<UsageRo
   if (!admin) return [];
 
   const richSelect =
-    "id,created_at,action_type,image_count,total_tokens,estimated_cost_usd,conservative_cost_usd";
+    "id,created_at,action_type,image_count,total_tokens,model_used,estimated_cost_usd,conservative_cost_usd";
   const { data, error } = await admin
     .from("usage_logs")
     .select(richSelect)
@@ -981,7 +995,7 @@ async function loadUsageRows(ownerId: string, sinceIso: string): Promise<UsageRo
   if (error) {
     const { data: fallbackData, error: fallbackError } = await admin
       .from("usage_logs")
-      .select("id,created_at,action_type,image_count,total_tokens")
+      .select("id,created_at,action_type,image_count,total_tokens,model_used")
       .eq("user_id", ownerId)
       .gte("created_at", sinceIso)
       .neq("action_type", BILLING_RESERVATION_ACTION);
@@ -997,8 +1011,41 @@ async function loadUsageRows(ownerId: string, sinceIso: string): Promise<UsageRo
   return (data ?? []) as UsageRow[];
 }
 
+async function loadPremiumModelUsageCents(ownerId: string, sinceIso: string) {
+  const admin = getSupabaseAdmin();
+  if (!admin) return 0;
+
+  const { data, error } = await admin
+    .from("usage_logs")
+    .select("estimated_cost_usd,conservative_cost_usd,model_used")
+    .eq("user_id", ownerId)
+    .gte("created_at", sinceIso)
+    .neq("action_type", BILLING_RESERVATION_ACTION)
+    .ilike("model_used", "gpt-5.5%");
+
+  if (error) {
+    console.error("Failed to load premium model usage:", error);
+    return 0;
+  }
+
+  return (data ?? []).reduce((sum, row) => {
+    const estimated = Number((row as UsageRow).estimated_cost_usd || 0);
+    const conservative = Number((row as UsageRow).conservative_cost_usd || 0);
+    const costUsd = Math.max(
+      Number.isFinite(estimated) ? estimated : 0,
+      Number.isFinite(conservative) ? conservative : 0,
+    );
+    return sum + Math.max(0, Math.ceil(costUsd * 100));
+  }, 0);
+}
+
 function usageUnitsForPlan(row: UsageRow, planConfig: Pick<BillingPlanConfig, "overageUnitName">) {
-  if (planConfig.overageUnitName.toLowerCase().includes("token")) {
+  const unit = planConfig.overageUnitName.toLowerCase();
+  if (unit.includes("credit")) {
+    return billingCreditsForTokenCount(row.total_tokens, row.model_used);
+  }
+
+  if (unit.includes("token")) {
     const raw = Number(row.total_tokens ?? 0);
     return Math.max(0, Number.isFinite(raw) ? raw : 0);
   }
@@ -1014,7 +1061,7 @@ function sumUsage(rows: UsageRow[], planConfig: Pick<BillingPlanConfig, "overage
 }
 
 function usesTokenUnits(planConfig: Pick<BillingPlanConfig, "overageUnitName">) {
-  return planConfig.overageUnitName.toLowerCase().includes("token");
+  return usesCreditOrTokenUnits(planConfig);
 }
 
 function meteredUnitSizeForPlan(planConfig: Pick<BillingPlanConfig, "overageUnitName">) {
@@ -1028,96 +1075,6 @@ function meteredUnitsForUsage(rawUsage: number, planConfig: Pick<BillingPlanConf
   const usage = Math.max(0, Math.trunc(Number(rawUsage) || 0));
   const unitSize = meteredUnitSizeForPlan(planConfig);
   return Math.ceil(usage / unitSize);
-}
-
-function getFreeMonthlyCostLimitCents() {
-  return Math.max(0, intEnv("BILLING_FREE_MONTHLY_COST_LIMIT_CENTS", 30));
-}
-
-function getFreeSeatLimit() {
-  const limit = Math.max(0, intEnv("BILLING_FREE_SEAT_LIMIT", 100));
-  return limit > 0 ? limit : null;
-}
-
-function getFreeMonthlyImageLimit() {
-  const rawExplicit = env("BILLING_FREE_MONTHLY_IMAGE_LIMIT");
-  const explicit = intEnv("BILLING_FREE_MONTHLY_IMAGE_LIMIT", 0);
-  if (rawExplicit && explicit <= 0) {
-    return null;
-  }
-  if (explicit > 0) {
-    return explicit;
-  }
-
-  const costLimitUsd = getFreeMonthlyCostLimitCents() / 100;
-  const costPerImageUsd = getFreeEstimatedCostPerImageUsd();
-  if (costLimitUsd <= 0 || costPerImageUsd <= 0) {
-    return null;
-  }
-
-  return Math.max(1, Math.floor(costLimitUsd / costPerImageUsd));
-}
-
-function getFreeEstimatedCostPerImageUsd() {
-  return Math.max(0.000001, numberEnv("BILLING_FREE_ESTIMATED_COST_USD_PER_IMAGE", 0.03));
-}
-
-function getFreeEstimatedTokensPerImage() {
-  return Math.max(1, intEnv("BILLING_EXTRACT_ESTIMATED_TOKENS_PER_FILE", 75_000));
-}
-
-function estimateFreeRequestCostUsd(requestedUsage: number, planConfig: Pick<BillingPlanConfig, "overageUnitName">) {
-  const requested = Math.max(1, Number(requestedUsage) || 1);
-  if (!usesTokenUnits(planConfig)) {
-    return requested * getFreeEstimatedCostPerImageUsd();
-  }
-
-  return (requested / getFreeEstimatedTokensPerImage()) * getFreeEstimatedCostPerImageUsd();
-}
-
-function estimateFreeRequestImages(requestedUsage: number, planConfig: Pick<BillingPlanConfig, "overageUnitName">) {
-  const requested = Math.max(1, Number(requestedUsage) || 1);
-  if (!usesTokenUnits(planConfig)) {
-    return Math.max(1, Math.ceil(requested));
-  }
-
-  return Math.max(1, Math.ceil(requested / getFreeEstimatedTokensPerImage()));
-}
-
-function usageImagesForRow(row: UsageRow) {
-  const raw = Number(row.image_count ?? 0);
-  return Math.max(0, Number.isFinite(raw) ? raw : 0);
-}
-
-function sumUsageImages(rows: UsageRow[]) {
-  return rows.reduce((sum, row) => sum + usageImagesForRow(row), 0);
-}
-
-function fallbackCostForUsageRow(row: UsageRow) {
-  const images = Math.max(1, usageImagesForRow(row));
-  return images * getFreeEstimatedCostPerImageUsd();
-}
-
-function usageCostForRow(row: UsageRow) {
-  const conservative = Number(row.conservative_cost_usd);
-  if (Number.isFinite(conservative) && conservative >= 0) {
-    return conservative;
-  }
-
-  const estimated = Number(row.estimated_cost_usd);
-  if (Number.isFinite(estimated) && estimated >= 0) {
-    return estimated;
-  }
-
-  return fallbackCostForUsageRow(row);
-}
-
-function sumConservativeUsageCostUsd(rows: UsageRow[]) {
-  return rows.reduce((sum, row) => sum + usageCostForRow(row), 0);
-}
-
-function centsFromUsd(value: number) {
-  return Math.max(0, Math.ceil((Number.isFinite(value) ? value : 0) * 100));
 }
 
 async function loadTokenLedgerSummary(ownerId: string) {
@@ -1137,7 +1094,7 @@ async function loadTokenLedgerSummary(ownerId: string) {
     .eq("owner_id", ownerId);
 
   if (error) {
-    console.error("Failed to load prepaid token ledger:", error);
+    console.error("Failed to load prepaid credit ledger:", error);
     return {
       purchased: 0,
       consumed: 0,
@@ -1175,37 +1132,6 @@ type BillingUsageReservationResult = {
   remainingUnits: number;
 };
 
-function numberFromRpc(value: unknown) {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : 0;
-}
-
-function parseReservationRpcResult(raw: unknown): BillingUsageReservationResult {
-  const value = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
-  const reservationId = typeof value.reservation_id === "string" ? value.reservation_id : "";
-  const expiresAtRaw = value.expires_at;
-  const expiresAtIso =
-    typeof expiresAtRaw === "string" && Number.isFinite(new Date(expiresAtRaw).getTime())
-      ? new Date(expiresAtRaw).toISOString()
-      : null;
-
-  return {
-    ok: value.ok === true,
-    reason: typeof value.reason === "string" ? value.reason : null,
-    reservation: reservationId
-      ? {
-          id: reservationId,
-          usageUnits: Math.max(0, numberFromRpc(value.requested_units)),
-          expiresAtIso,
-        }
-      : null,
-    usedUnits: Math.max(0, numberFromRpc(value.used_units)),
-    reservedUnits: Math.max(0, numberFromRpc(value.reserved_units)),
-    effectiveLimitUnits: Math.max(0, numberFromRpc(value.effective_limit_units)),
-    remainingUnits: Math.max(0, numberFromRpc(value.remaining_units)),
-  };
-}
-
 async function reserveBillingUsageWithUsageLog(
   ownerId: string,
   status: BillingStatus,
@@ -1217,7 +1143,7 @@ async function reserveBillingUsageWithUsageLog(
   const usesTokens = usesTokenUnits({ overageUnitName: status.overageUnitName });
   const ttlSeconds = Math.max(60, intEnv("BILLING_USAGE_RESERVATION_TTL_SECONDS", 1200));
   const expiresBeforeIso = new Date(Date.now() - ttlSeconds * 1000).toISOString();
-  const effectiveLimit = Math.max(0, status.monthlyQuota + status.prepaidTokensAvailable);
+  const effectiveLimit = Math.max(0, status.monthlyQuota + status.prepaidCreditsAvailable);
   const reservationSource = (actionType || "ai_request").trim().slice(0, 80);
 
   if (!admin) {
@@ -1273,7 +1199,7 @@ async function reserveBillingUsageWithUsageLog(
 
   const { data: rows, error: usageError } = await admin
     .from("usage_logs")
-    .select("id,action_type,image_count,total_tokens,created_at")
+    .select("id,action_type,image_count,total_tokens,model_used,created_at")
     .eq("user_id", ownerId)
     .gte("created_at", status.usagePeriodStartIso);
 
@@ -1301,8 +1227,7 @@ async function reserveBillingUsageWithUsageLog(
     ) {
       continue;
     }
-    const units = usesTokens ? Number(row.total_tokens ?? 0) : Number(row.image_count ?? 0);
-    const safeUnits = Math.max(0, Number.isFinite(units) ? units : 0);
+    const safeUnits = usageUnitsForPlan(row, { overageUnitName: status.overageUnitName });
     if (row.action_type === BILLING_RESERVATION_ACTION) {
       reservedUnits += safeUnits;
     } else {
@@ -1358,48 +1283,7 @@ async function reserveBillingUsageForStatus(
     };
   }
 
-  if (!boolEnv("BILLING_USE_RESERVATION_RPC", false)) {
-    return reserveBillingUsageWithUsageLog(ownerId, status, requested, actionType);
-  }
-
-  const admin = getSupabaseAdmin();
-  if (!admin) {
-    return {
-      ok: false,
-      reason: "supabase_service_role_missing",
-      reservation: null,
-      usedUnits: status.monthlyUsed,
-      reservedUnits: 0,
-      effectiveLimitUnits: Math.max(0, status.monthlyQuota + status.prepaidTokensAvailable),
-      remainingUnits: Math.max(0, status.effectiveRemaining ?? 0),
-    };
-  }
-
-  const { data, error } = await admin.rpc("reserve_billing_usage", {
-    p_owner_id: ownerId,
-    p_plan_id: status.plan,
-    p_billing_model: status.billingModel,
-    p_period_start: status.usagePeriodStartIso,
-    p_quota_units: status.monthlyQuota,
-    p_prepaid_available_units: status.prepaidTokensAvailable,
-    p_requested_units: requested,
-    p_uses_token_units: usesTokenUnits({ overageUnitName: status.overageUnitName }),
-    p_action_type: actionType || null,
-    p_reservation_ttl_seconds: intEnv("BILLING_USAGE_RESERVATION_TTL_SECONDS", 1200),
-    p_metadata: {
-      source: "require_billing_entitlement",
-      requested_usage: requested,
-      plan: status.plan,
-      billing_model: status.billingModel,
-    },
-  });
-
-  if (error) {
-    console.error("Failed to reserve billing usage:", error);
-    return reserveBillingUsageWithUsageLog(ownerId, status, requested, actionType);
-  }
-
-  return parseReservationRpcResult(data);
+  return reserveBillingUsageWithUsageLog(ownerId, status, requested, actionType);
 }
 
 export async function finalizeBillingUsageReservation(
@@ -1478,104 +1362,13 @@ function usageWindowAroundRow(
   return { usedBefore, usedAfter, foundCurrentRow };
 }
 
-function prepaidWindowAroundFreeRow(
-  rows: UsageRow[],
-  currentUsageLogId: string,
-  planConfig: Pick<BillingPlanConfig, "includedCredits" | "overageUnitName">,
-  freeTrialAvailable: boolean,
-) {
-  const imageLimit = getFreeMonthlyImageLimit();
-  const costLimitCents = getFreeMonthlyCostLimitCents();
-  let trialTokens = 0;
-  let trialImages = 0;
-  let trialCostCents = 0;
-  let prepaidBefore = 0;
-  let prepaidAfter = 0;
-  let foundCurrentRow = false;
-
-  for (const row of orderedUsageRows(rows)) {
-    const rowTokens = usageUnitsForPlan(row, planConfig);
-    const rowImages = usageImagesForRow(row);
-    const rowCostCents = centsFromUsd(usageCostForRow(row));
-    const withinTokenBudget = trialTokens + rowTokens <= Math.max(0, planConfig.includedCredits);
-    const withinImageBudget = imageLimit == null || trialImages + rowImages <= imageLimit;
-    const withinCostBudget = costLimitCents <= 0 || trialCostCents + rowCostCents <= costLimitCents;
-    const coveredByFreeTrial = freeTrialAvailable && withinTokenBudget && withinImageBudget && withinCostBudget;
-
-    if (row.id === currentUsageLogId) {
-      prepaidBefore = prepaidAfter;
-    }
-
-    if (coveredByFreeTrial) {
-      trialTokens += rowTokens;
-      trialImages += rowImages;
-      trialCostCents += rowCostCents;
-    } else {
-      prepaidAfter += rowTokens;
-    }
-
-    if (row.id === currentUsageLogId) {
-      foundCurrentRow = true;
-      break;
-    }
-  }
-
-  return { prepaidBefore, prepaidAfter, foundCurrentRow };
-}
-
 async function consumePrepaidTokensForUsage(
   ownerId: string,
   usageLogId: string,
   planConfig: BillingPlanConfig,
   usageRows: UsageRow[],
-  options?: { freeTrialAvailable?: boolean },
 ) {
-  if (!planConfig.overageUnitName.toLowerCase().includes("token") || planConfig.includedCredits < 0) {
-    return;
-  }
-
-  if (planConfig.planId === "free") {
-    const freeSeatState = await loadFreeSeatState(ownerId, false);
-    const freeTrialAvailable =
-      options?.freeTrialAvailable ?? (freeSeatState.claimed || freeSeatState.available);
-    const { prepaidBefore, prepaidAfter, foundCurrentRow } = prepaidWindowAroundFreeRow(
-      usageRows,
-      usageLogId,
-      planConfig,
-      freeTrialAvailable,
-    );
-    if (!foundCurrentRow) {
-      return;
-    }
-
-    const tokensToConsume = prepaidAfter - prepaidBefore;
-    if (tokensToConsume <= 0) {
-      return;
-    }
-
-    const admin = getSupabaseAdmin();
-    if (!admin) {
-      return;
-    }
-
-    const { error } = await admin.from("app_billing_token_ledger").insert({
-      owner_id: ownerId,
-      delta_tokens: -tokensToConsume,
-      reason: "quota_overage_consumption",
-      usage_log_id: usageLogId,
-      description: "Consumed prepaid pay-as-you-go tokens after Free trial budget was exhausted.",
-      metadata: {
-        plan_id: planConfig.planId,
-        free_monthly_cost_limit_cents: getFreeMonthlyCostLimitCents(),
-        free_monthly_image_limit: getFreeMonthlyImageLimit(),
-        prepaid_before: prepaidBefore,
-        prepaid_after: prepaidAfter,
-      },
-    });
-
-    if (error && error.code !== "23505") {
-      console.error("Failed to consume prepaid token ledger:", error);
-    }
+  if (!usesCreditOrTokenUnits(planConfig) || planConfig.includedCredits < 0) {
     return;
   }
 
@@ -1586,8 +1379,8 @@ async function consumePrepaidTokensForUsage(
 
   const consumedBefore = Math.max(0, usedBefore - planConfig.includedCredits);
   const consumedAfter = Math.max(0, usedAfter - planConfig.includedCredits);
-  const tokensToConsume = consumedAfter - consumedBefore;
-  if (tokensToConsume <= 0) {
+  const creditsToConsume = consumedAfter - consumedBefore;
+  if (creditsToConsume <= 0) {
     return;
   }
 
@@ -1598,20 +1391,20 @@ async function consumePrepaidTokensForUsage(
 
   const { error } = await admin.from("app_billing_token_ledger").insert({
     owner_id: ownerId,
-    delta_tokens: -tokensToConsume,
+    delta_tokens: -creditsToConsume,
     reason: "quota_overage_consumption",
     usage_log_id: usageLogId,
-    description: "Consumed prepaid tokens after monthly included quota was exhausted.",
+    description: "Consumed prepaid AI credits after monthly included quota was exhausted.",
     metadata: {
       plan_id: planConfig.planId,
-      monthly_included_tokens: planConfig.includedCredits,
+      monthly_included_credits: planConfig.includedCredits,
       used_before: usedBefore,
       used_after: usedAfter,
     },
   });
 
   if (error && error.code !== "23505") {
-    console.error("Failed to consume prepaid token ledger:", error);
+    console.error("Failed to consume prepaid credit ledger:", error);
   }
 }
 
@@ -1621,9 +1414,13 @@ export type BillingUsageAction =
   | "guidance_chat"
   | "preview_fill";
 
-export function estimateBillingTokensForAction(actionType: BillingUsageAction, units = 1) {
+export function estimateBillingCreditsForAction(
+  actionType: BillingUsageAction,
+  units = 1,
+  modelUsed?: string | null,
+) {
   const count = Math.max(1, Math.trunc(Number(units) || 1));
-  const perUnit =
+  const estimatedTokensPerUnit =
     actionType === "extract_table"
       ? intEnv("BILLING_EXTRACT_ESTIMATED_TOKENS_PER_FILE", 75_000)
       : actionType === "template_from_image"
@@ -1632,107 +1429,7 @@ export function estimateBillingTokensForAction(actionType: BillingUsageAction, u
           ? intEnv("BILLING_PREVIEW_ESTIMATED_TOKENS", 75_000)
           : intEnv("BILLING_GUIDANCE_ESTIMATED_TOKENS", 50_000);
 
-  return Math.max(1, count * Math.max(1, perUnit));
-}
-
-function parseFreeSeatState(raw: unknown, fallbackLimit: number | null): FreeSeatState | null {
-  if (!raw || typeof raw !== "object") {
-    return null;
-  }
-
-  const value = raw as Record<string, unknown>;
-  const limitRaw = Number(value.limit);
-  const usedRaw = Number(value.used);
-  const ok = value.ok === true;
-  const claimed = value.claimed === true || value.reason === "already_claimed";
-
-  return {
-    limit: Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : fallbackLimit,
-    used: Number.isFinite(usedRaw) && usedRaw >= 0 ? usedRaw : null,
-    claimed,
-    available: ok || claimed,
-    reason: typeof value.reason === "string" ? value.reason : null,
-  };
-}
-
-async function loadFreeSeatState(ownerId: string, claim: boolean): Promise<FreeSeatState> {
-  const limit = getFreeSeatLimit();
-  if (limit == null) {
-    return { limit: null, used: null, claimed: true, available: true, reason: "unlimited" };
-  }
-
-  const admin = getSupabaseAdmin();
-  if (!admin) {
-    return { limit, used: null, claimed: false, available: true, reason: "billing_not_configured" };
-  }
-
-  if (claim) {
-    const { data, error } = await admin.rpc("claim_free_plan_seat", {
-      p_owner_id: ownerId,
-      p_seat_limit: limit,
-    });
-
-    if (!error) {
-      const parsed = parseFreeSeatState(data, limit);
-      if (parsed) {
-        return parsed;
-      }
-    } else {
-      console.error("Failed to claim Free plan seat:", error);
-    }
-  }
-
-  const { data: existing, error: existingError } = await admin
-    .from("app_free_plan_seats")
-    .select("owner_id")
-    .eq("owner_id", ownerId)
-    .maybeSingle();
-
-  if (existingError) {
-    console.error("Failed to load Free plan seat:", existingError);
-    return { limit, used: null, claimed: false, available: true, reason: "free_seat_table_missing" };
-  }
-
-  const { count, error: countError } = await admin
-    .from("app_free_plan_seats")
-    .select("owner_id", { count: "exact", head: true });
-
-  if (countError) {
-    console.error("Failed to count Free plan seats:", countError);
-    return { limit, used: null, claimed: Boolean(existing), available: Boolean(existing), reason: "free_seat_count_failed" };
-  }
-
-  const used = Math.max(0, count ?? 0);
-  const claimed = Boolean(existing);
-  if (claim && !claimed && used < limit) {
-    const { error: insertError } = await admin.from("app_free_plan_seats").insert({ owner_id: ownerId });
-    if (insertError) {
-      console.error("Failed to insert Free plan seat:", insertError);
-      return {
-        limit,
-        used,
-        claimed: false,
-        available: used < limit,
-        reason: "free_seat_insert_failed",
-      };
-    }
-
-    return {
-      limit,
-      used: used + 1,
-      claimed: true,
-      available: true,
-      reason: "claimed_without_rpc",
-    };
-  }
-
-  return {
-    limit,
-    used,
-    claimed,
-    available: claimed || used < limit,
-    reason: claimed ? "already_claimed" : used < limit ? "available" : "free_seats_full",
-  };
+  return Math.max(1, billingCreditsForTokenCount(count * Math.max(1, estimatedTokensPerUnit), modelUsed));
 }
 
 export async function getBillingStatusForUser(ownerId: string): Promise<BillingStatus> {
@@ -1745,7 +1442,6 @@ export async function getBillingStatusForUser(ownerId: string): Promise<BillingS
   const explicitPlan = normalizeBillingPlan(subscription?.plan);
   const catalog = await loadBillingCatalogMap();
   const plan = lifetimeFree ? "free" : usable ? explicitPlan || "free" : explicitPlan === "free" ? "free" : "free";
-  const freeQuotaBlocked = !lifetimeFree && plan === "free" && billingEntitlements.freeQuotaBlocked;
   const basePlanConfig = catalog.get(plan) || fallbackPlanConfig(plan);
   const planConfig: BillingPlanConfig = lifetimeFree
     ? {
@@ -1761,29 +1457,23 @@ export async function getBillingStatusForUser(ownerId: string): Promise<BillingS
         stripeMeterEventName: null,
       }
     : basePlanConfig;
-  const usageStart = usagePeriodStartIsoForPlan(plan, planConfig.billingModel, subscription, billingEntitlements);
+  const usageStart = usagePeriodStartIsoForPlan(planConfig.billingModel, subscription);
   const usageRows = await loadUsageRows(ownerId, usageStart);
   const used = sumUsage(usageRows, planConfig);
-  const monthlyImagesUsed = sumUsageImages(usageRows);
-  const freeMonthlyCostUsedUsd = plan === "free" ? sumConservativeUsageCostUsd(usageRows) : 0;
-  const freeMonthlyCostUsedCents = centsFromUsd(freeMonthlyCostUsedUsd);
-  const freeMonthlyCostLimitCents = !lifetimeFree && plan === "free" ? getFreeMonthlyCostLimitCents() : 0;
-  const freeMonthlyCostRemainingCents =
-    !lifetimeFree && plan === "free" && freeMonthlyCostLimitCents > 0
-      ? Math.max(0, freeMonthlyCostLimitCents - freeMonthlyCostUsedCents)
-      : null;
-  const freeMonthlyImageLimit = !lifetimeFree && plan === "free" ? getFreeMonthlyImageLimit() : null;
-  const freeMonthlyImagesRemaining =
-    !lifetimeFree && plan === "free" && freeMonthlyImageLimit != null
-      ? Math.max(0, freeMonthlyImageLimit - monthlyImagesUsed)
-      : null;
-  const freeSeatState =
-    lifetimeFree
-      ? { limit: null, used: null, claimed: true, available: true, reason: "lifetime_free" }
-      : plan === "free"
-        ? await loadFreeSeatState(ownerId, false)
-        : { limit: null, used: null, claimed: true, available: true, reason: null };
   const tokenLedger = await loadTokenLedgerSummary(ownerId);
+  const premiumModelUsedCents = await loadPremiumModelUsageCents(ownerId, monthStartIso());
+  const premiumModelMonthlyBudgetCents = lifetimeFree ? -1 : premiumModelMonthlyBudgetCentsForPlan(plan);
+  const premiumModelRemainingCents =
+    premiumModelMonthlyBudgetCents < 0
+      ? null
+      : Math.max(0, premiumModelMonthlyBudgetCents - premiumModelUsedCents);
+  const premiumModelWarningCents = premiumModelWarningCentsForPlan(plan);
+  const premiumModelRequestLimitCentsValue = premiumModelRequestLimitCents();
+  const premiumModelCanUse =
+    lifetimeFree ||
+    (plan === "pro" &&
+      usable &&
+      (premiumModelRemainingCents == null || premiumModelRemainingCents > 0));
   const remainingIncluded =
     planConfig.includedCredits < 0 ? null : Math.max(0, planConfig.includedCredits - used);
   const effectiveRemaining =
@@ -1805,18 +1495,7 @@ export async function getBillingStatusForUser(ownerId: string): Promise<BillingS
       canUseAi = usable;
     } else {
       const hasRemaining = effectiveRemaining == null || effectiveRemaining > 0;
-      const hasPrepaidTokens = plan === "free" && tokenLedger.available > 0;
-      const hasFreeCostBudget =
-        plan !== "free" ||
-        hasPrepaidTokens ||
-        freeMonthlyCostLimitCents <= 0 ||
-        freeMonthlyCostUsedCents < freeMonthlyCostLimitCents;
-      const hasFreeImageBudget =
-        plan !== "free" || hasPrepaidTokens || freeMonthlyImageLimit == null || monthlyImagesUsed < freeMonthlyImageLimit;
-      const hasFreeSeat = plan !== "free" || hasPrepaidTokens || freeSeatState.available;
-      const hasFreeAdminAccess = plan !== "free" || hasPrepaidTokens || !freeQuotaBlocked;
       canUseAi = usable ? hasRemaining : plan === "free" && hasRemaining;
-      canUseAi = canUseAi && hasFreeCostBudget && hasFreeImageBudget && hasFreeSeat && hasFreeAdminAccess;
     }
   }
 
@@ -1824,16 +1503,8 @@ export async function getBillingStatusForUser(ownerId: string): Promise<BillingS
   if (!lifetimeFree && enforced && !canUseAi) {
     if (planConfig.billingModel === "monthly_plus_usage") {
       message = "Your subscription is inactive. Please update payment or manage your subscription.";
-    } else if (plan === "free" && freeQuotaBlocked) {
-      message = "Free usage is disabled for this account. Upgrade to Normal or buy prepaid usage credits to continue.";
-    } else if (plan === "free" && !freeSeatState.available) {
-      message = "Free beta seats are full. Upgrade to Normal or buy prepaid usage credits to continue.";
-    } else if (plan === "free" && freeMonthlyCostLimitCents > 0 && freeMonthlyCostUsedCents >= freeMonthlyCostLimitCents) {
-      message = "Your Free monthly AI cost budget has been used. Upgrade to Normal or buy prepaid usage credits to continue.";
-    } else if (plan === "free" && freeMonthlyImageLimit != null && monthlyImagesUsed >= freeMonthlyImageLimit) {
-      message = "Your Free monthly image quota has been used. Upgrade to Normal or buy prepaid usage credits to continue.";
     } else {
-      message = "Your monthly AI token quota has been used. Buy prepaid usage credits or manage your subscription to continue.";
+      message = "Your monthly AI credit quota has been used. Buy prepaid usage credits or manage your subscription to continue.";
     }
   }
 
@@ -1847,8 +1518,6 @@ export async function getBillingStatusForUser(ownerId: string): Promise<BillingS
     configured,
     enforced,
     lifetimeFree,
-    freeQuotaBlocked,
-    freeQuotaResetAfterIso: billingEntitlements.freeQuotaResetAfterIso,
     plan,
     planLabel: planConfig.displayName,
     billingModel: planConfig.billingModel,
@@ -1861,22 +1530,18 @@ export async function getBillingStatusForUser(ownerId: string): Promise<BillingS
     monthlyBaseCents: planConfig.monthlyBaseCents,
     monthlyQuota: planConfig.includedCredits,
     monthlyUsed: used,
-    monthlyImagesUsed,
     remainingIncluded,
-    freeMonthlyCostLimitCents,
-    freeMonthlyCostUsedCents,
-    freeMonthlyCostRemainingCents,
-    freeMonthlyImageLimit,
-    freeMonthlyImagesRemaining,
-    freeSeatLimit: freeSeatState.limit,
-    freeSeatsUsed: freeSeatState.used,
-    freeSeatClaimed: freeSeatState.claimed,
-    freeSeatAvailable: freeSeatState.available,
-    prepaidTokensPurchased: tokenLedger.purchased,
-    prepaidTokensConsumed: tokenLedger.consumed,
-    prepaidTokensBalance: tokenLedger.balance,
-    prepaidTokensAvailable: tokenLedger.available,
+    prepaidCreditsPurchased: tokenLedger.purchased,
+    prepaidCreditsConsumed: tokenLedger.consumed,
+    prepaidCreditsBalance: tokenLedger.balance,
+    prepaidCreditsAvailable: tokenLedger.available,
     effectiveRemaining,
+    premiumModelMonthlyBudgetCents,
+    premiumModelUsedCents,
+    premiumModelRemainingCents,
+    premiumModelWarningCents,
+    premiumModelRequestLimitCents: premiumModelRequestLimitCentsValue,
+    premiumModelCanUse,
     billableUsage,
     meteredBillableUnits,
     meteredUnitSize,
@@ -1921,111 +1586,10 @@ export async function requireBillingEntitlement(
       return { ok: true, status };
     }
   } else {
-    let effectiveStatus = status;
-    let prepaidOverride = false;
-
-    if (status.plan === "free") {
-      const requestCostCents = centsFromUsd(
-        estimateFreeRequestCostUsd(requested, {
-          overageUnitName: status.overageUnitName,
-        }),
-      );
-      const requestImages = estimateFreeRequestImages(requested, {
-        overageUnitName: status.overageUnitName,
-      });
-      const exceedsFreeCostBudget =
-        status.freeMonthlyCostLimitCents > 0 &&
-        status.freeMonthlyCostUsedCents + requestCostCents > status.freeMonthlyCostLimitCents;
-      const exceedsFreeImageQuota =
-        status.freeMonthlyImageLimit != null &&
-        status.monthlyImagesUsed + requestImages > status.freeMonthlyImageLimit;
-      const needsPrepaidTokens = exceedsFreeCostBudget || exceedsFreeImageQuota;
-      const hasPrepaidForRequest = status.prepaidTokensAvailable >= requested;
-
-      if (needsPrepaidTokens && !hasPrepaidForRequest) {
-        return {
-          ok: false,
-          status: {
-            ...status,
-            canUseAi: false,
-            upgradeRequired: true,
-            message: "Your Free trial budget is used. Upgrade to Normal or buy prepaid usage credits to continue.",
-          },
-          response: Response.json(
-            {
-              error: "Your Free trial budget is used. Upgrade to Normal or buy prepaid usage credits to continue.",
-              code: exceedsFreeCostBudget ? "free_cost_budget_exceeded" : "free_image_quota_exceeded",
-              requestedTokens: requested,
-              estimatedRequestCostCents: requestCostCents,
-              estimatedRequestImages: requestImages,
-              billing: status,
-            },
-            { status: 402 },
-          ),
-        };
-      }
-
-      if (!needsPrepaidTokens) {
-        const claimedSeat = await loadFreeSeatState(ownerId, true);
-        if (!claimedSeat.available && !hasPrepaidForRequest) {
-          return {
-            ok: false,
-            status: {
-              ...status,
-              freeSeatLimit: claimedSeat.limit,
-              freeSeatsUsed: claimedSeat.used,
-              freeSeatClaimed: claimedSeat.claimed,
-              freeSeatAvailable: false,
-              canUseAi: false,
-              upgradeRequired: true,
-              message: "Free beta seats are full. Upgrade to Normal or buy prepaid usage credits to continue.",
-            },
-            response: Response.json(
-              {
-                error: "Free beta seats are full. Upgrade to Normal or buy prepaid usage credits to continue.",
-                code: "free_seats_full",
-                requestedTokens: requested,
-                billing: {
-                  ...status,
-                  freeSeatLimit: claimedSeat.limit,
-                  freeSeatsUsed: claimedSeat.used,
-                  freeSeatClaimed: claimedSeat.claimed,
-                  freeSeatAvailable: false,
-                },
-              },
-              { status: 402 },
-            ),
-          };
-        }
-
-        if (!claimedSeat.available && hasPrepaidForRequest) {
-          prepaidOverride = true;
-          effectiveStatus = {
-            ...effectiveStatus,
-            freeSeatLimit: claimedSeat.limit,
-            freeSeatsUsed: claimedSeat.used,
-            freeSeatClaimed: claimedSeat.claimed,
-            freeSeatAvailable: false,
-            canUseAi: true,
-            upgradeRequired: false,
-            message: null,
-          };
-        }
-      }
-
-      if (needsPrepaidTokens && hasPrepaidForRequest) {
-        prepaidOverride = true;
-        effectiveStatus = {
-          ...effectiveStatus,
-          canUseAi: true,
-          upgradeRequired: false,
-          message: null,
-        };
-      }
-    }
+    const effectiveStatus = status;
 
     const enough = effectiveStatus.effectiveRemaining == null || effectiveStatus.effectiveRemaining >= requested;
-    if ((effectiveStatus.canUseAi || prepaidOverride) && enough) {
+    if (effectiveStatus.canUseAi && enough) {
       const reservationResult = await reserveBillingUsageForStatus(ownerId, effectiveStatus, requested, actionType);
       if (reservationResult.ok) {
         return { ok: true, status: effectiveStatus, reservation: reservationResult.reservation };
@@ -2033,7 +1597,7 @@ export async function requireBillingEntitlement(
 
       const message =
         reservationResult.reason === "quota_exceeded"
-          ? "Your monthly AI token quota has been used. Buy prepaid usage credits or manage your subscription to continue."
+          ? "Your monthly AI credit quota has been used. Buy prepaid usage credits or manage your subscription to continue."
           : "Billing quota could not be reserved. Please try again before continuing.";
 
       const blockedStatus = {
@@ -2050,11 +1614,11 @@ export async function requireBillingEntitlement(
           {
             error: message,
             code: reservationResult.reason === "quota_exceeded" ? "billing_required" : "billing_reservation_failed",
-            requestedTokens: requested,
-            usedTokens: reservationResult.usedUnits,
-            reservedTokens: reservationResult.reservedUnits,
-            effectiveLimitTokens: reservationResult.effectiveLimitUnits,
-            remainingTokens: reservationResult.remainingUnits,
+            requestedCredits: requested,
+            usedCredits: reservationResult.usedUnits,
+            reservedCredits: reservationResult.reservedUnits,
+            effectiveLimitCredits: reservationResult.effectiveLimitUnits,
+            remainingCredits: reservationResult.remainingUnits,
             billing: blockedStatus,
           },
           { status: 402 },
@@ -2070,14 +1634,108 @@ export async function requireBillingEntitlement(
       {
         error:
           status.message ||
-          "AI token quota exceeded. Please upgrade or manage your subscription before continuing.",
+          "AI credit quota exceeded. Please upgrade or manage your subscription before continuing.",
         code: "billing_required",
-        requestedTokens: requested,
+        requestedCredits: requested,
         billing: status,
       },
       { status: 402 },
     ),
   };
+}
+
+export async function requirePremiumModelEntitlement(
+  ownerId: string,
+  modelUsed: string | null | undefined,
+  estimatedCostCents = 1,
+  actionType?: BillingUsageAction | string,
+): Promise<{
+  ok: boolean;
+  status: BillingStatus;
+  response?: Response;
+}> {
+  const status = await getBillingStatusForUser(ownerId);
+  if (!isPremiumModel(modelUsed)) {
+    return { ok: true, status };
+  }
+
+  const requestedCents = Math.max(1, Math.trunc(Number(estimatedCostCents) || 1));
+
+  if (status.lifetimeFree || !status.enforced) {
+    return { ok: true, status };
+  }
+
+  if (status.plan !== "pro") {
+    return {
+      ok: false,
+      status,
+      response: Response.json(
+        {
+          error: "gpt-5.5 is reserved for Pro accounts and Recognition Butler expert tasks.",
+          code: "premium_model_requires_pro",
+          requestedPremiumCostCents: requestedCents,
+          actionType,
+          billing: status,
+        },
+        { status: 403 },
+      ),
+    };
+  }
+
+  if (requestedCents > status.premiumModelRequestLimitCents) {
+    return {
+      ok: false,
+      status,
+      response: Response.json(
+        {
+          error: "This gpt-5.5 request is too large for the per-request safety limit.",
+          code: "premium_model_request_too_large",
+          requestedPremiumCostCents: requestedCents,
+          requestLimitCents: status.premiumModelRequestLimitCents,
+          actionType,
+          billing: status,
+        },
+        { status: 402 },
+      ),
+    };
+  }
+
+  if (status.premiumModelRemainingCents != null && requestedCents > status.premiumModelRemainingCents) {
+    return {
+      ok: false,
+      status,
+      response: Response.json(
+        {
+          error: "Your monthly gpt-5.5 expert pool has been used.",
+          code: "premium_model_budget_exhausted",
+          requestedPremiumCostCents: requestedCents,
+          remainingPremiumCostCents: status.premiumModelRemainingCents,
+          actionType,
+          billing: status,
+        },
+        { status: 402 },
+      ),
+    };
+  }
+
+  if (!status.premiumModelCanUse) {
+    return {
+      ok: false,
+      status,
+      response: Response.json(
+        {
+          error: "gpt-5.5 is not currently available for this account.",
+          code: "premium_model_unavailable",
+          requestedPremiumCostCents: requestedCents,
+          actionType,
+          billing: status,
+        },
+        { status: 402 },
+      ),
+    };
+  }
+
+  return { ok: true, status };
 }
 
 export async function recordBillingUsage(input: UsageLogInput) {
@@ -2154,13 +1812,11 @@ export async function recordBillingUsage(input: UsageLogInput) {
   const usableSubscription = isSubscriptionUsable(subscription?.status);
   const plan = usableSubscription ? normalizeBillingPlan(subscription?.plan) || "free" : "free";
   const planConfig = await getBillingPlanConfig(plan);
-  const usageStart = usagePeriodStartIsoForPlan(plan, planConfig.billingModel, subscription, billingEntitlements);
+  const usageStart = usagePeriodStartIsoForPlan(planConfig.billingModel, subscription);
   const usageRows = await loadUsageRows(input.userId, usageStart);
 
   if (planConfig.billingModel === "free_quota" || planConfig.billingModel === "monthly_quota") {
-    await consumePrepaidTokensForUsage(input.userId, data.id, planConfig, usageRows, {
-      freeTrialAvailable: plan === "free" ? !billingEntitlements.freeQuotaBlocked : undefined,
-    });
+    await consumePrepaidTokensForUsage(input.userId, data.id, planConfig, usageRows);
     return;
   }
 
@@ -2186,8 +1842,9 @@ export async function recordBillingUsage(input: UsageLogInput) {
   const foundCurrentRow = usageWindow.foundCurrentRow;
 
   if (!foundCurrentRow) {
-    const currentRowQuantity =
-      planConfig.overageUnitName.toLowerCase().includes("token") ? totalTokens : quantity;
+    const currentRowQuantity = usesCreditOrTokenUnits(planConfig)
+      ? billingCreditsForTokenCount(totalTokens, input.modelUsed)
+      : quantity;
     usedAfter = sumUsage(usageRows, planConfig);
     usedBefore = Math.max(0, usedAfter - currentRowQuantity);
   }
@@ -2301,12 +1958,12 @@ export async function grantTokenPackFromCheckoutSession(session: Stripe.Checkout
     (await resolveOwnerIdFromStripeCustomer(stripeCustomerId));
 
   if (!ownerId) {
-    throw new Error("Cannot map token pack checkout session to an OrSight user.");
+    throw new Error("Cannot map usage credit checkout session to an OrSight user.");
   }
 
   const packId = normalizeTokenPackId(session.metadata?.pack_id) || DEFAULT_TOKEN_PACK_ID;
   const pack = getTokenPackConfig(packId);
-  const tokenCredits = parsePositiveInt(session.metadata?.token_credits, pack.credits);
+  const creditAmount = parsePositiveInt(session.metadata?.credit_amount || session.metadata?.token_credits, pack.credits);
   const paymentIntentId =
     typeof session.payment_intent === "string" ? session.payment_intent : session.payment_intent?.id || null;
 
@@ -2323,7 +1980,7 @@ export async function grantTokenPackFromCheckoutSession(session: Stripe.Checkout
 
   const { error } = await admin.from("app_billing_token_ledger").insert({
     owner_id: ownerId,
-    delta_tokens: tokenCredits,
+    delta_tokens: creditAmount,
     reason: "token_pack_purchase",
     stripe_checkout_session_id: session.id,
     stripe_payment_intent_id: paymentIntentId,
@@ -2338,7 +1995,7 @@ export async function grantTokenPackFromCheckoutSession(session: Stripe.Checkout
   });
 
   if (error && error.code !== "23505") {
-    throw new Error(`Failed to grant token pack credits: ${error.message}`);
+    throw new Error(`Failed to grant usage credits: ${error.message}`);
   }
 }
 

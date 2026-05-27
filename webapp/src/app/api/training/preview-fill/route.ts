@@ -1,7 +1,14 @@
 import { NextResponse } from "next/server";
 import sharp from "sharp";
 
-import { estimateBillingTokensForAction, recordBillingUsage, requireBillingEntitlement } from "@/lib/billing";
+import {
+  estimateBillingCreditsForAction,
+  estimatePremiumModelCostCentsForAction,
+  isPremiumModel,
+  recordBillingUsage,
+  requireBillingEntitlement,
+  requirePremiumModelEntitlement,
+} from "@/lib/billing";
 import { withAuthedStorageTenant } from "@/lib/storage-tenant";
 import { getFormIdFromRequest } from "@/lib/form-request";
 import {
@@ -10,6 +17,7 @@ import {
   mergeTrackedOpenAIUsage,
   type TrackedOpenAIUsage,
 } from "@/lib/openai-accounting";
+import { openAIReasoningEffortForModel } from "@/lib/openai-reasoning";
 import {
   buildEditableRecognitionRulesSection,
   buildRecognitionRuleCodePromptSection,
@@ -610,7 +618,7 @@ async function recoverExceptionsPreviewValue(
       headers: tracking.headers,
       body: JSON.stringify({
         model: PREVIEW_MODEL,
-        reasoning_effort: OPENAI_REASONING_EFFORT,
+        reasoning_effort: openAIReasoningEffortForModel(PREVIEW_MODEL, OPENAI_REASONING_EFFORT),
         response_format: { type: "json_object" },
         messages: [
           {
@@ -891,15 +899,27 @@ export async function POST(request: Request) {
 
     let billingReservationId: string | null = null;
     if (user?.id) {
-      const entitlement = await requireBillingEntitlement(
-        user.id,
-        estimateBillingTokensForAction("preview_fill"),
-        "preview_fill",
-      );
-      if (!entitlement.ok) {
-        return entitlement.response!;
+      if (isPremiumModel(PREVIEW_MODEL)) {
+        const entitlement = await requirePremiumModelEntitlement(
+          user.id,
+          PREVIEW_MODEL,
+          estimatePremiumModelCostCentsForAction("preview_fill", 1, PREVIEW_MODEL),
+          "preview_fill",
+        );
+        if (!entitlement.ok) {
+          return entitlement.response!;
+        }
+      } else {
+        const entitlement = await requireBillingEntitlement(
+          user.id,
+          estimateBillingCreditsForAction("preview_fill", 1, PREVIEW_MODEL),
+          "preview_fill",
+        );
+        if (!entitlement.ok) {
+          return entitlement.response!;
+        }
+        billingReservationId = entitlement.reservation?.id || null;
       }
-      billingReservationId = entitlement.reservation?.id || null;
     }
 
     const requestedFields = Array.isArray(body.tableFields)
@@ -981,7 +1001,7 @@ export async function POST(request: Request) {
         headers: detectTracking.headers,
         body: JSON.stringify({
           model: PREVIEW_MODEL,
-          reasoning_effort: OPENAI_REASONING_EFFORT,
+          reasoning_effort: openAIReasoningEffortForModel(PREVIEW_MODEL, OPENAI_REASONING_EFFORT),
           response_format: { type: "json_object" },
           messages: [
             {
@@ -1075,7 +1095,7 @@ export async function POST(request: Request) {
       headers: previewTracking.headers,
       body: JSON.stringify({
         model: PREVIEW_MODEL,
-        reasoning_effort: OPENAI_REASONING_EFFORT,
+        reasoning_effort: openAIReasoningEffortForModel(PREVIEW_MODEL, OPENAI_REASONING_EFFORT),
         response_format: { type: "json_object" },
         messages: [
           { role: "system", content: systemText },

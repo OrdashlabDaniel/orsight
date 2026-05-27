@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { ArrowLeft, CalendarRange, CreditCard, ShieldCheck, Trash2, UserRound } from "lucide-react";
+import { ArrowLeft, CalendarRange, CreditCard, RotateCcw, ShieldCheck, Trash2, UserRound } from "lucide-react";
 
 import { AdminMetricCard } from "@/components/AdminMetricCard";
 import { AdminPageHeader } from "@/components/AdminPageHeader";
@@ -7,6 +7,7 @@ import { AdminUsageCharts } from "@/components/AdminUsageCharts";
 import { VizIdentityBadges } from "@/components/VizIdentityBadges";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
+  billingCreditsForTokenCount,
   billingSourceLabel,
   formatMoney,
   isAdminOverrideSubscription,
@@ -31,12 +32,10 @@ import {
 } from "../../billing/actions";
 import {
   cancelStripeSubscriptionNowFromUserPageAction,
-  clearFreeQuotaResetFromUserPageAction,
+  clearUserUsageRecordsFromUserPageAction,
   deleteUserFromUserPageAction,
   grantAdminFromUserPageAction,
-  resetFreeQuotaFromUserPageAction,
   revokeAdminFromUserPageAction,
-  setFreeQuotaBlockedFromUserPageAction,
   setLifetimeFreeFromUserPageAction,
 } from "./actions";
 
@@ -101,7 +100,7 @@ function UserTimeRangeControls({
             <CardTitle className="text-base text-slate-950">User Usage Window</CardTitle>
             <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-600">
               Filter this user&apos;s usage cards, charts, model mix, and recent usage events by billing month or UTC
-              date range. Monthly shortcuts use the same calendar-month boundaries as Free/Normal quota accounting.
+              date range. Monthly shortcuts use the same calendar-month boundaries as Free/Normal/Pro quota accounting.
             </p>
           </div>
           <div className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-[12px] text-slate-600">
@@ -206,6 +205,94 @@ function subscriptionStatusLabel(status: string | null | undefined) {
   return status;
 }
 
+function dailyCreditBuckets(logs: Array<{ created_at: string | null; total_tokens?: number | null; model_used?: string | null }>) {
+  const map = new Map<string, number>();
+  for (const log of logs) {
+    if (!log.created_at) continue;
+    const day = log.created_at.slice(0, 10);
+    map.set(day, (map.get(day) || 0) + billingCreditsForTokenCount(log.total_tokens, log.model_used));
+  }
+  return [...map.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([date, tokens]) => ({ date, tokens }));
+}
+
+function modelCreditShares(logs: Array<{ total_tokens?: number | null; model_used?: string | null }>) {
+  const map = new Map<string, number>();
+  for (const log of logs) {
+    const model = log.model_used?.trim() || "unknown";
+    map.set(model, (map.get(model) || 0) + billingCreditsForTokenCount(log.total_tokens, log.model_used));
+  }
+  return [...map.entries()]
+    .map(([name, tokens]) => ({ name, tokens }))
+    .sort((a, b) => b.tokens - a.tokens);
+}
+
+const TOKEN_MILLION = 1_000_000;
+
+function formatTokenMillions(value: number | null | undefined) {
+  const safeValue = Math.max(0, Number(value || 0));
+  const millions = safeValue / TOKEN_MILLION;
+  return `${new Intl.NumberFormat("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: millions > 0 && millions < 0.01 ? 3 : 2,
+  }).format(millions)}M`;
+}
+
+function formatPercent(value: number) {
+  const safeValue = Math.max(0, Math.min(100, value));
+  const decimals = safeValue > 0 && safeValue < 10 ? 1 : 0;
+  return `${safeValue.toFixed(decimals)}%`;
+}
+
+function TokenAllowanceBar({
+  title,
+  remaining,
+  total,
+  used,
+  caption,
+  tone,
+}: {
+  title: string;
+  remaining: number | null;
+  total: number | null;
+  used: number;
+  caption: string;
+  tone: "slate" | "emerald";
+}) {
+  const isUnlimited = total == null || total < 0 || remaining == null;
+  const safeTotal = Math.max(0, Number(total || 0));
+  const safeRemaining = isUnlimited ? safeTotal : Math.max(0, Number(remaining || 0));
+  const percent = isUnlimited ? 100 : safeTotal > 0 ? Math.min(100, (safeRemaining / safeTotal) * 100) : 0;
+  const barClassName = tone === "emerald" ? "bg-emerald-500" : "bg-slate-950";
+  const trackClassName = tone === "emerald" ? "bg-emerald-50" : "bg-slate-100";
+
+  return (
+    <div className="rounded-2xl border border-slate-200 bg-white p-4">
+      <div className="flex items-center justify-between gap-3">
+        <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">{title}</div>
+        <div className="font-mono text-xs font-semibold text-slate-900">
+          {isUnlimited ? "Unlimited" : formatPercent(percent)}
+        </div>
+      </div>
+      <div className="mt-3 flex items-baseline justify-between gap-3">
+        <div className="font-mono text-lg font-semibold text-slate-950">
+          {isUnlimited ? "Unlimited" : `${formatTokenMillions(safeRemaining)} / ${formatTokenMillions(safeTotal)}`}
+        </div>
+        <div className="font-mono text-xs text-slate-500">used {formatTokenMillions(used)}</div>
+      </div>
+      <div
+        className={`mt-3 h-1.5 overflow-hidden rounded-full ${trackClassName}`}
+        aria-label={`${title}: ${isUnlimited ? "Unlimited" : `${formatPercent(percent)} remaining`}`}
+        role="img"
+      >
+        <div className={`h-full rounded-full ${barClassName}`} style={{ width: `${percent}%` }} />
+      </div>
+      <div className="mt-2 text-xs text-slate-500">{caption}</div>
+    </div>
+  );
+}
+
 export default async function UserDetailPage({
   params,
   searchParams,
@@ -252,10 +339,12 @@ export default async function UserDetailPage({
   const displaySubscription = summary.lifetimeFree
     ? "lifetime_free"
     : subscriptionStatusLabel(summary.effectiveSubscription?.status);
-  const freeQuotaResetLabel = summary.freeQuotaResetAfterIso
-    ? new Date(summary.freeQuotaResetAfterIso).toLocaleString("en-US")
-    : "Not set";
-
+  const planQuotaTotal = summary.planConfig.includedCredits < 0 ? null : summary.planConfig.includedCredits;
+  const planQuotaRemaining = summary.planUsage.remainingIncluded;
+  const prepaidTotal = summary.tokenLedger.purchased;
+  const prepaidRemaining = summary.tokenLedger.available;
+  const dailyCredits = dailyCreditBuckets(snapshot.usageLogs);
+  const modelCreditMix = modelCreditShares(snapshot.usageLogs);
   return (
     <div className="space-y-8">
       <div className="flex items-center gap-3">
@@ -301,7 +390,7 @@ export default async function UserDetailPage({
         </div>
       ))}
 
-      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
         <AdminMetricCard
           label="Images"
           value={summary.usage.images.toLocaleString("en-US")}
@@ -309,10 +398,16 @@ export default async function UserDetailPage({
           icon={<UserRound className="h-5 w-5" />}
         />
         <AdminMetricCard
-          label="Tokens"
+          label="Raw Tokens"
           value={summary.usage.tokens.toLocaleString("en-US")}
-          description="Prompt + completion token footprint in recorded usage events."
+          description="Prompt + completion token footprint kept for OpenAI usage audit."
           icon={<ShieldCheck className="h-5 w-5" />}
+        />
+        <AdminMetricCard
+          label="Billable Credits"
+          value={summary.planUsage.used.toLocaleString("en-US")}
+          description="Ordinary quota usage after model multipliers: gpt-5-mini 1x and gpt-5 5x. gpt-5.5 uses the separate Pro expert pool."
+          icon={<CreditCard className="h-5 w-5" />}
         />
         <AdminMetricCard
           label="Estimated Cost"
@@ -328,7 +423,12 @@ export default async function UserDetailPage({
         />
       </div>
 
-      <AdminUsageCharts daily={snapshot.dailyTokens} modelShares={snapshot.modelShares} />
+      <AdminUsageCharts
+        daily={dailyCredits}
+        modelShares={modelCreditMix}
+        trendTitle="Billable Credit Trend"
+        modelTitle="Model Credit Mix"
+      />
 
       <div className="grid gap-6 xl:grid-cols-[0.8fr_1.2fr]">
         <Card className="border-slate-200">
@@ -435,6 +535,25 @@ export default async function UserDetailPage({
               </div>
             </div>
 
+            <div className="grid gap-4 lg:grid-cols-2">
+              <TokenAllowanceBar
+                title="Plan quota remaining"
+                remaining={planQuotaRemaining}
+                total={planQuotaTotal}
+                used={summary.planUsage.used}
+                caption={`${summary.planConfig.displayName} monthly allowance, shown for the selected usage window.`}
+                tone="slate"
+              />
+              <TokenAllowanceBar
+                title="Prepaid credits remaining"
+                remaining={prepaidRemaining}
+                total={prepaidTotal}
+                used={summary.tokenLedger.consumed}
+                caption="One-time purchased AI credits. This balance carries until consumed."
+                tone="emerald"
+              />
+            </div>
+
             <div className="rounded-2xl border border-slate-200 p-4">
               <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
                 <div>
@@ -445,18 +564,18 @@ export default async function UserDetailPage({
                   </p>
                 </div>
                 <div className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-semibold text-slate-600">
-                  Free reset: {freeQuotaResetLabel}
+                  Free quota: 1M credits/month
                 </div>
               </div>
 
-              <div className="mt-4 grid gap-4 md:grid-cols-3">
+              <div className="mt-4 grid gap-4 md:grid-cols-2">
                 <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
                   <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Lifetime Free</div>
                   <div className="mt-2 text-sm font-medium text-slate-900">
                     {summary.lifetimeFree ? "Active" : "Inactive"}
                   </div>
                   <p className="mt-2 min-h-12 text-xs leading-5 text-slate-500">
-                    Active accounts bypass Normal, Usage Credits, and free quota limits.
+                    Active accounts bypass credit quota limits for internal exceptions.
                   </p>
                   <form action={setLifetimeFreeFromUserPageAction} className="mt-3">
                     <input type="hidden" name="userId" value={summary.user.id} />
@@ -476,59 +595,12 @@ export default async function UserDetailPage({
                 </div>
 
                 <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-                  <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Free Quota Access</div>
-                  <div className="mt-2 text-sm font-medium text-slate-900">
-                    {summary.freeQuotaBlocked ? "Disabled" : "Allowed"}
-                  </div>
+                  <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Free Credit Quota</div>
+                  <div className="mt-2 text-sm font-medium text-slate-900">1M credits/month</div>
                   <p className="mt-2 min-h-12 text-xs leading-5 text-slate-500">
-                    Disable free quota to force upgrade or prepaid credits. Prepaid credits can still unlock usage.
+                    Free accounts are blocked when the current UTC month reaches the credit quota. gpt-5-mini uses 1x,
+                    gpt-5 uses 5x, and gpt-5.5 is Pro-only for expert tasks.
                   </p>
-                  <form action={setFreeQuotaBlockedFromUserPageAction} className="mt-3">
-                    <input type="hidden" name="userId" value={summary.user.id} />
-                    <input type="hidden" name="label" value={summary.label} />
-                    <input type="hidden" name="active" value={summary.freeQuotaBlocked ? "0" : "1"} />
-                    <button
-                      type="submit"
-                      className={
-                        summary.freeQuotaBlocked
-                          ? "w-full rounded-2xl bg-slate-950 px-4 py-3 text-sm font-medium text-white hover:bg-slate-800"
-                          : "w-full rounded-2xl border border-amber-300 bg-white px-4 py-3 text-sm font-medium text-amber-900 hover:bg-amber-50"
-                      }
-                    >
-                      {summary.freeQuotaBlocked ? "Restore Free Quota" : "Disable Free Quota"}
-                    </button>
-                  </form>
-                </div>
-
-                <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-                  <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Current Free Month</div>
-                  <div className="mt-2 text-sm font-medium text-slate-900">{freeQuotaResetLabel}</div>
-                  <p className="mt-2 min-h-12 text-xs leading-5 text-slate-500">
-                    Reset starts free-budget accounting from now. Historical usage stays in the ledger.
-                  </p>
-                  <div className="mt-3 grid gap-2">
-                    <form action={resetFreeQuotaFromUserPageAction}>
-                      <input type="hidden" name="userId" value={summary.user.id} />
-                      <input type="hidden" name="label" value={summary.label} />
-                      <button
-                        type="submit"
-                        className="w-full rounded-2xl border border-slate-300 bg-white px-4 py-3 text-sm font-medium text-slate-700 hover:bg-slate-50"
-                      >
-                        Reset Free Quota Now
-                      </button>
-                    </form>
-                    <form action={clearFreeQuotaResetFromUserPageAction}>
-                      <input type="hidden" name="userId" value={summary.user.id} />
-                      <input type="hidden" name="label" value={summary.label} />
-                      <button
-                        type="submit"
-                        disabled={!summary.freeQuotaResetAfterIso}
-                        className="w-full rounded-2xl border border-slate-300 bg-white px-4 py-3 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
-                      >
-                        Clear Reset Marker
-                      </button>
-                    </form>
-                  </div>
                 </div>
               </div>
             </div>
@@ -580,7 +652,7 @@ export default async function UserDetailPage({
               <div className="rounded-2xl border border-slate-200 p-4">
                 <h3 className="text-base font-semibold text-slate-900">Real Stripe Subscription</h3>
                 <p className="mt-2 text-sm leading-6 text-slate-600">
-                  Manage the user&apos;s real Normal subscription. Prepaid Usage Credits are one-time checkout purchases, not a subscription plan.
+                  Manage the user&apos;s real paid subscription. Prepaid Usage Credits are one-time checkout purchases, not a subscription plan.
                 </p>
 
                 {summary.realStripeSubscription?.stripe_subscription_id ? (
@@ -591,10 +663,16 @@ export default async function UserDetailPage({
                       <input type="hidden" name="returnTo" value={returnTo} />
                       <select
                         name="plan"
-                        defaultValue="normal"
+                        defaultValue={summary.realStripeSubscription?.plan === "pro" ? "pro" : "normal"}
                         className="w-full rounded-2xl border border-slate-300 px-3 py-2 text-sm text-slate-900"
                       >
-                        <option value="normal">Normal</option>
+                        {snapshot.planConfigs
+                          .filter((plan) => plan.planId === "normal" || plan.planId === "pro")
+                          .map((plan) => (
+                            <option key={plan.planId} value={plan.planId}>
+                              {plan.displayName}
+                            </option>
+                          ))}
                       </select>
                       <button
                         type="submit"
@@ -681,20 +759,40 @@ export default async function UserDetailPage({
 
       <Card className="border-slate-200">
         <CardHeader className="border-b border-slate-100 bg-white">
-          <CardTitle className="text-lg text-slate-950">Recent Usage Events</CardTitle>
+          <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+            <div>
+              <CardTitle className="text-lg text-slate-950">Recent Usage Events</CardTitle>
+              <p className="mt-1 text-xs leading-5 text-slate-500">
+                Reset this user&apos;s usage for manual billing tests without changing the account or plan.
+              </p>
+            </div>
+            <form action={clearUserUsageRecordsFromUserPageAction}>
+              <input type="hidden" name="userId" value={summary.user.id} />
+              <input type="hidden" name="label" value={summary.label} />
+              <button
+                type="submit"
+                className="inline-flex items-center justify-center gap-2 rounded-2xl border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 shadow-sm hover:bg-slate-50"
+              >
+                <RotateCcw className="h-4 w-4" />
+                Clear Usage Records
+              </button>
+            </form>
+          </div>
         </CardHeader>
         <CardContent className="p-0">
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[1080px] text-left text-sm">
+            <table className="w-full min-w-[1280px] text-left text-sm">
               <thead className="border-b border-slate-200 bg-slate-50 text-slate-500">
                 <tr>
                   <th className="px-5 py-3 font-medium">Timestamp</th>
                   <th className="px-5 py-3 font-medium">Action</th>
                   <th className="px-5 py-3 font-medium">Model</th>
                   <th className="px-5 py-3 font-medium text-right">Images</th>
+                  <th className="px-5 py-3 font-medium text-right">Requests</th>
                   <th className="px-5 py-3 font-medium text-right">Prompt</th>
                   <th className="px-5 py-3 font-medium text-right">Completion</th>
-                  <th className="px-5 py-3 font-medium text-right">Total</th>
+                  <th className="px-5 py-3 font-medium text-right">Raw Total</th>
+                  <th className="px-5 py-3 font-medium text-right">Credits</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
@@ -709,6 +807,9 @@ export default async function UserDetailPage({
                       {(log.image_count || 0).toLocaleString("en-US")}
                     </td>
                     <td className="px-5 py-4 text-right text-slate-700">
+                      {(log.request_count || 0).toLocaleString("en-US")}
+                    </td>
+                    <td className="px-5 py-4 text-right text-slate-700">
                       {(log.prompt_tokens || 0).toLocaleString("en-US")}
                     </td>
                     <td className="px-5 py-4 text-right text-slate-700">
@@ -717,11 +818,14 @@ export default async function UserDetailPage({
                     <td className="px-5 py-4 text-right font-medium text-slate-900">
                       {(log.total_tokens || 0).toLocaleString("en-US")}
                     </td>
+                    <td className="px-5 py-4 text-right font-medium text-slate-900">
+                      {billingCreditsForTokenCount(log.total_tokens, log.model_used).toLocaleString("en-US")}
+                    </td>
                   </tr>
                 ))}
                 {snapshot.usageLogs.length === 0 ? (
                   <tr>
-                    <td colSpan={7} className="px-5 py-10 text-center text-sm text-slate-500">
+                    <td colSpan={9} className="px-5 py-10 text-center text-sm text-slate-500">
                       No usage events found for this user.
                     </td>
                   </tr>
@@ -739,20 +843,31 @@ export default async function UserDetailPage({
             Danger Zone
           </CardTitle>
         </CardHeader>
-        <CardContent className="flex flex-col gap-4 p-5 pt-5 lg:flex-row lg:items-center lg:justify-between">
-          <div className="max-w-2xl text-sm leading-6 text-rose-900">
-            Delete the auth user, admin mapping, and usage logs for this account. This action is destructive and cannot
-            be undone.
+        <CardContent className="grid gap-4 p-5 pt-5 xl:grid-cols-[1fr_420px] xl:items-start">
+          <div className="max-w-3xl text-sm leading-6 text-rose-900">
+            Move this user into the recycle bin. Login is disabled immediately, admin access is removed, and usage logs
+            are retained for 30 days so billing and usage remain auditable. The recycle bin can restore login or delete
+            the user permanently.
           </div>
-          <form action={deleteUserFromUserPageAction}>
+          <form action={deleteUserFromUserPageAction} className="grid gap-3 rounded-2xl border border-rose-200 bg-white p-4">
             <input type="hidden" name="userId" value={summary.user.id} />
             <input type="hidden" name="label" value={summary.label} />
+            <label className="grid gap-1.5 text-xs font-medium text-rose-900">
+              Current admin password
+              <input
+                name="adminPassword"
+                type="password"
+                autoComplete="current-password"
+                required
+                className="rounded-xl border border-rose-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none transition focus:border-rose-500 focus:ring-2 focus:ring-rose-100"
+              />
+            </label>
             <button
               type="submit"
-              className="inline-flex items-center gap-2 rounded-2xl border border-rose-300 bg-white px-4 py-3 text-sm font-medium text-rose-800 hover:bg-rose-50"
+              className="inline-flex items-center justify-center gap-2 rounded-2xl border border-rose-300 bg-white px-4 py-3 text-sm font-medium text-rose-800 hover:bg-rose-50"
             >
               <Trash2 className="h-4 w-4" />
-              Delete User
+              Move User to Recycle Bin
             </button>
           </form>
         </CardContent>

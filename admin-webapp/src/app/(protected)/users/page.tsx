@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { Shield, UserCheck, Users, Wallet } from "lucide-react";
+import { Shield, Trash2, UserCheck, Users, Wallet } from "lucide-react";
 
 import { AdminMetricCard } from "@/components/AdminMetricCard";
 import { AdminPageHeader } from "@/components/AdminPageHeader";
@@ -47,11 +47,20 @@ export default async function UsersPage({
       <AdminPageHeader
         title="Users"
         description="Clean user management surface for identity, plan posture, usage footprint, and entry into each account's control center."
+        actions={
+          <Link
+            href="/users/recycle"
+            className="inline-flex items-center gap-2 rounded-2xl border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 shadow-sm hover:bg-slate-50"
+          >
+            <Trash2 className="h-4 w-4" />
+            Recycle Bin
+          </Link>
+        }
       />
 
       {ok ? (
         <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-[13px] text-emerald-950">
-          User deleted: {ok}
+          User moved to recycle bin: {ok}
         </div>
       ) : null}
       {notice ? (

@@ -22,7 +22,7 @@ function getOrigin(request: Request) {
 
 function normalizePlan(raw: unknown): BillingPlanId | null {
   const plan = normalizeBillingPlan(typeof raw === "string" ? raw : null);
-  if (plan === "normal") {
+  if (plan === "normal" || plan === "pro") {
     return plan;
   }
   return null;
@@ -58,7 +58,7 @@ export async function POST(request: Request) {
   if (purchaseType === "token_pack") {
     const packId = normalizePack(body.packId);
     if (!packId) {
-      return NextResponse.json({ error: "Unsupported token pack." }, { status: 400 });
+      return NextResponse.json({ error: "Unsupported usage credit pack." }, { status: 400 });
     }
 
     let packConfig;
@@ -66,7 +66,7 @@ export async function POST(request: Request) {
       packConfig = await getCheckoutTokenPackConfig(packId);
     } catch (error) {
       return NextResponse.json(
-        { error: error instanceof Error ? error.message : "Token pack is not available." },
+        { error: error instanceof Error ? error.message : "Usage credit pack is not available." },
         { status: 400 },
       );
     }
@@ -76,6 +76,9 @@ export async function POST(request: Request) {
         mode: "payment",
         customer: customerId,
         payment_method_types: ["card"],
+        automatic_tax: { enabled: true },
+        billing_address_collection: "auto",
+        customer_update: { address: "auto" },
         allow_promotion_codes: true,
         line_items: [{ price: packConfig.stripePriceId!, quantity: 1 }],
         client_reference_id: user.id,
@@ -85,7 +88,7 @@ export async function POST(request: Request) {
           owner_id: user.id,
           purchase_type: "token_pack",
           pack_id: packConfig.packId,
-          token_credits: String(packConfig.credits),
+          credit_amount: String(packConfig.credits),
           stripe_price_id: packConfig.stripePriceId!,
           checkout_request_id: checkoutRequestId,
         },
@@ -146,6 +149,9 @@ export async function POST(request: Request) {
     mode: "subscription",
     customer: customerId,
     payment_method_types: ["card"],
+    automatic_tax: { enabled: true },
+    billing_address_collection: "auto",
+    customer_update: { address: "auto" },
     allow_promotion_codes: true,
     line_items: lineItems,
     client_reference_id: user.id,
