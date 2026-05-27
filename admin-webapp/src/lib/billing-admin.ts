@@ -68,7 +68,7 @@ type PlanConfigRow = {
 };
 
 export const PLAN_IDS: BillingPlanId[] = ["free", "normal", "usage", "pro", "business"];
-export const PUBLIC_PLAN_ORDER: BillingPlanId[] = ["free", "normal"];
+export const PUBLIC_PLAN_ORDER: BillingPlanId[] = ["free", "normal", "pro"];
 export const PLAN_ORDER: BillingPlanId[] = ["free", "normal", "usage", "pro", "business"];
 export const ADMIN_OVERRIDE_PREFIX = "admin_override_";
 
@@ -140,17 +140,32 @@ export function getEffectivePlan(row: BillingSubscriptionRow | null | undefined)
   return normalizeBillingPlan(row.plan) || "free";
 }
 
+export function billingCreditMultiplierForModel(modelUsed: string | null | undefined) {
+  const model = (modelUsed || "").trim().toLowerCase();
+  if (!model || model === "billing-reservation") return 1;
+  if (model.startsWith("gpt-5.5")) return 0;
+  if (model.startsWith("gpt-5-mini")) return 1;
+  if (model === "gpt-5" || model.startsWith("gpt-5-")) return 5;
+  return 1;
+}
+
+export function billingCreditsForTokenCount(totalTokens: number | null | undefined, modelUsed: string | null | undefined) {
+  const raw = Math.max(0, Math.trunc(Number(totalTokens) || 0));
+  if (raw <= 0) return 0;
+  return Math.ceil(raw * billingCreditMultiplierForModel(modelUsed));
+}
+
 function fallbackPlanConfig(planId: BillingPlanId): BillingPlanConfig {
   if (planId === "normal") {
     return {
       planId,
       displayName: "Normal",
-      description: "Monthly subscription with a hard 10,000,000 AI token quota.",
+      description: "Monthly subscription with a hard 30,000,000 ordinary AI credit quota.",
       billingModel: "monthly_quota",
-      monthlyBaseCents: intEnv("BILLING_NORMAL_MONTHLY_FEE_CENTS", 999),
-      includedCredits: intEnv("BILLING_NORMAL_MONTHLY_CREDITS", 10_000_000),
+      monthlyBaseCents: intEnv("BILLING_NORMAL_MONTHLY_FEE_CENTS", 1499),
+      includedCredits: intEnv("BILLING_NORMAL_MONTHLY_CREDITS", 30_000_000),
       overageUnitCents: 0,
-      overageUnitName: env("BILLING_NORMAL_USAGE_UNIT") || "tokens",
+      overageUnitName: env("BILLING_NORMAL_USAGE_UNIT") || "credits",
       currency: normalizeCurrency(env("BILLING_CURRENCY") || "usd"),
       stripeBaseProductId: null,
       stripeBasePriceId: env("STRIPE_PRICE_NORMAL_MONTHLY") || null,
@@ -168,12 +183,12 @@ function fallbackPlanConfig(planId: BillingPlanId): BillingPlanConfig {
     return {
       planId,
       displayName: "Legacy Usage",
-      description: "Hidden legacy metered subscription. Current pay-as-you-go uses prepaid token credits instead.",
+      description: "Hidden legacy metered subscription. Current pay-as-you-go uses prepaid AI credits instead.",
       billingModel: "monthly_plus_usage",
       monthlyBaseCents: intEnv("BILLING_USAGE_MONTHLY_FEE_CENTS", 0),
       includedCredits: intEnv("BILLING_USAGE_INCLUDED_CREDITS", 0),
       overageUnitCents: intEnv("BILLING_USAGE_OVERAGE_UNIT_CENTS", 1),
-      overageUnitName: env("BILLING_USAGE_UNIT") || "1K tokens",
+      overageUnitName: env("BILLING_USAGE_UNIT") || "1K credits",
       currency: normalizeCurrency(env("BILLING_CURRENCY") || "usd"),
       stripeBaseProductId: null,
       stripeBasePriceId: env("STRIPE_PRICE_USAGE_MONTHLY") || null,
@@ -214,34 +229,34 @@ function fallbackPlanConfig(planId: BillingPlanId): BillingPlanConfig {
     return {
       planId,
       displayName: "Pro",
-      description: "Standard monthly plan with included usage and metered overage.",
-      billingModel: "monthly_plus_usage",
-      monthlyBaseCents: intEnv("BILLING_PRO_MONTHLY_FEE_CENTS", 2900),
-      includedCredits: intEnv("BILLING_PRO_MONTHLY_CREDITS", 1000),
-      overageUnitCents: intEnv("BILLING_PRO_OVERAGE_UNIT_CENTS", 2),
-      overageUnitName: env("BILLING_PRO_USAGE_UNIT") || "image",
+      description: "Pro subscription with 100,000,000 ordinary AI credits plus a separate gpt-5.5 expert pool.",
+      billingModel: "monthly_quota",
+      monthlyBaseCents: intEnv("BILLING_PRO_MONTHLY_FEE_CENTS", 4999),
+      includedCredits: intEnv("BILLING_PRO_MONTHLY_CREDITS", 100_000_000),
+      overageUnitCents: 0,
+      overageUnitName: env("BILLING_PRO_USAGE_UNIT") || "credits",
       currency: normalizeCurrency(env("BILLING_CURRENCY") || "usd"),
       stripeBaseProductId: null,
       stripeBasePriceId: env("STRIPE_PRICE_PRO_MONTHLY") || null,
       stripeUsageProductId: null,
-      stripeUsagePriceId: env("STRIPE_PRICE_PRO_USAGE") || null,
+      stripeUsagePriceId: null,
       stripeMeterId: null,
-      stripeMeterEventName: env("STRIPE_METER_EVENT_PRO") || "orsight_pro_usage",
-      isPublic: false,
-      isActive: false,
-      sortOrder: 10,
+      stripeMeterEventName: null,
+      isPublic: true,
+      isActive: true,
+      sortOrder: 20,
     };
   }
 
   return {
     planId: "free",
     displayName: "Free",
-    description: "Free starter tier with a hard monthly quota.",
+    description: "Free starter tier with a hard 1,000,000 ordinary AI credit monthly quota.",
     billingModel: "free_quota",
     monthlyBaseCents: 0,
-    includedCredits: intEnv("BILLING_FREE_MONTHLY_CREDITS", 750_000),
+    includedCredits: intEnv("BILLING_FREE_MONTHLY_CREDITS", 1_000_000),
     overageUnitCents: 0,
-    overageUnitName: env("BILLING_FREE_USAGE_UNIT") || "tokens",
+    overageUnitName: env("BILLING_FREE_USAGE_UNIT") || "credits",
     currency: normalizeCurrency(env("BILLING_CURRENCY") || "usd"),
     stripeBaseProductId: null,
     stripeBasePriceId: null,
@@ -298,7 +313,8 @@ export function formatMoney(cents: number | null | undefined, currency = "usd") 
 }
 
 function usesTokenUnits(config: Pick<BillingPlanConfig, "overageUnitName">) {
-  return config.overageUnitName.toLowerCase().includes("token");
+  const unit = config.overageUnitName.toLowerCase();
+  return unit.includes("credit") || unit.includes("token");
 }
 
 function meteredUnitSizeForPlan(config: Pick<BillingPlanConfig, "overageUnitName">) {
@@ -341,7 +357,6 @@ export function isMissingBillingTableErrorMessage(message: string | null | undef
     normalized.includes("app_billing_plan_configs") ||
     normalized.includes("app_usage_invoices") ||
     normalized.includes("app_billing_user_entitlements") ||
-    normalized.includes("app_free_plan_seats") ||
     normalized.includes("app_billing_token_ledger");
 
   return (
@@ -388,22 +403,29 @@ export function coercePlanConfigRow(row: PlanConfigRow): BillingPlanConfig | nul
     sortOrder: Number.isFinite(Number(row.sort_order)) ? Number(row.sort_order) : fallback.sortOrder,
   };
 
-  if (planId === "free" || planId === "normal" || planId === "usage") {
-    const usesTokens = config.overageUnitName.toLowerCase().includes("token");
+  if (planId === "free" || planId === "normal" || planId === "pro" || planId === "usage") {
+    const meteredByUsage = usesTokenUnits(config);
     const billingModel =
       planId === "free" ? "free_quota" : planId === "usage" ? "monthly_plus_usage" : "monthly_quota";
+    const fixedLaunchPlan = planId === "free" || planId === "normal" || planId === "pro";
     return {
       ...config,
+      description: fixedLaunchPlan ? fallback.description : config.description,
       billingModel,
-      monthlyBaseCents: planId === "free" ? 0 : config.monthlyBaseCents,
-      includedCredits: usesTokens && config.includedCredits > 0 ? config.includedCredits : fallback.includedCredits,
+      monthlyBaseCents: planId === "free" ? 0 : fixedLaunchPlan ? fallback.monthlyBaseCents : config.monthlyBaseCents,
+      includedCredits:
+        fixedLaunchPlan
+          ? fallback.includedCredits
+          : meteredByUsage && config.includedCredits > 0
+            ? config.includedCredits
+            : fallback.includedCredits,
       overageUnitCents: planId === "usage" ? config.overageUnitCents : 0,
-      overageUnitName: usesTokens ? config.overageUnitName : fallback.overageUnitName,
+      overageUnitName: fixedLaunchPlan ? fallback.overageUnitName : meteredByUsage ? config.overageUnitName : fallback.overageUnitName,
       stripeUsageProductId: planId === "usage" ? config.stripeUsageProductId : null,
       stripeUsagePriceId: planId === "usage" ? config.stripeUsagePriceId : null,
       stripeMeterId: planId === "usage" ? config.stripeMeterId : null,
       stripeMeterEventName: planId === "usage" ? config.stripeMeterEventName || fallback.stripeMeterEventName : null,
-      isPublic: planId === "normal",
+      isPublic: planId === "normal" || planId === "pro",
       isActive: true,
       sortOrder: fallback.sortOrder,
     };

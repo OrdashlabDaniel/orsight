@@ -49,32 +49,8 @@ export default async function BillingPage({
       tokenEnv: "BILLING_USAGE_CREDIT_30K_TOKENS",
       priceEnv: "BILLING_USAGE_CREDIT_30K_PRICE_CENTS",
       stripeEnv: "STRIPE_PRICE_USAGE_CREDIT_30K",
-      fallbackTokens: 30_000,
+      fallbackTokens: 3_000_000,
       fallbackPriceCents: 300,
-    },
-    {
-      label: "$5",
-      tokenEnv: "BILLING_USAGE_CREDIT_50K_TOKENS",
-      priceEnv: "BILLING_USAGE_CREDIT_50K_PRICE_CENTS",
-      stripeEnv: "STRIPE_PRICE_USAGE_CREDIT_50K",
-      fallbackTokens: 50_000,
-      fallbackPriceCents: 500,
-    },
-    {
-      label: "$7",
-      tokenEnv: "BILLING_USAGE_CREDIT_70K_TOKENS",
-      priceEnv: "BILLING_USAGE_CREDIT_70K_PRICE_CENTS",
-      stripeEnv: "STRIPE_PRICE_USAGE_CREDIT_70K",
-      fallbackTokens: 70_000,
-      fallbackPriceCents: 700,
-    },
-    {
-      label: "$10",
-      tokenEnv: "BILLING_USAGE_CREDIT_100K_TOKENS",
-      priceEnv: "BILLING_USAGE_CREDIT_100K_PRICE_CENTS",
-      stripeEnv: "STRIPE_PRICE_USAGE_CREDIT_100K",
-      fallbackTokens: 100_000,
-      fallbackPriceCents: 1000,
     },
   ].map((pack) => ({
     ...pack,
@@ -91,7 +67,7 @@ export default async function BillingPage({
     <div className="space-y-6">
       <AdminPageHeader
         title="Billing"
-        description="Billing catalog is Free, Normal hard quota, and prepaid Usage Credits. Normal stops at 10,000,000 monthly AI tokens; continued pay-as-you-go usage requires prepaid balance."
+        description="Billing catalog is Free, Normal, Pro, and prepaid Usage Credits. Free stops at 1M ordinary credits, Normal stops at 30M, Pro stops at 100M plus a separate gpt-5.5 expert pool, and $3 buys 3M prepaid ordinary credits."
         actions={
           <Link
             href="/users"
@@ -159,7 +135,7 @@ export default async function BillingPage({
                 <div>
                   <div className="text-xs font-medium uppercase tracking-wide text-slate-500">{pack.label} pack</div>
                   <div className="mt-1 text-lg font-semibold text-slate-950">
-                    {pack.tokens.toLocaleString("en-US")} tokens
+                    {pack.tokens.toLocaleString("en-US")} credits
                   </div>
                 </div>
                 <div className="text-sm font-semibold text-emerald-700">{formatMoney(pack.priceCents)}</div>
@@ -249,7 +225,7 @@ export default async function BillingPage({
                     />
                   </div>
                   <div>
-                    <label className="text-xs font-medium text-slate-600">Monthly token quota</label>
+                    <label className="text-xs font-medium text-slate-600">Monthly credit quota</label>
                     <input
                       name="includedCredits"
                       type="number"

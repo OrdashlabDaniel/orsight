@@ -1,0 +1,22 @@
+<h2>Confirm Your Signup</h2>
+
+<p>Welcome to OrSight.</p>
+<p>Click the button below to confirm your email address and finish account registration:</p>
+
+<p>
+  <a
+    href="{{ .SiteURL }}/auth/confirm?token_hash={{ .TokenHash }}&type=signup&redirect_to={{ .RedirectTo }}"
+    style="display:inline-block;padding:12px 18px;background:#0f172a;color:#ffffff;text-decoration:none;border-radius:8px;font-weight:600;"
+  >
+    Confirm email
+  </a>
+</p>
+
+<p>If the button does not work, copy and open this link in your browser:</p>
+<p>
+  <a href="{{ .SiteURL }}/auth/confirm?token_hash={{ .TokenHash }}&type=signup&redirect_to={{ .RedirectTo }}">
+    {{ .SiteURL }}/auth/confirm?token_hash={{ .TokenHash }}&type=signup&redirect_to={{ .RedirectTo }}
+  </a>
+</p>
+
+<p>If this was not you, you can ignore this email.</p>

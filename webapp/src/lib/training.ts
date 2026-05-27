@@ -1,6 +1,4 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import fs from "node:fs";
-import path from "node:path";
 import sharp from "sharp";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
@@ -164,7 +162,6 @@ type TrainingImageRequestCache = {
   dataUrlByKey: Map<string, Promise<string | null>>;
 };
 
-const GLOBAL_RULES_KEY = "__global_rules__";
 const AGENT_CONTEXT_IMAGE_ROOT = "agent-context";
 const FORM_TRAINING_EXAMPLES_TABLE = "app_form_training_examples";
 export const RECOGNITION_VALIDATION_CONFIG_BEGIN = "【字段缺省策略(JSON_BEGIN)】";
@@ -581,60 +578,21 @@ function emptyGlobalRules(): GlobalRules {
   return { instructions: "", documents: [] };
 }
 
-function globalRulesCandidatePaths(formId = DEFAULT_FORM_ID) {
-  if (normalizeFormId(formId) !== DEFAULT_FORM_ID) {
-    return [
-      path.join(process.cwd(), "training", "forms", formId, "global-rules.json"),
-      path.resolve(process.cwd(), "..", "training", "forms", formId, "global-rules.json"),
-    ];
+async function loadLocalTrainingStore() {
+  if (process.env.NODE_ENV === "production") {
+    return null;
   }
-  return [
-    path.join(process.cwd(), "training", "global-rules.json"),
-    path.resolve(process.cwd(), "..", "training", "global-rules.json"),
-  ];
-}
-
-function resolveGlobalRulesPath(formId = DEFAULT_FORM_ID) {
-  return (
-    globalRulesCandidatePaths(formId).find((filePath) => fs.existsSync(filePath)) ||
-    globalRulesCandidatePaths(formId)[1]
-  );
-}
-
-function loadLocalGlobalRules(formId = DEFAULT_FORM_ID): GlobalRules {
-  const filePath = resolveGlobalRulesPath(formId);
-  if (!fs.existsSync(filePath)) {
-    return emptyGlobalRules();
-  }
-
-  try {
-    const payload = JSON.parse(fs.readFileSync(filePath, "utf8")) as GlobalRules;
-    return {
-      instructions: typeof payload.instructions === "string" ? payload.instructions : "",
-      documents: Array.isArray(payload.documents) ? payload.documents : [],
-      guidanceHistory: Array.isArray(payload.guidanceHistory) ? payload.guidanceHistory : undefined,
-      agentThread: Array.isArray(payload.agentThread) ? payload.agentThread : undefined,
-      workingRules: typeof payload.workingRules === "string" ? payload.workingRules : undefined,
-      tableFields: Array.isArray(payload.tableFields) ? (payload.tableFields as TableFieldDefinition[]) : undefined,
-    };
-  } catch {
-    return emptyGlobalRules();
-  }
-}
-
-function saveLocalGlobalRules(rules: GlobalRules, formId = DEFAULT_FORM_ID) {
-  const filePath = resolveGlobalRulesPath(formId);
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, JSON.stringify(rules, null, 2), "utf8");
+  return await import("@/lib/training-local-store");
 }
 
 export async function loadGlobalRules(formId = DEFAULT_FORM_ID): Promise<GlobalRules> {
   const normalizedFormId = normalizeFormId(formId);
   if (!hasTenantDbAccess()) {
-    if (tenantActive()) {
+    if (tenantActive() || process.env.NODE_ENV === "production") {
       return emptyGlobalRules();
     }
-    return loadLocalGlobalRules(normalizedFormId);
+    const localStore = await loadLocalTrainingStore();
+    return localStore ? localStore.loadLocalGlobalRules(normalizedFormId) : emptyGlobalRules();
   }
 
   try {
@@ -654,20 +612,25 @@ export async function loadGlobalRules(formId = DEFAULT_FORM_ID): Promise<GlobalR
     };
   } catch (error) {
     console.error("Exception loading global rules:", error);
-    if (tenantActive()) {
+    if (tenantActive() || process.env.NODE_ENV === "production") {
       return emptyGlobalRules();
     }
-    return loadLocalGlobalRules(normalizedFormId);
+    const localStore = await loadLocalTrainingStore();
+    return localStore ? localStore.loadLocalGlobalRules(normalizedFormId) : emptyGlobalRules();
   }
 }
 
 export async function saveGlobalRules(rules: GlobalRules, formId = DEFAULT_FORM_ID) {
   const normalizedFormId = normalizeFormId(formId);
   if (!hasTenantDbAccess()) {
-    if (tenantActive()) {
+    if (tenantActive() || process.env.NODE_ENV === "production") {
       throw new Error("Tenant-scoped global rules storage is unavailable.");
     }
-    saveLocalGlobalRules(rules, normalizedFormId);
+    const localStore = await loadLocalTrainingStore();
+    if (!localStore) {
+      throw new Error("Local global rules storage is unavailable.");
+    }
+    localStore.saveLocalGlobalRules(rules, normalizedFormId);
     return;
   }
 
@@ -739,13 +702,17 @@ async function loadLegacyTrainingExamplesFromKv(formId = DEFAULT_FORM_ID): Promi
 async function upsertLegacyTrainingExample(example: TrainingExample, formId = DEFAULT_FORM_ID) {
   const admin = getSupabaseAdmin();
   if (!admin) {
-    if (tenantActive()) {
+    if (tenantActive() || process.env.NODE_ENV === "production") {
       throw new Error("Tenant-scoped legacy training storage is unavailable.");
     }
-    const current = loadLocalTrainingExamples(formId);
+    const localStore = await loadLocalTrainingStore();
+    if (!localStore) {
+      throw new Error("Local training example storage is unavailable.");
+    }
+    const current = localStore.loadLocalTrainingExamples(formId);
     const next = current.filter((item) => item.imageName !== example.imageName);
     next.push(example);
-    saveLocalTrainingExamples(next, formId);
+    localStore.saveLocalTrainingExamples(next, formId);
     return;
   }
   const normalizedFormId = normalizeFormId(formId);
@@ -806,10 +773,11 @@ async function upsertRemoteTrainingExamples(examples: TrainingExample[], formId 
 export async function loadTrainingExamples(formId = DEFAULT_FORM_ID): Promise<TrainingExample[]> {
   const normalizedFormId = normalizeFormId(formId);
   if (!hasTenantDbAccess()) {
-    if (tenantActive()) {
+    if (tenantActive() || process.env.NODE_ENV === "production") {
       return [];
     }
-    return loadLocalTrainingExamples(normalizedFormId);
+    const localStore = await loadLocalTrainingStore();
+    return localStore ? localStore.loadLocalTrainingExamples(normalizedFormId) : [];
   }
 
   try {
@@ -841,19 +809,24 @@ export async function loadTrainingExamples(formId = DEFAULT_FORM_ID): Promise<Tr
     return [];
   } catch (error) {
     console.error("Exception loading examples:", error);
-    if (tenantActive()) {
+    if (tenantActive() || process.env.NODE_ENV === "production") {
       return [];
     }
-    return loadLocalTrainingExamples(normalizedFormId);
+    const localStore = await loadLocalTrainingStore();
+    return localStore ? localStore.loadLocalTrainingExamples(normalizedFormId) : [];
   }
 }
 
 export async function saveTrainingExamples(examples: TrainingExample[], formId = DEFAULT_FORM_ID) {
   if (!hasTenantDbAccess()) {
-    if (tenantActive()) {
+    if (tenantActive() || process.env.NODE_ENV === "production") {
       throw new Error("Tenant-scoped training example storage is unavailable.");
     }
-    saveLocalTrainingExamples(examples, formId);
+    const localStore = await loadLocalTrainingStore();
+    if (!localStore) {
+      throw new Error("Local training example storage is unavailable.");
+    }
+    localStore.saveLocalTrainingExamples(examples, formId);
     return;
   }
   const saved = await upsertRemoteTrainingExamples(examples, formId);
@@ -870,13 +843,17 @@ export async function upsertTrainingExample(example: TrainingExample, formId = D
   }
   const normalizedFormId = normalizeFormId(formId);
   if (!hasTenantDbAccess()) {
-    if (tenantActive()) {
+    if (tenantActive() || process.env.NODE_ENV === "production") {
       throw new Error("Tenant-scoped training example storage is unavailable.");
     }
-    const current = loadLocalTrainingExamples(normalizedFormId);
+    const localStore = await loadLocalTrainingStore();
+    if (!localStore) {
+      throw new Error("Local training example storage is unavailable.");
+    }
+    const current = localStore.loadLocalTrainingExamples(normalizedFormId);
     const next = current.filter((item) => item.imageName !== example.imageName);
     next.push(example);
-    saveLocalTrainingExamples(next, normalizedFormId);
+    localStore.saveLocalTrainingExamples(next, normalizedFormId);
     return next;
   }
 
@@ -912,10 +889,11 @@ export async function listTrainingImages(formId = DEFAULT_FORM_ID) {
   const normalizedFormId = normalizeFormId(formId);
   const storageClient = getTenantDbClient();
   if (!hasTenantDbAccess() || !storageClient) {
-    if (tenantActive()) {
+    if (tenantActive() || process.env.NODE_ENV === "production") {
       return [];
     }
-    return listLocalTrainingImages(normalizedFormId);
+    const localStore = await loadLocalTrainingStore();
+    return localStore ? localStore.listLocalTrainingImages(normalizedFormId) : [];
   }
 
   const tenantFolder = tenantStorageFolderPrefix();
@@ -974,10 +952,14 @@ export async function saveTrainingImageDataUrl(imageName: string, dataUrl: strin
   const storagePath = scopeTrainingBucketPath(getFormImageStoragePath(normalizedFormId, imageName));
   const storageClient = getTenantDbClient();
   if (!hasTenantDbAccess() || !storageClient) {
-    if (tenantActive()) {
+    if (tenantActive() || process.env.NODE_ENV === "production") {
       throw new Error("Tenant-scoped training image storage is unavailable.");
     }
-    saveLocalTrainingImageDataUrl(imageName, dataUrl, normalizedFormId);
+    const localStore = await loadLocalTrainingStore();
+    if (!localStore) {
+      throw new Error("Local training image storage is unavailable.");
+    }
+    localStore.saveLocalTrainingImageDataUrl(imageName, dataUrl, normalizedFormId);
     return;
   }
 
@@ -1002,41 +984,6 @@ export async function saveTrainingImageDataUrl(imageName: string, dataUrl: strin
   }
 }
 
-function saveLocalAgentContextImageDataUrl(imageName: string, dataUrl: string, formId = DEFAULT_FORM_ID) {
-  const dirPath =
-    resolveAgentContextImageDir(formId) || agentContextImageCandidatePaths(formId)[1];
-  fs.mkdirSync(dirPath, { recursive: true });
-
-  const matched = dataUrl.match(/^data:(.+);base64,(.+)$/);
-  if (!matched) {
-    throw new Error("Invalid image data URL.");
-  }
-
-  const buffer = Buffer.from(matched[2], "base64");
-  fs.writeFileSync(path.join(dirPath, imageName), buffer);
-}
-
-function getLocalAgentContextImageBinaryInternal(
-  imageName: string,
-  formId = DEFAULT_FORM_ID,
-): TrainingImageBinary | null {
-  const dirPath = resolveAgentContextImageDir(formId);
-  if (!dirPath) {
-    return null;
-  }
-
-  const filePath = path.join(dirPath, imageName);
-  if (!fs.existsSync(filePath)) {
-    return null;
-  }
-
-  const buffer = fs.readFileSync(filePath);
-  return {
-    buffer,
-    mimeType: detectMimeTypeFromBuffer(buffer, filePath),
-  };
-}
-
 export async function saveAgentContextImageDataUrl(
   imageName: string,
   dataUrl: string,
@@ -1046,10 +993,14 @@ export async function saveAgentContextImageDataUrl(
   const storagePath = scopeTrainingBucketPath(getAgentContextImageStoragePath(normalizedFormId, imageName));
   const storageClient = getTenantDbClient();
   if (!hasTenantDbAccess() || !storageClient) {
-    if (tenantActive()) {
+    if (tenantActive() || process.env.NODE_ENV === "production") {
       throw new Error("Tenant-scoped context image storage is unavailable.");
     }
-    saveLocalAgentContextImageDataUrl(imageName, dataUrl, normalizedFormId);
+    const localStore = await loadLocalTrainingStore();
+    if (!localStore) {
+      throw new Error("Local context image storage is unavailable.");
+    }
+    localStore.saveLocalAgentContextImageDataUrl(imageName, dataUrl, normalizedFormId);
     return;
   }
 
@@ -1086,15 +1037,16 @@ export async function getAgentContextImageBinary(
     const storageClient = getTenantDbClient();
     const legacyAdmin = getSupabaseAdmin();
     if (!hasTenantDbAccess() || !storageClient) {
-      if (tenantActive()) {
+      if (tenantActive() || process.env.NODE_ENV === "production") {
         return null;
       }
-      const localBinary = getLocalAgentContextImageBinaryInternal(imageName, normalizedFormId);
+      const localStore = await loadLocalTrainingStore();
+      const localBinary = localStore?.getLocalAgentContextImageBinary(imageName, normalizedFormId) ?? null;
       if (localBinary) {
         return localBinary;
       }
       return isAgentContextImageName(imageName)
-        ? getLocalTrainingImageBinary(imageName, normalizedFormId)
+        ? (localStore?.getLocalTrainingImageBinary(imageName, normalizedFormId) ?? null)
         : null;
     }
 
@@ -1238,22 +1190,14 @@ export async function deleteTrainingPoolImage(imageName: string, formId = DEFAUL
   const storageClient = getTenantDbClient();
 
   if (!hasTenantDbAccess() || !storageClient) {
-    if (tenantActive()) {
+    if (tenantActive() || process.env.NODE_ENV === "production") {
       throw new Error("Tenant-scoped training image storage is unavailable.");
     }
-    for (const dirPath of trainingImageCandidatePaths(normalizedFormId)) {
-      const filePath = path.join(dirPath, imageName);
-      if (fs.existsSync(filePath)) {
-        fs.unlinkSync(filePath);
-      }
+    const localStore = await loadLocalTrainingStore();
+    if (!localStore) {
+      throw new Error("Local training image storage is unavailable.");
     }
-
-    const currentExamples = loadLocalTrainingExamples(normalizedFormId);
-    const nextExamples = currentExamples.filter((example) => example.imageName !== imageName);
-    if (nextExamples.length !== currentExamples.length) {
-      saveLocalTrainingExamples(nextExamples, normalizedFormId);
-    }
-
+    localStore.deleteLocalTrainingPoolImage(imageName, normalizedFormId);
     await pruneTrainingImageFromGlobalRules(imageName, normalizedFormId);
     return;
   }
@@ -1347,10 +1291,11 @@ export async function getTrainingImageBinary(
   const loadBinary = async (): Promise<TrainingImageBinary | null> => {
     const storageClient = getTenantDbClient();
     if (!hasTenantDbAccess() || !storageClient) {
-      if (tenantActive()) {
+      if (tenantActive() || process.env.NODE_ENV === "production") {
         return null;
       }
-      return getLocalTrainingImageBinary(imageName, normalizedFormId);
+      const localStore = await loadLocalTrainingStore();
+      return localStore?.getLocalTrainingImageBinary(imageName, normalizedFormId) ?? null;
     }
 
     const { data, error } = await runStorageOpWithAdminFallback(storageClient, (client) =>
@@ -1380,135 +1325,8 @@ export async function getTrainingImageBinary(
   return loadBinary();
 }
 
-function examplesCandidatePaths(formId = DEFAULT_FORM_ID) {
-  if (normalizeFormId(formId) !== DEFAULT_FORM_ID) {
-    return [
-      path.join(process.cwd(), "training", "forms", formId, "examples.json"),
-      path.resolve(process.cwd(), "..", "training", "forms", formId, "examples.json"),
-    ];
-  }
-  return [
-    path.join(process.cwd(), "training", "examples.json"),
-    path.resolve(process.cwd(), "..", "training", "examples.json"),
-  ];
-}
-
-function trainingImageCandidatePaths(formId = DEFAULT_FORM_ID) {
-  if (normalizeFormId(formId) !== DEFAULT_FORM_ID) {
-    return [
-      path.join(process.cwd(), "image", "training-ai", "forms", formId),
-      path.resolve(process.cwd(), "..", "image", "training-ai", "forms", formId),
-    ];
-  }
-  return [
-    path.join(process.cwd(), "image", "training-ai"),
-    path.resolve(process.cwd(), "..", "image", "training-ai"),
-  ];
-}
-
-function agentContextImageCandidatePaths(formId = DEFAULT_FORM_ID) {
-  const normalizedFormId = normalizeFormId(formId);
-  return [
-    path.join(process.cwd(), "image", AGENT_CONTEXT_IMAGE_ROOT, normalizedFormId),
-    path.resolve(process.cwd(), "..", "image", AGENT_CONTEXT_IMAGE_ROOT, normalizedFormId),
-  ];
-}
-
-function resolveExamplesPath(formId = DEFAULT_FORM_ID): string {
-  const existing = examplesCandidatePaths(formId).find((filePath) => fs.existsSync(filePath));
-  return existing || examplesCandidatePaths(formId)[1];
-}
-
-function resolveTrainingImageDir(formId = DEFAULT_FORM_ID): string | null {
-  return trainingImageCandidatePaths(formId).find((dirPath) => fs.existsSync(dirPath)) || null;
-}
-
-function resolveAgentContextImageDir(formId = DEFAULT_FORM_ID): string | null {
-  return agentContextImageCandidatePaths(formId).find((dirPath) => fs.existsSync(dirPath)) || null;
-}
-
-function loadLocalTrainingExamples(formId = DEFAULT_FORM_ID): TrainingExample[] {
-  for (const filePath of examplesCandidatePaths(formId)) {
-    if (!fs.existsSync(filePath)) {
-      continue;
-    }
-
-    try {
-      const payload = JSON.parse(fs.readFileSync(filePath, "utf8")) as {
-        examples?: TrainingExample[];
-      };
-      return Array.isArray(payload.examples)
-        ? payload.examples.filter(
-            (example) =>
-              example.imageName !== GLOBAL_RULES_KEY && !isAgentContextImageName(example.imageName),
-          )
-        : [];
-    } catch {
-      return [];
-    }
-  }
-
-  return [];
-}
-
-function saveLocalTrainingExamples(examples: TrainingExample[], formId = DEFAULT_FORM_ID) {
-  const filePath = resolveExamplesPath(formId);
-  const dirPath = path.dirname(filePath);
-  fs.mkdirSync(dirPath, { recursive: true });
-  fs.writeFileSync(filePath, JSON.stringify({ examples }, null, 2), "utf8");
-}
-
-function listLocalTrainingImages(formId = DEFAULT_FORM_ID) {
-  const dirPath = resolveTrainingImageDir(formId);
-  if (!dirPath) {
-    return [];
-  }
-
-  return fs
-    .readdirSync(dirPath)
-    .filter((fileName) => /\.(png|jpg|jpeg|webp|pdf)$/i.test(fileName))
-    .filter((fileName) => !isAgentContextImageName(fileName))
-    .sort()
-    .map((fileName) => ({
-      imageName: fileName,
-      absolutePath: path.join(dirPath, fileName),
-    }));
-}
-
-function saveLocalTrainingImageDataUrl(imageName: string, dataUrl: string, formId = DEFAULT_FORM_ID) {
-  const dirPath =
-    resolveTrainingImageDir(formId) || trainingImageCandidatePaths(formId)[1];
-  fs.mkdirSync(dirPath, { recursive: true });
-
-  const matched = dataUrl.match(/^data:(.+);base64,(.+)$/);
-  if (!matched) {
-    throw new Error("Invalid image data URL.");
-  }
-
-  const buffer = Buffer.from(matched[2], "base64");
-  fs.writeFileSync(path.join(dirPath, imageName), buffer);
-}
-
-function getLocalTrainingImageBinary(imageName: string, formId = DEFAULT_FORM_ID): TrainingImageBinary | null {
-  const dirPath = resolveTrainingImageDir(formId);
-  if (!dirPath) {
-    return null;
-  }
-
-  const filePath = path.join(dirPath, imageName);
-  if (!fs.existsSync(filePath)) {
-    return null;
-  }
-
-  const buffer = fs.readFileSync(filePath);
-  return {
-    buffer,
-    mimeType: detectMimeTypeFromBuffer(buffer, filePath),
-  };
-}
-
 function inferMimeTypeFromName(fileName: string | undefined | null) {
-  const extension = path.extname(fileName || "").toLowerCase();
+  const extension = (fileName || "").toLowerCase().match(/\.[^.]+$/)?.[0];
   switch (extension) {
     case ".png":
       return "image/png";

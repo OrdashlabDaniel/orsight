@@ -1,4 +1,4 @@
-import * as XLSX from "xlsx";
+import * as XLSX from "@e965/xlsx";
 
 import { type AdminUsageLogRow } from "@/lib/admin-data";
 import { type AdminTimeRange } from "@/lib/admin-time-range";

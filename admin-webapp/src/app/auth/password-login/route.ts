@@ -14,7 +14,12 @@ function safeNextPath(raw: FormDataEntryValue | null): string {
 }
 
 export async function POST(request: NextRequest) {
-  const formData = await request.formData();
+  let formData: FormData;
+  try {
+    formData = await request.formData();
+  } catch {
+    formData = new FormData();
+  }
   const identifier = String(formData.get("identifier") ?? "").trim();
   const password = String(formData.get("password") ?? "");
   const nextPath = safeNextPath(formData.get("next"));

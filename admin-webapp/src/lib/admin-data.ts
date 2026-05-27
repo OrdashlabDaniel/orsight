@@ -1,4 +1,5 @@
 import {
+  billingCreditsForTokenCount,
   billingMigrationHint,
   computePlanUsage,
   getEffectivePlan,
@@ -27,6 +28,8 @@ import {
   listRegisteredUsersWithStatus,
   type VizAuthUserRow,
 } from "@/lib/viz-auth-user-rpc";
+import { purgeExpiredRecycledUsers } from "@/lib/viz-recycle-purge";
+import { listRecycledUsers } from "@/lib/viz-recycle-store";
 import { type AdminTimeRange } from "@/lib/admin-time-range";
 
 const ZERO_UUID = "00000000-0000-0000-0000-000000000000";
@@ -83,6 +86,13 @@ export type AdminUserUsageSummary = {
   lastSeenAt: string | null;
 };
 
+export type AdminTokenLedgerSummary = {
+  purchased: number;
+  consumed: number;
+  balance: number;
+  available: number;
+};
+
 export type AdminUserSummary = {
   user: VizAuthUserRow;
   label: string;
@@ -93,10 +103,9 @@ export type AdminUserSummary = {
   realStripeSubscription: BillingSubscriptionRow | null;
   effectivePlan: BillingPlanId;
   lifetimeFree: boolean;
-  freeQuotaBlocked: boolean;
-  freeQuotaResetAfterIso: string | null;
   planConfig: BillingPlanConfig;
   planUsage: ReturnType<typeof computePlanUsage>;
+  tokenLedger: AdminTokenLedgerSummary;
 };
 
 export type AdminDashboardSnapshot = {
@@ -172,8 +181,6 @@ type BillingBundle = {
 
 type BillingControlFlags = {
   lifetimeFree: boolean;
-  freeQuotaBlocked: boolean;
-  freeQuotaResetAfterIso: string | null;
 };
 
 function pushWarning(target: string[], value: string | null | undefined) {
@@ -236,10 +243,14 @@ function isSuspendedUser(user: Pick<VizAuthUserRow, "banned_until" | "deleted_at
 }
 
 function usageUnitsForPlan(
-  log: Pick<AdminUsageLogRow, "image_count" | "total_tokens">,
+  log: Pick<AdminUsageLogRow, "image_count" | "total_tokens" | "model_used">,
   planConfig: Pick<BillingPlanConfig, "overageUnitName">,
 ) {
   const unit = planConfig.overageUnitName.toLowerCase();
+  if (unit.includes("credit")) {
+    return billingCreditsForTokenCount(log.total_tokens, log.model_used);
+  }
+
   if (unit.includes("token")) {
     const tokens = Number(log.total_tokens || 0);
     return Math.max(0, Number.isFinite(tokens) ? tokens : 0);
@@ -393,9 +404,58 @@ async function loadBillingBundle(
 function defaultBillingControlFlags(): BillingControlFlags {
   return {
     lifetimeFree: false,
-    freeQuotaBlocked: false,
-    freeQuotaResetAfterIso: null,
   };
+}
+
+function defaultTokenLedgerSummary(): AdminTokenLedgerSummary {
+  return {
+    purchased: 0,
+    consumed: 0,
+    balance: 0,
+    available: 0,
+  };
+}
+
+async function loadTokenLedgerSummariesByOwner(
+  sb: Awaited<ReturnType<typeof createAdminClient>>,
+  ownerIds: string[],
+): Promise<Map<string, AdminTokenLedgerSummary>> {
+  const summaries = new Map<string, AdminTokenLedgerSummary>();
+  for (const id of ownerIds) {
+    summaries.set(id.toLowerCase(), defaultTokenLedgerSummary());
+  }
+
+  const safeOwnerIds = ownerIds.length > 0 ? ownerIds : [ZERO_UUID];
+  const { data, error } = await sb
+    .from("app_billing_token_ledger")
+    .select("owner_id,delta_tokens")
+    .in("owner_id", safeOwnerIds);
+
+  if (error) {
+    if (isMissingBillingTableErrorMessage(error.message)) {
+      return summaries;
+    }
+    throw new Error(`app_billing_token_ledger: ${error.message}`);
+  }
+
+  for (const row of data ?? []) {
+    const ownerId = (row.owner_id as string | null)?.trim().toLowerCase();
+    if (!ownerId) {
+      continue;
+    }
+    const delta = Number(row.delta_tokens || 0);
+    const current = summaries.get(ownerId) || defaultTokenLedgerSummary();
+    if (delta >= 0) {
+      current.purchased += delta;
+    } else {
+      current.consumed += Math.abs(delta);
+    }
+    current.balance += delta;
+    current.available = Math.max(0, current.balance);
+    summaries.set(ownerId, current);
+  }
+
+  return summaries;
 }
 
 async function loadBillingControlFlagsByOwner(
@@ -411,7 +471,7 @@ async function loadBillingControlFlagsByOwner(
   const { data, error } = await sb
     .from("app_billing_user_entitlements")
     .select("owner_id,entitlement,active,notes")
-    .in("entitlement", ["lifetime_free", "free_quota_blocked", "free_quota_reset_after"])
+    .in("entitlement", ["lifetime_free"])
     .in("owner_id", safeOwnerIds);
 
   if (error) {
@@ -438,10 +498,6 @@ async function loadBillingControlFlagsByOwner(
       const entitlement = String(row.entitlement || "");
       if (entitlement === "lifetime_free") {
         current.lifetimeFree = active;
-      } else if (entitlement === "free_quota_blocked") {
-        current.freeQuotaBlocked = active;
-      } else if (entitlement === "free_quota_reset_after") {
-        current.freeQuotaResetAfterIso = active ? String(row.notes || "").trim() || null : null;
       }
       flagsByOwner.set(ownerId, current);
     }
@@ -458,6 +514,7 @@ function buildAdminUserSummary(
   planConfigs: BillingPlanConfig[],
   usageLogs: AdminUsageLogRow[],
   billingControlFlagsByOwner: Map<string, BillingControlFlags>,
+  tokenLedgerByOwner: Map<string, AdminTokenLedgerSummary>,
   planUsageStartIso?: string | null,
 ): AdminUserSummary {
   const subscriptions = subscriptionsByOwner.get(user.id) || [];
@@ -468,6 +525,7 @@ function buildAdminUserSummary(
   const billingControlFlags =
     billingControlFlagsByOwner.get(user.id.toLowerCase()) || defaultBillingControlFlags();
   const lifetimeFree = billingControlFlags.lifetimeFree;
+  const tokenLedger = tokenLedgerByOwner.get(user.id.toLowerCase()) || defaultTokenLedgerSummary();
   const planConfig = getPlanConfigMap(planConfigs).get(effectivePlan) || planConfigs[0]!;
   const periodStart = planUsageStartIso || effectiveSubscription?.current_period_start || monthStartIso();
   const usedThisPeriod = usageLogs.reduce((sum, log) => {
@@ -497,10 +555,9 @@ function buildAdminUserSummary(
     realStripeSubscription,
     effectivePlan,
     lifetimeFree,
-    freeQuotaBlocked: billingControlFlags.freeQuotaBlocked,
-    freeQuotaResetAfterIso: billingControlFlags.freeQuotaResetAfterIso,
     planConfig,
     planUsage: computePlanUsage(planConfig, usedThisPeriod),
+    tokenLedger,
   };
 }
 
@@ -511,6 +568,17 @@ async function loadAdminDataset(
 ) {
   const sb = await createAdminClient();
   const warnings: string[] = [];
+  let recycledUserIds = new Set<string>();
+
+  try {
+    await purgeExpiredRecycledUsers(sb);
+    recycledUserIds = new Set((await listRecycledUsers(sb)).map((row) => row.id));
+  } catch (error) {
+    pushWarning(
+      warnings,
+      error instanceof Error ? `recycle_purge: ${error.message}` : "recycle_purge: automatic cleanup failed",
+    );
+  }
 
   const [userResult, adminResult, usageResult] = await Promise.allSettled([
     listRegisteredUsersWithStatus(sb),
@@ -520,7 +588,7 @@ async function loadAdminDataset(
 
   const users =
     userResult.status === "fulfilled"
-      ? userResult.value
+      ? userResult.value.filter((user) => !recycledUserIds.has(user.id))
       : (pushWarning(warnings, userResult.reason instanceof Error ? userResult.reason.message : "无法读取用户列表"), []);
 
   const adminIds =
@@ -589,6 +657,14 @@ async function loadAdminDataset(
     );
   });
 
+  const tokenLedgerByOwner = await loadTokenLedgerSummariesByOwner(
+    sb,
+    users.map((user) => user.id),
+  ).catch((error) => {
+    pushWarning(warnings, error instanceof Error ? error.message : "Unable to read prepaid credit ledger.");
+    return new Map(users.map((user) => [user.id.toLowerCase(), defaultTokenLedgerSummary()] as const));
+  });
+
   const usageByUser = buildUsageMap(usageLogs);
   const summaries = users
     .map((user) =>
@@ -600,6 +676,7 @@ async function loadAdminDataset(
         billingBundle.planConfigs,
         usageLogs,
         billingControlFlagsByOwner,
+        tokenLedgerByOwner,
         usageRange?.startIso,
       ),
     )
@@ -651,7 +728,7 @@ export async function loadAdminDashboardSnapshot(): Promise<AdminDashboardSnapsh
           (b.user.created_at || "").localeCompare(a.user.created_at || "") || a.label.localeCompare(b.label),
       )
       .slice(0, 8),
-    planBreakdown: (["free", "normal", "usage"] as BillingPlanId[]).map((planId) => ({
+    planBreakdown: (["free", "normal", "pro", "usage"] as BillingPlanId[]).map((planId) => ({
       planId,
       count: users.filter((user) => user.effectivePlan === planId).length,
     })),
@@ -678,7 +755,7 @@ export async function loadAdminBillingSnapshot(): Promise<AdminBillingSnapshot> 
     warnings: dataset.warnings,
     planConfigs: dataset.planConfigs,
     users: [...dataset.users].sort((a, b) => {
-    const planOrder = ["normal", "usage", "free"];
+      const planOrder = ["pro", "normal", "usage", "free"];
       const delta = planOrder.indexOf(a.effectivePlan) - planOrder.indexOf(b.effectivePlan);
       if (delta !== 0) {
         return delta;
@@ -773,6 +850,10 @@ export async function loadAdminUserDetailSnapshot(
       ],
     ]);
   });
+  const tokenLedgerByOwner = await loadTokenLedgerSummariesByOwner(sb, [userId]).catch((error) => {
+    pushWarning(warnings, error instanceof Error ? error.message : "Unable to read prepaid credit ledger.");
+    return new Map([[userId.toLowerCase(), defaultTokenLedgerSummary()]]);
+  });
   const usageByUser = buildUsageMap(usageLogs.rows);
   const summary = buildAdminUserSummary(
     user,
@@ -782,6 +863,7 @@ export async function loadAdminUserDetailSnapshot(
     billingBundle.planConfigs,
     usageLogs.rows,
     billingControlFlagsByOwner,
+    tokenLedgerByOwner,
     usageRange?.startIso,
   );
 

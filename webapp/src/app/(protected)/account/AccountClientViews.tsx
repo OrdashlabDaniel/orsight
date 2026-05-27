@@ -28,17 +28,81 @@ export type AccountDetailsPayload = {
   email: string | null;
   id: string;
   createdAtIso: string | null;
-  isGofoEmployee: boolean;
-  gofoSite: string | null;
   isDevMockSession: boolean;
   billing: BillingStatus;
   availablePlans: BillingPlanConfig[];
   billingNotice?: string | null;
 };
 
+const TOKEN_MILLION = 1_000_000;
+
+function formatTokenMillions(value: number | null | undefined, locTag: string) {
+  const safeValue = Math.max(0, Number(value || 0));
+  const millions = safeValue / TOKEN_MILLION;
+  return `${new Intl.NumberFormat(locTag, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: millions > 0 && millions < 0.01 ? 3 : 2,
+  }).format(millions)}M`;
+}
+
+function formatPercent(value: number) {
+  const safeValue = Math.max(0, Math.min(100, value));
+  const decimals = safeValue > 0 && safeValue < 10 ? 1 : 0;
+  return `${safeValue.toFixed(decimals)}%`;
+}
+
+function TokenAllowanceBar({
+  title,
+  remaining,
+  total,
+  used,
+  locTag,
+  tone,
+}: {
+  title: string;
+  remaining: number | null;
+  total: number | null;
+  used: number;
+  locTag: string;
+  tone: "slate" | "emerald";
+}) {
+  const isUnlimited = total == null || total < 0 || remaining == null;
+  const safeTotal = Math.max(0, Number(total || 0));
+  const safeRemaining = isUnlimited ? safeTotal : Math.max(0, Number(remaining || 0));
+  const percent = isUnlimited ? 100 : safeTotal > 0 ? Math.min(100, (safeRemaining / safeTotal) * 100) : 0;
+  const barClassName = tone === "emerald" ? "bg-emerald-500" : "bg-slate-950";
+  const trackClassName = tone === "emerald" ? "bg-emerald-50" : "bg-slate-100";
+
+  return (
+    <div className="rounded-xl border border-slate-200 bg-white p-3">
+      <div className="flex items-center justify-between gap-3">
+        <div className="text-xs font-medium text-slate-500">{title}</div>
+        <div className="font-mono text-xs font-semibold text-slate-900">
+          {isUnlimited ? "Unlimited" : formatPercent(percent)}
+        </div>
+      </div>
+      <div className="mt-2 flex items-baseline justify-between gap-3">
+        <div className="font-mono text-sm font-semibold text-slate-950">
+          {isUnlimited ? "Unlimited" : `${formatTokenMillions(safeRemaining, locTag)} / ${formatTokenMillions(safeTotal, locTag)}`}
+        </div>
+        <div className="font-mono text-[11px] text-slate-500">
+          used {formatTokenMillions(used, locTag)}
+        </div>
+      </div>
+      <div
+        className={`mt-3 h-1.5 overflow-hidden rounded-full ${trackClassName}`}
+        aria-label={`${title}: ${isUnlimited ? "Unlimited" : `${formatPercent(percent)} remaining`}`}
+        role="img"
+      >
+        <div className={`h-full rounded-full ${barClassName}`} style={{ width: `${percent}%` }} />
+      </div>
+    </div>
+  );
+}
+
 export function AccountDetailsView({ payload }: { payload: AccountDetailsPayload }) {
   const { locale, t } = useLocale();
-  const [billingBusy, setBillingBusy] = useState<"normal" | TokenPackId | "portal" | null>(null);
+  const [billingBusy, setBillingBusy] = useState<"normal" | "pro" | TokenPackId | "portal" | null>(null);
   const [billingError, setBillingError] = useState<string | null>(null);
   const locTag = locale === "en" ? "en-US" : "zh-CN";
   const billing = payload.billing;
@@ -69,8 +133,8 @@ export function AccountDetailsView({ payload }: { payload: AccountDetailsPayload
           subscriptionStatus: "Subscription status",
           paymentStatus: "Payment status",
           unbilled: "unbilled",
-          currentUsage: "Current usage",
-          remainingQuota: "Remaining quota",
+          currentUsage: "Current credits",
+          remainingQuota: "Remaining credits",
           monthlyFee: "Monthly fee",
           billingModel: "Billing model",
           billableUsage: "Billable usage",
@@ -87,8 +151,8 @@ export function AccountDetailsView({ payload }: { payload: AccountDetailsPayload
           subscriptionStatus: "订阅状态",
           paymentStatus: "支付状态",
           unbilled: "未出账",
-          currentUsage: "本期用量",
-          remainingQuota: "剩余额度",
+          currentUsage: "本期 credits",
+          remainingQuota: "剩余 credits",
           monthlyFee: "月费",
           billingModel: "计费模式",
           billableUsage: "本期可计费量",
@@ -100,7 +164,7 @@ export function AccountDetailsView({ payload }: { payload: AccountDetailsPayload
           manageSubscription: "管理订阅",
         };
 
-  async function startCheckout(plan: "normal") {
+  async function startCheckout(plan: "normal" | "pro") {
     setBillingError(null);
     setBillingBusy(plan);
     try {
@@ -196,12 +260,12 @@ export function AccountDetailsView({ payload }: { payload: AccountDetailsPayload
         ) : null}
         {payload.billingNotice === "token-pack-success" ? (
           <p className="mb-4 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-900">
-            Usage credits purchased. Your prepaid token balance will update after Stripe confirms the payment.
+            Usage credits purchased. Your prepaid credit balance will update after Stripe confirms the payment.
           </p>
         ) : null}
         {payload.billingNotice === "token-pack-cancelled" ? (
           <p className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
-            Usage credit checkout was cancelled. No prepaid tokens were added.
+            Usage credit checkout was cancelled. No prepaid credits were added.
           </p>
         ) : null}
         {payload.isDevMockSession ? (
@@ -233,16 +297,6 @@ export function AccountDetailsView({ payload }: { payload: AccountDetailsPayload
           <div>
             <dt className="font-medium text-slate-500">{t("account.created")}</dt>
             <dd className="mt-1 text-slate-900">{createdAt}</dd>
-          </div>
-          <div>
-            <dt className="font-medium text-slate-500">{t("account.gofoLabel")}</dt>
-            <dd className="mt-1 text-slate-900">
-              {payload.isGofoEmployee ? t("account.yes") : t("account.no")}
-            </dd>
-          </div>
-          <div>
-            <dt className="font-medium text-slate-500">{t("account.siteLabel")}</dt>
-            <dd className="mt-1 text-slate-900">{payload.gofoSite || "—"}</dd>
           </div>
         </dl>
 
@@ -297,15 +351,33 @@ export function AccountDetailsView({ payload }: { payload: AccountDetailsPayload
             </div>
           </div>
 
+          <div className="mt-4 grid gap-3 md:grid-cols-2">
+            <TokenAllowanceBar
+              title="Plan quota remaining"
+              remaining={billing.remainingIncluded}
+              total={billing.monthlyQuota < 0 ? null : billing.monthlyQuota}
+              used={billing.monthlyUsed}
+              locTag={locTag}
+              tone="slate"
+            />
+            <TokenAllowanceBar
+              title="Prepaid credits remaining"
+              remaining={billing.prepaidCreditsAvailable}
+              total={billing.prepaidCreditsPurchased}
+              used={billing.prepaidCreditsConsumed}
+              locTag={locTag}
+              tone="emerald"
+            />
+          </div>
+
           {tokenPacks.length ? (
             <div className="mt-4 rounded-2xl border border-emerald-100 bg-white p-4 ring-1 ring-emerald-50">
               <div className="flex flex-wrap items-start justify-between gap-4">
                 <div>
                   <h3 className="text-sm font-semibold text-slate-900">Prepaid usage credits</h3>
                   <p className="mt-1 text-xs text-slate-500">
-                    Buy credits first, then extra AI usage consumes your prepaid token balance. Packs keep the same
-                    unit price and are intentionally more expensive than Normal, so regular users are pushed toward
-                    the monthly plan.
+                    Buy credits first, then extra ordinary AI usage consumes your prepaid credit balance. gpt-5-mini
+                    uses 1x and gpt-5 uses 5x. gpt-5.5 uses the separate Pro expert pool.
                   </p>
                 </div>
                 <div className="rounded-xl bg-slate-50 px-3 py-2 text-right ring-1 ring-slate-200">
@@ -313,7 +385,7 @@ export function AccountDetailsView({ payload }: { payload: AccountDetailsPayload
                     Prepaid balance
                   </div>
                   <div className="mt-1 text-sm font-semibold text-slate-900">
-                    {billing.prepaidTokensAvailable.toLocaleString(locTag)} tokens
+                    {billing.prepaidCreditsAvailable.toLocaleString(locTag)} credits
                   </div>
                 </div>
               </div>
@@ -324,7 +396,7 @@ export function AccountDetailsView({ payload }: { payload: AccountDetailsPayload
                       <div>
                         <div className="text-xs font-semibold text-slate-900">{pack.displayName}</div>
                         <div className="mt-1 text-[11px] text-slate-500">
-                          {pack.credits.toLocaleString(locTag)} prepaid tokens
+                          {pack.credits.toLocaleString(locTag)} prepaid credits
                         </div>
                       </div>
                       <div className="text-right text-sm font-semibold text-slate-950">
@@ -356,8 +428,8 @@ export function AccountDetailsView({ payload }: { payload: AccountDetailsPayload
                 <div>
                   <h3 className="text-sm font-semibold text-slate-900">Metered overage billing</h3>
                   <p className="mt-1 text-xs text-slate-500">
-                    Monthly included tokens are used first. Extra usage is billed by Stripe in{" "}
-                    {billing.meteredUnitSize.toLocaleString(locTag)}-token units at the end of the billing period.
+                    Monthly included credits are used first. Extra usage is billed by Stripe in{" "}
+                    {billing.meteredUnitSize.toLocaleString(locTag)}-credit units at the end of the billing period.
                   </p>
                 </div>
               </div>
@@ -367,7 +439,7 @@ export function AccountDetailsView({ payload }: { payload: AccountDetailsPayload
                   <div className="mt-1 font-medium text-slate-900">{includedRemainingText}</div>
                 </div>
                 <div className="rounded-xl bg-slate-50 p-3 ring-1 ring-slate-200">
-                  <div className="text-xs text-slate-500">Overage tokens</div>
+                  <div className="text-xs text-slate-500">Overage credits</div>
                   <div className="mt-1 font-medium text-slate-900">{billing.billableUsage.toLocaleString(locTag)}</div>
                 </div>
                 <div className="rounded-xl bg-slate-50 p-3 ring-1 ring-slate-200">
@@ -408,7 +480,7 @@ export function AccountDetailsView({ payload }: { payload: AccountDetailsPayload
                   return null;
                 }
                 const isCurrent = billing.plan === plan.planId;
-                const checkoutPlan = plan.planId === "normal" ? plan.planId : null;
+                const checkoutPlan = plan.planId === "normal" || plan.planId === "pro" ? plan.planId : null;
                 return (
                   <div
                     key={plan.planId}

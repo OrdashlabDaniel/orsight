@@ -1,8 +1,12 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { updateSession } from "@/lib/supabase/middleware";
 
-export async function middleware(request: NextRequest) {
+export async function proxy(request: NextRequest) {
   const pathname = request.nextUrl.pathname;
+
+  if (pathname.startsWith("/api/cron/")) {
+    return NextResponse.next();
+  }
 
   if (pathname === "/viz" || pathname.startsWith("/viz/")) {
     const url = request.nextUrl.clone();
@@ -14,7 +18,7 @@ export async function middleware(request: NextRequest) {
     }
 
     if (pathname.startsWith("/viz/recycle")) {
-      url.pathname = "/users";
+      url.pathname = "/users/recycle";
       return NextResponse.redirect(url);
     }
 

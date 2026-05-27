@@ -16,9 +16,10 @@ type PromptReason = "login" | "quota" | "nav";
 const PROMPT_SESSION_KEY = "orsight:billing-prompt-shown:v1";
 const BILLING_REQUIRED_CODES = new Set([
   "billing_required",
-  "free_cost_budget_exceeded",
-  "free_image_quota_exceeded",
-  "free_seats_full",
+  "premium_model_budget_exhausted",
+  "premium_model_requires_pro",
+  "premium_model_request_too_large",
+  "premium_model_unavailable",
 ]);
 
 function formatCurrency(cents: number) {
@@ -46,22 +47,22 @@ function modalCopy(reason: PromptReason, billing: BillingStatus | null) {
       };
     }
 
-    return {
-      title: "Your free usage is used up",
-      body: "Upgrade to Normal for a monthly token allowance, or buy prepaid Usage Credits to continue right away.",
-    };
+      return {
+        title: "Your free usage is used up",
+        body: "Upgrade for a monthly credit allowance, or buy prepaid Usage Credits to continue right away.",
+      };
   }
 
   if (reason === "nav") {
     return {
       title: "Choose your OrSight plan",
-      body: "Normal is the best value for regular use. Usage Credits are prepaid, flexible, and priced higher for occasional extra usage.",
+      body: "Normal covers regular recognition. Pro adds the expert pool for Recognition Butler and rare gpt-5.5 work.",
     };
   }
 
   return {
     title: "Get more from OrSight",
-    body: "Free accounts have a small monthly trial budget. Upgrade when you are ready, or keep Usage Credits as a prepaid backup.",
+    body: "Free accounts include 1,000,000 ordinary AI credits per month. Upgrade when you are ready, or keep Usage Credits as a prepaid backup.",
   };
 }
 
@@ -186,7 +187,7 @@ export function BillingPromptProvider({ children }: { children: ReactNode }) {
     return () => window.removeEventListener("orsight:open-billing-plans", openBillingPlans);
   }, [refreshBillingStatus]);
 
-  async function startCheckout(payload: { plan?: "normal"; purchaseType?: "token_pack"; packId?: TokenPackId }) {
+  async function startCheckout(payload: { plan?: "normal" | "pro"; purchaseType?: "token_pack"; packId?: TokenPackId }) {
     setError(null);
     const busyKey = payload.purchaseType === "token_pack" ? payload.packId || "token_pack" : payload.plan || "normal";
     setBusy(busyKey);
@@ -215,15 +216,18 @@ export function BillingPromptProvider({ children }: { children: ReactNode }) {
   const copy = modalCopy(reason, billing);
   const tokenPacks = billing?.tokenPacks || [];
   const hasNormalPlan = billing?.plan === "normal";
-  const normalPriceLabel = formatCurrency(billing?.plan === "normal" ? billing.monthlyBaseCents : 999);
-  const normalQuota = billing?.plan === "normal" ? billing.monthlyQuota : 10_000_000;
+  const hasProPlan = billing?.plan === "pro";
+  const normalPriceLabel = formatCurrency(billing?.plan === "normal" ? billing.monthlyBaseCents : 1499);
+  const normalQuota = billing?.plan === "normal" ? billing.monthlyQuota : 30_000_000;
+  const proPriceLabel = formatCurrency(billing?.plan === "pro" ? billing.monthlyBaseCents : 4999);
+  const proQuota = billing?.plan === "pro" ? billing.monthlyQuota : 100_000_000;
 
   return (
     <>
       {children}
       {open ? (
         <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/30 px-4 py-6 backdrop-blur-sm">
-          <div className="max-h-[calc(100dvh-48px)] w-full max-w-3xl overflow-y-auto rounded-3xl border border-slate-200 bg-white shadow-2xl">
+          <div className="max-h-[calc(100dvh-48px)] w-full max-w-5xl overflow-y-auto rounded-3xl border border-slate-200 bg-white shadow-2xl">
             <div className="flex items-start justify-between gap-4 border-b border-slate-100 px-6 py-5">
               <div>
                 <p className="text-xs font-semibold uppercase tracking-[0.24em] text-slate-500">OrSight Billing</p>
@@ -239,7 +243,7 @@ export function BillingPromptProvider({ children }: { children: ReactNode }) {
               </button>
             </div>
 
-            <div className="grid gap-4 px-6 py-5 lg:grid-cols-[1.1fr_0.9fr]">
+            <div className="grid gap-4 px-6 py-5 lg:grid-cols-3">
               <section className="rounded-2xl border border-slate-950 bg-slate-950 p-5 text-white">
                 <div className="flex items-start justify-between gap-4">
                   <div>
@@ -251,8 +255,8 @@ export function BillingPromptProvider({ children }: { children: ReactNode }) {
                   </div>
                 </div>
                 <p className="mt-4 text-sm leading-6 text-slate-200">
-                  Includes {normalQuota < 0 ? "unlimited" : formatNumber(normalQuota)} AI tokens per month. Best for
-                  users who work with OrSight regularly.
+                  Includes {normalQuota < 0 ? "unlimited" : formatNumber(normalQuota)} ordinary AI credits per month.
+                  Supports gpt-5-mini and gpt-5 recognition.
                 </p>
                 <button
                   type="button"
@@ -268,12 +272,40 @@ export function BillingPromptProvider({ children }: { children: ReactNode }) {
                 </button>
               </section>
 
+              <section className="rounded-2xl border border-blue-200 bg-white p-5">
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <p className="text-xs font-semibold uppercase tracking-[0.18em] text-blue-600">Expert</p>
+                    <h3 className="mt-2 text-xl font-semibold text-slate-950">Pro</h3>
+                  </div>
+                  <div className="rounded-full bg-blue-50 px-3 py-1 text-sm font-semibold text-blue-700">
+                    {proPriceLabel}/mo
+                  </div>
+                </div>
+                <p className="mt-4 text-sm leading-6 text-slate-600">
+                  Includes {proQuota < 0 ? "unlimited" : formatNumber(proQuota)} ordinary AI credits plus a separate
+                  gpt-5.5 expert pool for Recognition Butler.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!hasProPlan) {
+                      void startCheckout({ plan: "pro" });
+                    }
+                  }}
+                  disabled={hasProPlan || busy !== null || !billing?.configured}
+                  className="mt-5 w-full rounded-xl bg-slate-950 px-4 py-3 text-sm font-semibold text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {hasProPlan ? "Pro is active" : busy === "pro" ? "Opening Checkout..." : "Upgrade to Pro"}
+                </button>
+              </section>
+
               <section className="rounded-2xl border border-slate-200 bg-slate-50 p-5">
                 <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Prepaid backup</p>
                 <h3 className="mt-2 text-xl font-semibold text-slate-950">Usage Credits</h3>
                 <p className="mt-3 text-sm leading-6 text-slate-600">
-                  Buy credits first, then extra AI usage consumes your prepaid token balance. Packs are intentionally
-                  more expensive than Normal.
+                  Buy credits first, then extra ordinary AI usage consumes your prepaid credit balance. gpt-5-mini uses
+                  1x and gpt-5 uses 5x. gpt-5.5 is not covered by prepaid credits.
                 </p>
                 <div className="mt-4 grid gap-2">
                   {tokenPacks.length ? (
@@ -288,7 +320,7 @@ export function BillingPromptProvider({ children }: { children: ReactNode }) {
                         <span>
                           <span className="block font-semibold text-slate-950">{pack.displayName}</span>
                           <span className="block text-xs text-slate-500">
-                            {formatNumber(pack.credits)} prepaid tokens
+                            {formatNumber(pack.credits)} prepaid credits
                           </span>
                         </span>
                         <span className="font-semibold text-slate-950">
@@ -308,8 +340,8 @@ export function BillingPromptProvider({ children }: { children: ReactNode }) {
             {billing ? (
               <div className="border-t border-slate-100 px-6 py-4 text-xs text-slate-500">
                 Current plan: <span className="font-semibold text-slate-700">{billing.planLabel}</span>
-                {billing.prepaidTokensAvailable > 0 ? (
-                  <span> - Prepaid balance: {formatNumber(billing.prepaidTokensAvailable)} tokens</span>
+                {billing.prepaidCreditsAvailable > 0 ? (
+                  <span> - Prepaid balance: {formatNumber(billing.prepaidCreditsAvailable)} credits</span>
                 ) : null}
               </div>
             ) : null}

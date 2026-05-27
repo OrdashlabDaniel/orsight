@@ -1,11 +1,19 @@
 import { NextResponse } from "next/server";
 
-import { estimateBillingTokensForAction, recordBillingUsage, requireBillingEntitlement } from "@/lib/billing";
+import {
+  estimateBillingCreditsForAction,
+  estimatePremiumModelCostCentsForAction,
+  isPremiumModel,
+  recordBillingUsage,
+  requireBillingEntitlement,
+  requirePremiumModelEntitlement,
+} from "@/lib/billing";
 import { getAuthUserOrSkip } from "@/lib/auth-server";
 import {
   buildTrackedOpenAIHeaders,
   extractTrackedOpenAIUsage,
 } from "@/lib/openai-accounting";
+import { openAIReasoningEffortForModel } from "@/lib/openai-reasoning";
 import { buildTableFieldsFromTemplateColumns, type TemplateColumnInput } from "@/lib/forms";
 
 const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || "https://api.openai.com/v1";
@@ -63,15 +71,27 @@ export async function POST(request: Request) {
 
     let billingReservationId: string | null = null;
     if (user?.id) {
-      const entitlement = await requireBillingEntitlement(
-        user.id,
-        estimateBillingTokensForAction("template_from_image"),
-        "template_from_image",
-      );
-      if (!entitlement.ok) {
-        return entitlement.response!;
+      if (isPremiumModel(TEMPLATE_MODEL)) {
+        const entitlement = await requirePremiumModelEntitlement(
+          user.id,
+          TEMPLATE_MODEL,
+          estimatePremiumModelCostCentsForAction("template_from_image", 1, TEMPLATE_MODEL),
+          "template_from_image",
+        );
+        if (!entitlement.ok) {
+          return entitlement.response!;
+        }
+      } else {
+        const entitlement = await requireBillingEntitlement(
+          user.id,
+          estimateBillingCreditsForAction("template_from_image", 1, TEMPLATE_MODEL),
+          "template_from_image",
+        );
+        if (!entitlement.ok) {
+          return entitlement.response!;
+        }
+        billingReservationId = entitlement.reservation?.id || null;
       }
-      billingReservationId = entitlement.reservation?.id || null;
     }
 
     const tracking = buildTrackedOpenAIHeaders({
@@ -85,7 +105,7 @@ export async function POST(request: Request) {
       headers: tracking.headers,
       body: JSON.stringify({
         model: TEMPLATE_MODEL,
-        reasoning_effort: OPENAI_REASONING_EFFORT,
+        reasoning_effort: openAIReasoningEffortForModel(TEMPLATE_MODEL, OPENAI_REASONING_EFFORT),
         response_format: { type: "json_object" },
         messages: [
           {

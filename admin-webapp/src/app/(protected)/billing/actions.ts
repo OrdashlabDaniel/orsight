@@ -354,7 +354,7 @@ export async function savePlanConfigAction(formData: FormData) {
   const billingModel =
     safePlanId === "free"
       ? "free_quota"
-      : safePlanId === "normal"
+      : safePlanId === "normal" || safePlanId === "pro"
         ? "monthly_quota"
         : safePlanId === "usage"
           ? "monthly_plus_usage"
@@ -366,10 +366,10 @@ export async function savePlanConfigAction(formData: FormData) {
   const includedCredits = Math.max(0, asInt(formData.get("includedCredits"), 0));
   const overageUnitCents =
     billingModel === "monthly_plus_usage" ? Math.max(0, asInt(formData.get("overageUnitCents"), 0)) : 0;
-  const overageUnitName = asString(formData.get("overageUnitName")) || "tokens";
+  const overageUnitName = asString(formData.get("overageUnitName")) || "credits";
   const currency = asString(formData.get("currency")).toLowerCase() || "usd";
-  const isPublic = safePlanId === "normal" ? asBool(formData.get("isPublic")) : false;
-  const isActive = safePlanId === "pro" || safePlanId === "business" ? false : asBool(formData.get("isActive"));
+  const isPublic = safePlanId === "normal" || safePlanId === "pro" ? asBool(formData.get("isPublic")) : false;
+  const isActive = safePlanId === "business" ? false : asBool(formData.get("isActive"));
   const sortOrder = asInt(formData.get("sortOrder"), PLAN_IDS.indexOf(safePlanId));
 
   const sb = await createAdminClient();
@@ -425,10 +425,10 @@ export async function syncPlanToStripeAction(formData: FormData) {
   await requireBillingAdmin(formData);
   const planId = normalizeBillingPlan(asString(formData.get("planId")));
   const focus = currentFocus(formData);
-  if (!planId || planId !== "normal") {
+  if (!planId || (planId !== "normal" && planId !== "pro")) {
     backAfterAction(formData, { err: "sync_plan_requires_paid_plan", ...(focus ? { focus } : {}) });
   }
-  const safePlanId = planId as Exclude<BillingPlanId, "free" | "usage" | "pro" | "business">;
+  const safePlanId = planId as Exclude<BillingPlanId, "free" | "usage" | "business">;
 
   const stripe = getStripeAdmin();
   if (!stripe) {
@@ -506,7 +506,7 @@ export async function setBillingOverrideAction(formData: FormData) {
   const label = asString(formData.get("label")) || ownerId;
   const focus = currentFocus(formData);
 
-  if (!ownerId || (plan !== "free" && plan !== "normal")) {
+  if (!ownerId || (plan !== "free" && plan !== "normal" && plan !== "pro")) {
     backAfterAction(formData, { err: "missing_owner_or_plan", ...(focus ? { focus } : {}) });
   }
 
@@ -594,10 +594,10 @@ export async function changeStripePlanAction(formData: FormData) {
   const targetPlan = normalizeBillingPlan(asString(formData.get("plan")));
   const focus = currentFocus(formData);
 
-  if (!ownerId || targetPlan !== "normal") {
+  if (!ownerId || (targetPlan !== "normal" && targetPlan !== "pro")) {
     backAfterAction(formData, { err: "invalid_target_plan", ...(focus ? { focus } : {}) });
   }
-  const safeTargetPlan = targetPlan as Exclude<BillingPlanId, "free" | "usage" | "pro" | "business">;
+  const safeTargetPlan = targetPlan as Exclude<BillingPlanId, "free" | "usage" | "business">;
 
   const stripe = getStripeAdmin();
   if (!stripe) {

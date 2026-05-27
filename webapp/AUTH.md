@@ -40,7 +40,7 @@ NEXT_PUBLIC_DEV_MOCK_LOGIN=true
 3. **`SUPABASE_SERVICE_ROLE_KEY`**：service_role（仅服务端；用于后台/兼容迁移/计量日志等受控能力，见 **`SUPABASE_SETUP.md`**）。
 4. **Authentication → Providers → Email**：打开 Email provider；生产环境不要依赖 Supabase 默认发信。
 5. **Authentication → Configuration → Custom SMTP**：配置你自己的 SMTP（Resend / SES / Postmark / SendGrid 等）。Supabase 默认 SMTP **只会发给项目团队成员邮箱**，且限流很低，不适合真实注册验证码。
-6. **Authentication → Email Templates**：把当前用于邮箱验证码的模板改成输出 `{{ .Token }}`（不要只保留 `{{ .ConfirmationURL }}`），这样页面里的 6 位验证码输入框才有真实可用的验证码。
+6. **Authentication → Email Templates**：把 **Confirm signup** 模板替换为 `SUPABASE_CONFIRM_SIGNUP_TEMPLATE.html`。不要把 `{{ .ConfirmationURL }}` 直接发给用户；邮件按钮必须指向 OrSight 的 `/auth/confirm?token_hash={{ .TokenHash }}...`，再由应用服务端完成验证并跳转成功页。
 
 ## 分享填表直发邮件
 
@@ -81,3 +81,8 @@ NEXT_PUBLIC_DEV_MOCK_LOGIN=true
 ## API
 
 启用登录且已配置 Supabase 时，`/api/extract` 等与训练相关接口需要已登录 Cookie。
+## Stable signup email template
+
+Use `webapp/SUPABASE_CONFIRM_SIGNUP_TEMPLATE.html` for Supabase Authentication -> Email Templates -> Confirm signup.
+
+Do not send `{{ .ConfirmationURL }}` directly in the email. Some email systems, including Microsoft Defender Safe Links, prefetch links and consume Supabase's one-time confirmation URL before the user clicks it. The OrSight template points the email button at `/auth/confirm` with `{{ .TokenHash }}`; the page then verifies the token from a real browser session and redirects to `/auth/verified`.

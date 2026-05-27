@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent } from "react";
-import * as XLSX from "xlsx";
+import * as XLSX from "@e965/xlsx";
 
 import {
   TrainingAnnotationWorkbench,

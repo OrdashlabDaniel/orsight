@@ -7,12 +7,13 @@ import { useCallback, useEffect, useState } from "react";
 import {
   buildEmailVerifiedHref,
   buildSignupVerificationCallbackPath,
+  createPendingEmailVerification,
   EMAIL_VERIFIED_STORAGE_KEY,
+  EMAIL_VERIFICATION_PENDING_STORAGE_KEY,
   readEmailVerifiedEvent,
+  readPendingEmailVerification,
 } from "@/lib/auth-email-verified";
 import {
-  GOFO_EMPLOYEE_METADATA_KEY,
-  GOFO_SITE_METADATA_KEY,
   POD_USERNAME_METADATA_KEY,
   usernameToPodLoginEmail,
 } from "@/lib/auth-username";
@@ -22,6 +23,33 @@ import { useLocale } from "@/i18n/LocaleProvider";
 import { createClient } from "@/lib/supabase/browser";
 import { POST_LOGIN_DEFAULT_PATH } from "@/lib/post-login-home";
 import { isLoginStrictlyRequired, isSupabaseAuthEnabled } from "@/lib/supabase";
+
+function createSignupVerificationFlowId() {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return crypto.randomUUID();
+  }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
+function hasExpiredSignupLinkError() {
+  if (typeof window === "undefined") {
+    return false;
+  }
+
+  const hash = window.location.hash.replace(/^#/, "");
+  if (!hash) {
+    return false;
+  }
+
+  const hashParams = new URLSearchParams(hash);
+  const errorCode = (hashParams.get("error_code") || "").toLowerCase();
+  const errorDescription = (hashParams.get("error_description") || "").toLowerCase();
+  return (
+    errorCode === "otp_expired" ||
+    errorDescription.includes("invalid") ||
+    errorDescription.includes("expired")
+  );
+}
 
 export function LoginForm() {
   const { t } = useLocale();
@@ -38,12 +66,12 @@ export function LoginForm() {
   const [password, setPassword] = useState("");
   const [passwordConfirm, setPasswordConfirm] = useState("");
   const [signupHadAutoSession, setSignupHadAutoSession] = useState(false);
-  const [isGofoEmployee, setIsGofoEmployee] = useState(false);
-  const [gofoSite, setGofoSite] = useState("");
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(false);
   const [handledAuthCode, setHandledAuthCode] = useState<string | null>(null);
   const [bannedOAuthNotice, setBannedOAuthNotice] = useState(false);
+  const [signupVerificationFlowId, setSignupVerificationFlowId] = useState("");
+  const [signupVerificationStartedAt, setSignupVerificationStartedAt] = useState(0);
 
   const devMock = isDevMockLoginEnabled();
   const supabaseOn = isSupabaseAuthEnabled();
@@ -64,10 +92,13 @@ export function LoginForm() {
   }
 
   const goToEmailVerified = useCallback(
-    (email?: string | null) => {
+    (email?: string | null, flowId?: string | null) => {
       const targetEmail =
         typeof email === "string" && email.trim() ? email.trim().toLowerCase() : account.trim().toLowerCase();
-      router.replace(buildEmailVerifiedHref(nextPath, targetEmail));
+      if (typeof window !== "undefined") {
+        window.localStorage.removeItem(EMAIL_VERIFICATION_PENDING_STORAGE_KEY);
+      }
+      router.replace(buildEmailVerifiedHref(nextPath, targetEmail, flowId));
     },
     [account, nextPath, router],
   );
@@ -95,8 +126,37 @@ export function LoginForm() {
     return false;
   }
 
-  async function resendSignupEmailFor(email: string, supabase = createClient()) {
-    const emailRedirectTo = `${window.location.origin}${buildSignupVerificationCallbackPath(nextPath)}`;
+  function persistPendingSignupVerification(email: string, flowId: string, startedAt: number) {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    window.localStorage.setItem(
+      EMAIL_VERIFICATION_PENDING_STORAGE_KEY,
+      createPendingEmailVerification(email, flowId, nextPath, startedAt),
+    );
+  }
+
+  async function rememberSignupVerificationFlow(
+    email: string,
+    flowId: string,
+    startedAt: number,
+    userId?: string | null,
+  ) {
+    try {
+      await fetch("/api/auth/register-email-verification-flow", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, flowId, startedAt, userId }),
+        cache: "no-store",
+      });
+    } catch {
+      // The Supabase callback still handles successful confirmations if this bookkeeping request fails.
+    }
+  }
+
+  async function resendSignupEmailFor(email: string, supabase = createClient(), flowId?: string | null) {
+    const emailRedirectTo = `${window.location.origin}${buildSignupVerificationCallbackPath(nextPath, email, flowId)}`;
     const { error } = await supabase.auth.resend({
       type: "signup",
       email,
@@ -112,16 +172,27 @@ export function LoginForm() {
       tryResend?: boolean;
       keepMessage?: string;
       resetAutoSession?: boolean;
+      flowId?: string;
+      startedAt?: number;
     },
   ) {
     const nextEmail = email.trim().toLowerCase();
+    const flowId = options?.flowId || createSignupVerificationFlowId();
+    const startedAt = options?.startedAt || Date.now();
     setAccount(nextEmail);
     setPassword("");
     setPasswordConfirm("");
+    setSignupVerificationFlowId(flowId);
+    setSignupVerificationStartedAt(startedAt);
+    if (typeof window !== "undefined") {
+      window.localStorage.removeItem(EMAIL_VERIFIED_STORAGE_KEY);
+      persistPendingSignupVerification(nextEmail, flowId, startedAt);
+    }
     if (options?.resetAutoSession !== false) {
       setSignupHadAutoSession(false);
     }
     setMode("awaitingEmailConfirm");
+    await rememberSignupVerificationFlow(nextEmail, flowId, startedAt);
 
     if (options?.keepMessage) {
       setMessage(options.keepMessage);
@@ -133,13 +204,13 @@ export function LoginForm() {
       return;
     }
 
-    const resendError = await resendSignupEmailFor(nextEmail, options.supabase);
+    const resendError = await resendSignupEmailFor(nextEmail, options.supabase, flowId);
     if (!resendError) {
       setMessage(t("login.signupEmailResent"));
       return;
     }
     if (isAlreadyConfirmedError(resendError.message || "")) {
-      goToEmailVerified(nextEmail);
+      goToEmailVerified(nextEmail, flowId);
       return;
     }
     setMessage(resendError.message);
@@ -247,6 +318,26 @@ export function LoginForm() {
   }, [mode]);
 
   useEffect(() => {
+    if (!supabaseOn || typeof window === "undefined") {
+      return;
+    }
+
+    const pending = readPendingEmailVerification(
+      window.localStorage.getItem(EMAIL_VERIFICATION_PENDING_STORAGE_KEY),
+    );
+    if (!pending) {
+      return;
+    }
+
+    setAccount(pending.email);
+    setSignupVerificationFlowId(pending.flowId);
+    setSignupVerificationStartedAt(pending.startedAt);
+    setPassword("");
+    setPasswordConfirm("");
+    setMode("awaitingEmailConfirm");
+  }, [supabaseOn]);
+
+  useEffect(() => {
     if (mode !== "awaitingEmailConfirm" || typeof window === "undefined") {
       return;
     }
@@ -261,13 +352,56 @@ export function LoginForm() {
       if (event.email && currentEmail && event.email !== currentEmail) {
         return false;
       }
+      if (!signupVerificationFlowId || !event.flowId || event.flowId !== signupVerificationFlowId) {
+        return false;
+      }
 
       window.localStorage.removeItem(EMAIL_VERIFIED_STORAGE_KEY);
-      goToEmailVerified(event.email || currentEmail);
+      goToEmailVerified(event.email || currentEmail, event.flowId);
       return true;
     };
 
-    maybeRedirectToVerified();
+    let cancelled = false;
+    let pollTimer: number | null = null;
+    const currentEmail = account.trim().toLowerCase();
+
+    const pollServerConfirmation = async () => {
+      if (!currentEmail.includes("@") || !signupVerificationFlowId) {
+        return;
+      }
+
+      try {
+        const res = await fetch("/api/auth/email-confirmation-status", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            email: currentEmail,
+            flowId: signupVerificationFlowId,
+            signupVerificationStartedAt,
+            recoverExpiredLink: hasExpiredSignupLinkError(),
+          }),
+          cache: "no-store",
+        });
+        const payload = (await res.json().catch(() => null)) as {
+          confirmed?: boolean;
+        } | null;
+        if (!cancelled && payload?.confirmed) {
+          window.localStorage.removeItem(EMAIL_VERIFIED_STORAGE_KEY);
+          goToEmailVerified(currentEmail, signupVerificationFlowId);
+          return;
+        }
+      } catch {
+        // Keep waiting; the user may still confirm through the email link.
+      }
+
+      if (!cancelled) {
+        pollTimer = window.setTimeout(pollServerConfirmation, 2500);
+      }
+    };
+
+    if (!maybeRedirectToVerified()) {
+      void pollServerConfirmation();
+    }
 
     function handleStorage(event: StorageEvent) {
       if (event.key !== EMAIL_VERIFIED_STORAGE_KEY || !event.newValue) {
@@ -278,9 +412,13 @@ export function LoginForm() {
 
     window.addEventListener("storage", handleStorage);
     return () => {
+      cancelled = true;
+      if (pollTimer !== null) {
+        window.clearTimeout(pollTimer);
+      }
       window.removeEventListener("storage", handleStorage);
     };
-  }, [account, goToEmailVerified, mode]);
+  }, [account, goToEmailVerified, mode, signupVerificationFlowId, signupVerificationStartedAt]);
 
   useEffect(() => {
     if (!supabaseOn || !authCode || handledAuthCode === authCode) {
@@ -424,12 +562,18 @@ export function LoginForm() {
           setMessage(t("login.errPasswordMismatch"));
           return;
         }
-        const trimmedSite = gofoSite.trim();
-        if (isGofoEmployee && !trimmedSite) {
-          setMessage(t("login.errGofoSite"));
-          return;
+        const verificationFlowId = createSignupVerificationFlowId();
+        const verificationStartedAt = Date.now();
+        setSignupVerificationFlowId(verificationFlowId);
+        setSignupVerificationStartedAt(verificationStartedAt);
+        if (typeof window !== "undefined") {
+          window.localStorage.removeItem(EMAIL_VERIFIED_STORAGE_KEY);
         }
-        const emailRedirectTo = `${window.location.origin}${buildSignupVerificationCallbackPath(nextPath)}`;
+        const emailRedirectTo = `${window.location.origin}${buildSignupVerificationCallbackPath(
+          nextPath,
+          email,
+          verificationFlowId,
+        )}`;
         const { data, error } = await supabase.auth.signUp({
           email,
           password,
@@ -437,22 +581,30 @@ export function LoginForm() {
             emailRedirectTo,
             data: {
               [POD_USERNAME_METADATA_KEY]: email,
-              [GOFO_EMPLOYEE_METADATA_KEY]: isGofoEmployee,
-              [GOFO_SITE_METADATA_KEY]: isGofoEmployee ? trimmedSite : null,
             },
           },
         });
         if (error) {
           if (isAlreadyRegisteredError(error.message || "")) {
-            await moveToAwaitingConfirm(email, { supabase, tryResend: true });
+            await moveToAwaitingConfirm(email, {
+              supabase,
+              keepMessage: t("login.confirmEmailExistingPending"),
+              flowId: verificationFlowId,
+              startedAt: verificationStartedAt,
+            });
             return;
           }
           setMessage(error.message);
           return;
         }
+        await rememberSignupVerificationFlow(email, verificationFlowId, verificationStartedAt, data.user?.id);
         const identities = Array.isArray(data.user?.identities) ? data.user.identities : [];
         if (!data.session && identities.length === 0) {
-          await moveToAwaitingConfirm(email, { supabase, tryResend: true });
+          await moveToAwaitingConfirm(email, {
+            supabase,
+            flowId: verificationFlowId,
+            startedAt: verificationStartedAt,
+          });
           return;
         }
         const hadAutoSession = Boolean(data.session);
@@ -460,7 +612,11 @@ export function LoginForm() {
           await supabase.auth.signOut();
         }
         setSignupHadAutoSession(hadAutoSession);
-        await moveToAwaitingConfirm(email, { resetAutoSession: false });
+        await moveToAwaitingConfirm(email, {
+          resetAutoSession: false,
+          flowId: verificationFlowId,
+          startedAt: verificationStartedAt,
+        });
         return;
       }
 
@@ -479,7 +635,10 @@ export function LoginForm() {
           return;
         }
         if (isEmailNotConfirmedError(error.message || "")) {
-          await moveToAwaitingConfirm(loginEmail, { supabase, tryResend: true });
+          await moveToAwaitingConfirm(loginEmail, {
+            supabase,
+            keepMessage: t("login.confirmEmailExistingPending"),
+          });
           return;
         }
         setMessage(error.message);
@@ -545,10 +704,17 @@ export function LoginForm() {
         setMessage(t("login.errEmail"));
         return;
       }
-      const error = await resendSignupEmailFor(email);
+      const flowId = signupVerificationFlowId || createSignupVerificationFlowId();
+      const startedAt = signupVerificationStartedAt || Date.now();
+      setSignupVerificationFlowId(flowId);
+      setSignupVerificationStartedAt(startedAt);
+      window.localStorage.removeItem(EMAIL_VERIFIED_STORAGE_KEY);
+      persistPendingSignupVerification(email, flowId, startedAt);
+      await rememberSignupVerificationFlow(email, flowId, startedAt);
+      const error = await resendSignupEmailFor(email, createClient(), flowId);
       if (error) {
         if (isAlreadyConfirmedError(error.message || "")) {
-          goToEmailVerified(email);
+          goToEmailVerified(email, flowId);
           return;
         }
         setMessage(error.message);
@@ -641,8 +807,6 @@ export function LoginForm() {
                 setPassword("");
                 setPasswordConfirm("");
                 setSignupHadAutoSession(false);
-                setIsGofoEmployee(false);
-                setGofoSite("");
               }}
               className="w-full rounded-xl border border-slate-300 bg-white py-2.5 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-60"
             >
@@ -691,28 +855,6 @@ export function LoginForm() {
                     className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 outline-none focus:border-blue-500"
                   />
                 </label>
-                <label className="flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2">
-                  <input
-                    type="checkbox"
-                    checked={isGofoEmployee}
-                    onChange={(e) => setIsGofoEmployee(e.target.checked)}
-                  />
-                  <span className="text-sm text-slate-700">{t("login.gofo")}</span>
-                </label>
-                <label className="block">
-                  <span className="text-sm font-medium text-slate-700">
-                    {t("login.site")}
-                    {isGofoEmployee ? t("login.siteRequired") : t("login.siteOptional")}
-                  </span>
-                  <input
-                    type="text"
-                    value={gofoSite}
-                    onChange={(e) => setGofoSite(e.target.value)}
-                    required={isGofoEmployee}
-                    placeholder={t("login.sitePh")}
-                    className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 outline-none focus:border-blue-500"
-                  />
-                </label>
               </>
             ) : null}
 
@@ -758,8 +900,6 @@ export function LoginForm() {
                 setMessage("");
                 setPassword("");
                 setPasswordConfirm("");
-                setIsGofoEmployee(false);
-                setGofoSite("");
               }}
             >
               {t("login.toRegister")}
@@ -773,8 +913,6 @@ export function LoginForm() {
                 setMessage("");
                 setPassword("");
                 setPasswordConfirm("");
-                setIsGofoEmployee(false);
-                setGofoSite("");
               }}
             >
               {t("login.toLogin")}

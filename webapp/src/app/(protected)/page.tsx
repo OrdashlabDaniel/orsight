@@ -3,8 +3,8 @@
 import Image from "next/image";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Fragment, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import * as XLSX from "xlsx";
+import { Fragment, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import * as XLSX from "@e965/xlsx";
 
 import {
   TrainingAnnotationWorkbench,
@@ -23,10 +23,8 @@ import {
   organizeRecords,
 } from "@/lib/pod";
 import {
-  RECOGNITION_MODEL_OPTIONS,
-  canUseRecognitionModel,
+  ORDINARY_RECOGNITION_MODEL_OPTIONS,
   fallbackRecognitionModelName,
-  type RecognitionBillingStatus,
   type RecognitionModelKey,
 } from "@/lib/recognition-models";
 import {
@@ -381,7 +379,6 @@ function HomeContent() {
   const searchParams = useSearchParams();
   const primaryModelName = fallbackRecognitionModelName("fast");
   const reviewModelName = fallbackRecognitionModelName("accurate");
-  const maxModelName = fallbackRecognitionModelName("max");
   const currentFormId = useMemo(
     () => normalizeFormId(searchParams.get("formId") || DEFAULT_FORM_ID),
     [searchParams],
@@ -408,8 +405,6 @@ function HomeContent() {
   const [progress, setProgress] = useState<{ completed: number; total: number } | null>(null);
   const [trainingExamplesLoaded, setTrainingExamplesLoaded] = useState(0);
   const [trainingStatus, setTrainingStatus] = useState<TrainingStatusResponse | null>(null);
-  const [billingStatus, setBillingStatus] = useState<RecognitionBillingStatus>(null);
-  const [billingStatusLoaded, setBillingStatusLoaded] = useState(false);
   const [selectedRecognitionModel, setSelectedRecognitionModel] = useState<RecognitionModelKey>("fast");
   const [annotatingRecord, setAnnotatingRecord] = useState<PodRecord | null>(null);
   const [annotationImageSrc, setAnnotationImageSrc] = useState("");
@@ -482,43 +477,10 @@ function HomeContent() {
   }, [uploads]);
 
   useEffect(() => {
-    let cancelled = false;
-
-    async function loadBillingStatus() {
-      try {
-        const response = await fetch("/api/billing/status", {
-          cache: "no-store",
-          credentials: "same-origin",
-        });
-        const payload = (await response.json().catch(() => ({}))) as {
-          billing?: RecognitionBillingStatus;
-        };
-        if (!cancelled && response.ok) {
-          setBillingStatus(payload.billing ?? null);
-        }
-      } finally {
-        if (!cancelled) {
-          setBillingStatusLoaded(true);
-        }
-      }
-    }
-
-    void loadBillingStatus();
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  useEffect(() => {
-    if (
-      selectedRecognitionModel === "max" &&
-      billingStatusLoaded &&
-      !canUseRecognitionModel("max", billingStatus)
-    ) {
+    if (selectedRecognitionModel === "max") {
       setSelectedRecognitionModel("accurate");
     }
-  }, [billingStatus, billingStatusLoaded, selectedRecognitionModel]);
+  }, [selectedRecognitionModel]);
 
   useEffect(() => {
     uploadPanelWidthRef.current = uploadPanelWidthPx;
@@ -745,13 +707,41 @@ function HomeContent() {
     });
   }
 
+  const loadTableFieldConfig = useCallback(async () => {
+    try {
+      const response = await fetch(withFormId("/api/table-fields"));
+      const payload = (await response.json()) as { error?: string; tableFields?: TableFieldDefinition[] };
+      if (!response.ok) {
+        throw new Error(payload.error || t("home.errTableCfg"));
+      }
+      const nextFields = Array.isArray(payload.tableFields) ? payload.tableFields : [];
+      setTableFields(nextFields);
+      setFieldDrafts(nextFields);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : t("home.errTableCfg"));
+    }
+  }, [t, withFormId]);
+
+  const loadTrainingStatus = useCallback(async () => {
+    try {
+      const response = await fetch(withFormId("/api/training/status"), { cache: "no-store" });
+      const payload = (await response.json()) as TrainingStatusResponse & { error?: string };
+      if (!response.ok) {
+        throw new Error(payload.error || t("home.errTrainStatus"));
+      }
+      setTrainingStatus(payload);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : t("home.errTrainStatus"));
+    }
+  }, [t, withFormId]);
+
   useEffect(() => {
     void loadTableFieldConfig();
-  }, [currentFormId]);
+  }, [loadTableFieldConfig]);
 
   useEffect(() => {
     void loadTrainingStatus();
-  }, [currentFormId]);
+  }, [loadTrainingStatus]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1121,14 +1111,14 @@ function HomeContent() {
     return Array.from(groups.entries());
   }, [filteredRecordsResult.records, routeFieldActive]);
   const activePopupRecordId = viewingRecord?.id || annotatingRecord?.id || null;
-  function getSourceImageNames(record: PodRecord) {
+  const getSourceImageNames = useCallback((record: PodRecord) => {
     return record.imageName
       .split(" | ")
       .map((value) => value.trim())
       .filter(Boolean);
-  }
+  }, []);
 
-  function issueMatchesRecord(issue: ExtractionIssue, record: PodRecord) {
+  const issueMatchesRecord = useCallback((issue: ExtractionIssue, record: PodRecord) => {
     const sourceImageNames = getSourceImageNames(record);
     if (!sourceImageNames.includes(issue.imageName)) {
       return false;
@@ -1137,9 +1127,9 @@ function HomeContent() {
       return issue.route === record.route;
     }
     return !issue.route;
-  }
+  }, [getSourceImageNames]);
 
-  function issueMatchesConfirmedRecord(issue: ExtractionIssue, confirmed: ConfirmedCorrectRecord) {
+  const issueMatchesConfirmedRecord = useCallback((issue: ExtractionIssue, confirmed: ConfirmedCorrectRecord) => {
     if (!confirmed.sourceImageNames.includes(issue.imageName)) {
       return false;
     }
@@ -1147,11 +1137,11 @@ function HomeContent() {
       return issue.route === confirmed.route;
     }
     return !issue.route;
-  }
+  }, []);
 
-  function isRecordConfirmedCorrect(record: PodRecord) {
+  const isRecordConfirmedCorrect = useCallback((record: PodRecord) => {
     return confirmedCorrectRecords.some((item) => item.recordId === record.id);
-  }
+  }, [confirmedCorrectRecords]);
 
   const visibleIssues = useMemo(
     () =>
@@ -1160,7 +1150,7 @@ function HomeContent() {
           issueMatchesActiveBuiltInFields(issue, activeBuiltInFieldIds) &&
           !confirmedCorrectRecords.some((confirmed) => issueMatchesConfirmedRecord(issue, confirmed)),
       ),
-    [issues, confirmedCorrectRecords, activeBuiltInFieldIds],
+    [issues, confirmedCorrectRecords, activeBuiltInFieldIds, issueMatchesConfirmedRecord],
   );
 
   const reviewRecords = useMemo(
@@ -1174,7 +1164,7 @@ function HomeContent() {
         }
         return visibleIssues.some((issue) => issue.level === "error" && issueMatchesRecord(issue, record));
       }),
-    [organizedRecordsResult.records, visibleIssues, confirmedCorrectRecords],
+    [organizedRecordsResult.records, visibleIssues, isRecordConfirmedCorrect, issueMatchesRecord],
   );
 
   const totalWarnings = visibleIssues.filter((issue) => issue.level === "warning").length;
@@ -1283,36 +1273,7 @@ function HomeContent() {
     return { top, left, width };
   }
 
-  async function loadTableFieldConfig() {
-    try {
-      const response = await fetch(withFormId("/api/table-fields"));
-      const payload = (await response.json()) as { error?: string; tableFields?: TableFieldDefinition[] };
-      if (!response.ok) {
-        throw new Error(payload.error || t("home.errTableCfg"));
-      }
-      const nextFields = Array.isArray(payload.tableFields) ? payload.tableFields : [];
-      setTableFields(nextFields);
-      setFieldDrafts(nextFields);
-    } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : t("home.errTableCfg"));
-    }
-  }
-
-  async function loadTrainingStatus() {
-    try {
-      const response = await fetch(withFormId("/api/training/status"), { cache: "no-store" });
-      const payload = (await response.json()) as TrainingStatusResponse & { error?: string };
-      if (!response.ok) {
-        throw new Error(payload.error || t("home.errTrainStatus"));
-      }
-      setTrainingStatus(payload);
-    } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : t("home.errTrainStatus"));
-    }
-  }
-
-  const canUseMaxRecognitionModel = canUseRecognitionModel("max", billingStatus);
-  const bestAvailableRecognitionModel: RecognitionModelKey = canUseMaxRecognitionModel ? "max" : "accurate";
+  const bestAvailableRecognitionModel: RecognitionModelKey = "accurate";
 
   async function requestExtraction(
     files: File[],
@@ -2484,7 +2445,6 @@ function HomeContent() {
                 {t("home.statsLine", {
                   primary: primaryModelName,
                   review: reviewModelName,
-                  max: maxModelName,
                   samples: trainingExamplesLoaded,
                   images: trainingStatus?.totalImages ?? 0,
                 })}
@@ -2709,22 +2669,17 @@ function HomeContent() {
                     </span>
                     <span className="text-[11px] text-[var(--muted-foreground)]">{t("home.modelLargeTableTip")}</span>
                   </div>
-                  <div className="grid gap-2 sm:grid-cols-3">
-                    {RECOGNITION_MODEL_OPTIONS.map((option) => {
-                      const locked = !canUseRecognitionModel(option.key, billingStatus);
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    {ORDINARY_RECOGNITION_MODEL_OPTIONS.map((option) => {
                       const active = selectedRecognitionModel === option.key;
                       const titleKey =
                         option.key === "fast"
                           ? "home.modelFastName"
-                          : option.key === "accurate"
-                            ? "home.modelAccurateName"
-                            : "home.modelMaxName";
+                          : "home.modelAccurateName";
                       const hintKey =
                         option.key === "fast"
                           ? "home.modelFastHint"
-                          : option.key === "accurate"
-                            ? "home.modelAccurateHint"
-                            : "home.modelMaxHint";
+                          : "home.modelAccurateHint";
 
                       return (
                         <button
@@ -2735,23 +2690,14 @@ function HomeContent() {
                             active
                               ? "border-[var(--foreground)] bg-[var(--foreground)] text-[var(--background)]"
                               : "border-[var(--border)] bg-[var(--surface)] hover:bg-[var(--background)]"
-                          } ${locked ? "cursor-not-allowed opacity-60" : ""}`}
+                          }`}
                           onClick={() => {
-                            if (locked) {
-                              setErrorMessage(t("home.errPremiumModelRequiresNormal"));
-                              return;
-                            }
                             setSelectedRecognitionModel(option.key);
                             setErrorMessage("");
                           }}
                         >
                           <span className="flex items-center justify-between gap-2">
                             <span className="text-xs font-semibold">{t(titleKey)}</span>
-                            {locked ? (
-                              <span className="rounded-full border border-current/30 px-1.5 py-0.5 text-[10px]">
-                                {t("home.modelPaidOnly")}
-                              </span>
-                            ) : null}
                           </span>
                           <span className="mt-1 block text-[11px] opacity-75">{option.fallbackModel}</span>
                           <span className="mt-1 block text-[11px] leading-4 opacity-75">{t(hintKey)}</span>

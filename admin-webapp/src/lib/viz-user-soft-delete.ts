@@ -107,6 +107,9 @@ export async function softDeleteUserToRecycle(
   revalidatePath("/viz");
   revalidatePath("/viz/recycle");
   revalidatePath(`/viz/users/${userId}`);
+  revalidatePath("/users");
+  revalidatePath("/users/recycle");
+  revalidatePath(`/users/${userId}`);
 
   return {
     ok: `已移入回收站（登录已停用，用量数据暂存至 ${purgeAt.slice(0, 10)} UTC）：${displayEmail}${authEmail !== displayEmail ? ` [登录邮箱: ${authEmail}]` : ""}`,

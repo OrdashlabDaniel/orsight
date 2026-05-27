@@ -17,5 +17,15 @@ export async function GET() {
     console.error("Failed to refresh Stripe billing status:", error);
   }
 
-  return NextResponse.json({ billing: await getBillingStatusForUser(user.id) });
+  try {
+    return NextResponse.json({ billing: await getBillingStatusForUser(user.id) });
+  } catch (error) {
+    console.error("Failed to load billing status:", error);
+    return NextResponse.json(
+      {
+        error: "Billing status is temporarily unavailable.",
+      },
+      { status: 503 },
+    );
+  }
 }

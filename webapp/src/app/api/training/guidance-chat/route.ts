@@ -1,6 +1,13 @@
 import { NextResponse } from "next/server";
 
-import { estimateBillingTokensForAction, recordBillingUsage, requireBillingEntitlement } from "@/lib/billing";
+import {
+  estimateBillingCreditsForAction,
+  estimatePremiumModelCostCentsForAction,
+  isPremiumModel,
+  recordBillingUsage,
+  requireBillingEntitlement,
+  requirePremiumModelEntitlement,
+} from "@/lib/billing";
 import { withAuthedStorageTenant } from "@/lib/storage-tenant";
 import { getFormIdFromRequest } from "@/lib/form-request";
 import { getActiveTableFields } from "@/lib/table-fields";
@@ -41,7 +48,10 @@ import {
 const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || "https://api.openai.com/v1";
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const GUIDANCE_MODEL =
-  process.env.OPENAI_GUIDANCE_MODEL || process.env.OPENAI_PRIMARY_MODEL || "gpt-4o-mini";
+  process.env.OPENAI_GUIDANCE_MODEL ||
+  process.env.OPENAI_MAX_MODEL ||
+  process.env.OPENAI_PREMIUM_MODEL ||
+  "gpt-5.5";
 
 type ChatMessage = { role: "user" | "assistant" | "system"; content: string };
 type OpenAIMessageContent =
@@ -169,15 +179,27 @@ export async function POST(request: Request) {
 
     let billingReservationId: string | null = null;
     if (user?.id) {
-      const entitlement = await requireBillingEntitlement(
-        user.id,
-        estimateBillingTokensForAction("guidance_chat"),
-        "guidance_chat",
-      );
-      if (!entitlement.ok) {
-        return entitlement.response!;
+      if (isPremiumModel(GUIDANCE_MODEL)) {
+        const entitlement = await requirePremiumModelEntitlement(
+          user.id,
+          GUIDANCE_MODEL,
+          estimatePremiumModelCostCentsForAction("guidance_chat", 1, GUIDANCE_MODEL),
+          "guidance_chat",
+        );
+        if (!entitlement.ok) {
+          return entitlement.response!;
+        }
+      } else {
+        const entitlement = await requireBillingEntitlement(
+          user.id,
+          estimateBillingCreditsForAction("guidance_chat", 1, GUIDANCE_MODEL),
+          "guidance_chat",
+        );
+        if (!entitlement.ok) {
+          return entitlement.response!;
+        }
+        billingReservationId = entitlement.reservation?.id || null;
       }
-      billingReservationId = entitlement.reservation?.id || null;
     }
 
     const rules = seedWorkingRulesFromLegacy(mergeLegacyIntoAgentThreadIfEmpty(await loadGlobalRules(formId)));

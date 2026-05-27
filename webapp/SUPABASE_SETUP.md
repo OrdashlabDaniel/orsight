@@ -35,7 +35,7 @@ SUPABASE_SERVICE_ROLE_KEY=你的_service_role_密钥
 |------|------|
 | **Authentication → Providers → Email** | 打开 Email provider；不要依赖默认发信服务做真实注册 |
 | **Authentication → Configuration → Custom SMTP** | 配置你自己的 SMTP（默认 SMTP 只发给项目团队成员邮箱，且限流很低） |
-| **Authentication → Email Templates** | 验证码模板里输出 `{{ .Token }}`，不要只保留 `{{ .ConfirmationURL }}` |
+| **Authentication → Email Templates** | **Confirm signup** 使用 `webapp/SUPABASE_CONFIRM_SIGNUP_TEMPLATE.html`；不要直接发送 `{{ .ConfirmationURL }}`，邮件按钮必须先进入 OrSight `/auth/confirm` |
 | **Authentication → URL Configuration** | **Site URL**：上线后填正式域名；本地与预览用 Additional Redirect URLs |
 | **Redirect URLs** | 至少加入 `http://localhost:3000/**`、生产环境 `https://你的域名/auth/callback`、以及 `https://*-.vercel.app/**` |
 

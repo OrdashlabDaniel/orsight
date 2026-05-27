@@ -3,8 +3,8 @@
 import Image from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type RefObject } from "react";
-import * as XLSX from "xlsx";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import * as XLSX from "@e965/xlsx";
 
 import {
   TrainingAnnotationWorkbench,
@@ -102,8 +102,6 @@ type TemplateFromImageResponse = {
   error?: string;
 };
 
-type DropZoneKey = "source-image" | "template-excel" | "template-image";
-
 function withFormId(formId: string, path: string) {
   return formId === DEFAULT_FORM_ID
     ? path
@@ -168,80 +166,6 @@ function blankSeed(): AnnotationWorkbenchSeed {
   };
 }
 
-type UploadDropAreaProps = {
-  accept: string;
-  multiple?: boolean;
-  disabled?: boolean;
-  active?: boolean;
-  title: string;
-  hint: string;
-  helper?: string;
-  inputRef: RefObject<HTMLInputElement | null>;
-  onFiles: (fileList: FileList | null) => void | Promise<void>;
-  onHoverChange?: (active: boolean) => void;
-};
-
-function UploadDropArea({
-  accept,
-  multiple = false,
-  disabled = false,
-  active = false,
-  title,
-  hint,
-  helper,
-  inputRef,
-  onFiles,
-  onHoverChange,
-}: UploadDropAreaProps) {
-  function handleDrag(event: DragEvent<HTMLLabelElement>, nextActive: boolean) {
-    event.preventDefault();
-    event.stopPropagation();
-    if (disabled) {
-      return;
-    }
-    onHoverChange?.(nextActive);
-  }
-
-  async function handleDrop(event: DragEvent<HTMLLabelElement>) {
-    event.preventDefault();
-    event.stopPropagation();
-    onHoverChange?.(false);
-    if (disabled) {
-      return;
-    }
-    await onFiles(event.dataTransfer.files);
-  }
-
-  return (
-    <label
-      className={`flex cursor-pointer flex-col items-center justify-center rounded-3xl border border-dashed px-6 py-10 text-center transition ${
-        disabled
-          ? "cursor-not-allowed border-slate-200 bg-slate-100 text-slate-400"
-          : active
-            ? "border-blue-500 bg-blue-50"
-            : "border-slate-300 bg-slate-50 hover:border-blue-400 hover:bg-blue-50/40"
-      }`}
-      onDragEnter={(event) => handleDrag(event, true)}
-      onDragOver={(event) => handleDrag(event, true)}
-      onDragLeave={(event) => handleDrag(event, false)}
-      onDrop={(event) => void handleDrop(event)}
-    >
-      <input
-        ref={inputRef}
-        type="file"
-        accept={accept}
-        multiple={multiple}
-        disabled={disabled}
-        className="hidden"
-        onChange={(event) => void onFiles(event.target.files)}
-      />
-      <div className="text-base font-medium">{title}</div>
-      <div className="mt-2 text-sm text-slate-500">{hint}</div>
-      {helper ? <div className="mt-3 text-xs text-slate-400">{helper}</div> : null}
-    </label>
-  );
-}
-
 export function FormSetupClient({ initialForm }: { initialForm: FormDefinition }) {
   const { locale, t } = useLocale();
   const router = useRouter();
@@ -273,8 +197,6 @@ export function FormSetupClient({ initialForm }: { initialForm: FormDefinition }
   const [isImportingExcel, setIsImportingExcel] = useState(false);
   const [isImportingImage, setIsImportingImage] = useState(false);
   const [isCompleting, setIsCompleting] = useState(false);
-  const [activeDropTarget, setActiveDropTarget] = useState<DropZoneKey | null>(null);
-
   const excelInputRef = useRef<HTMLInputElement | null>(null);
   const templateImageInputRef = useRef<HTMLInputElement | null>(null);
   const sourceImageInputRef = useRef<HTMLInputElement | null>(null);
@@ -589,7 +511,6 @@ export function FormSetupClient({ initialForm }: { initialForm: FormDefinition }
 
   async function handleExcelTemplateSelection(fileList: FileList | null) {
     const file = fileList?.[0];
-    setActiveDropTarget(null);
     if (!file) {
       return;
     }
@@ -629,7 +550,6 @@ export function FormSetupClient({ initialForm }: { initialForm: FormDefinition }
 
   async function handleTemplateImageSelection(fileList: FileList | null) {
     const file = fileList?.[0];
-    setActiveDropTarget(null);
     if (!file) {
       return;
     }
@@ -715,7 +635,6 @@ export function FormSetupClient({ initialForm }: { initialForm: FormDefinition }
   }
 
   async function handleSourceFiles(fileList: FileList | File[] | null) {
-    setActiveDropTarget(null);
     if (!fileList?.length) {
       return;
     }
