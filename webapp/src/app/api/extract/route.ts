@@ -66,7 +66,10 @@ import {
 } from "@/lib/table-fields";
 import { loadTableFields } from "@/lib/table-fields-store";
 import {
+  documentFileExtensionLower,
+  estimateSpreadsheetDataRowCount,
   extractDocumentPlainText,
+  extractSpreadsheetTables,
   guessDocumentImageType,
   isStructuredDocumentFileName,
 } from "@/lib/document-text-extract";
@@ -79,6 +82,7 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_REASONING_EFFORT = process.env.OPENAI_REASONING_EFFORT || "minimal";
 // Coordinate-guided refinement is unstable for camera framing; keep it opt-in.
 const COORD_GUIDED_REFINE_ENABLED = process.env.EXTRACT_COORD_GUIDED_REFINE === "1";
+const MINI_MODEL_RECOMMENDED_MAX_ROWS = 20;
 const RECOVERY_UPSCALE_MIN_EDGE = 1600;
 const RECOVERY_UPSCALE_TARGET_EDGE = 2000;
 const RECOVERY_UPSCALE_MAX_SCALE = 2.5;
@@ -97,6 +101,32 @@ function resolveOpenAIModelForRecognition(key: RecognitionModelKey): string {
     return OPENAI_REVIEW_MODEL;
   }
   return OPENAI_PRIMARY_MODEL;
+}
+
+async function estimateMiniPreflightRows(files: File[]) {
+  let estimatedRows = 0;
+  for (const file of files) {
+    const ext = documentFileExtensionLower(file.name);
+    if (ext === ".xlsx" || ext === ".xls" || ext === ".csv") {
+      const buffer = Buffer.from(await file.arrayBuffer());
+      estimatedRows += estimateSpreadsheetDataRowCount(extractSpreadsheetTables(buffer, file.name));
+      continue;
+    }
+
+    if (ext === ".txt" || ext === ".md" || /^text\//i.test(file.type || "")) {
+      const lines = (await file.text())
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean);
+      estimatedRows += lines.length <= 1 ? lines.length : Math.max(0, lines.length - 1);
+      continue;
+    }
+
+    if ((file.type || "").startsWith("image/") || /\.(png|jpe?g|webp)$/i.test(file.name)) {
+      estimatedRows += 1;
+    }
+  }
+  return estimatedRows;
 }
 
 const LARGE_WEB_TABLE_EXTRACTION_APPENDIX = `
@@ -175,6 +205,7 @@ function buildPrimaryExtractionPrompt(
     "4. 如果当前图里存在多个任务或多行记录，请为每个清晰可见的任务输出一条 records。",
     "5. 只允许填写当前表单已启用的字段；未启用的内置字段必须留空。",
     "6. imageType 只按当前图片判断：网页输入表格/在线表格返回 WEB_TABLE，签退/POD 列表返回 POD，其他返回 OTHER。",
+    "7. 姓名、责任人、司机等文本字段即使存在空格、重音符号或拼写相近，也不要因此设置 reviewRequired；只有数字/数量字段不确定时才设置 reviewRequired。",
   ];
 
   if (activeBuiltIns.length > 0) {
@@ -1162,6 +1193,35 @@ const COUNTER_CROP_REGIONS: Record<"expected" | "actual" | "pickedUp", CropRegio
 function appendReviewReason(currentReason: string | null | undefined, nextReason: string): string {
   const parts = [currentReason, nextReason].filter(Boolean);
   return Array.from(new Set(parts)).join(" | ");
+}
+
+const NUMERIC_REVIEW_REASON_RE =
+  /数字|数值|数量|件数|计数|应领|应收|实领|已领|未领|未收|错扫|错分|误扫|运单数量|total|unscanned|exception|count|number|quantity/i;
+
+function keepOnlyNumericReviewFlags(record: PodRecord): PodRecord {
+  if (!record.reviewRequired) {
+    return record;
+  }
+
+  const reasons = (record.reviewReason || "")
+    .split("|")
+    .map((reason) => reason.trim())
+    .filter(Boolean);
+  const numericReasons = reasons.filter((reason) => NUMERIC_REVIEW_REASON_RE.test(reason));
+
+  if (numericReasons.length === 0) {
+    return {
+      ...record,
+      reviewRequired: false,
+      reviewReason: null,
+    };
+  }
+
+  return {
+    ...record,
+    reviewRequired: true,
+    reviewReason: numericReasons.join(" | "),
+  };
 }
 
 const TOTAL_REVIEW_REASON_PATTERNS = [
@@ -3686,6 +3746,296 @@ function mapRecord(imageName: string, raw: RawModelRecord, index: number): PodRe
   };
 }
 
+type SpreadsheetHeaderMapping = {
+  columnIndex: number;
+  field: TableFieldDefinition;
+};
+
+const SPREADSHEET_EXTENSIONS = new Set([".xlsx", ".xls", ".csv"]);
+
+const BUILT_IN_SPREADSHEET_HEADER_ALIASES: Record<string, string[]> = {
+  date: ["日期", "派送日期", "配送日期", "业务日期", "date", "delivery date"],
+  route: ["抽查路线", "路线", "快递员路线", "配送路线", "route", "driver route"],
+  driver: ["抽查司机", "司机", "快递员", "配送员", "driver", "courier"],
+  taskCode: ["任务编码", "任务编号", "任务号", "task code", "task id"],
+  total: ["运单数量", "运单数", "应领件数", "应收件数", "应领数量", "应收数量", "total"],
+  unscanned: ["未收数量", "未领取", "未收", "未领", "unscanned", "missing"],
+  exceptions: ["错扫数量", "错扫", "错分数量", "误扫数量", "exceptions"],
+  waybillStatus: ["响应更新状态", "运单状态", "状态", "waybill status", "status"],
+  stationTeam: ["站点车队", "车队", "站点", "station team", "station"],
+};
+
+const SPREADSHEET_HEADERISH_RE =
+  /来源|运单|单号|问题|类型|责任|机构|责任人|负责人|司机|路线|日期|数量|状态|任务|编码|tracking|waybill|source|type|owner|responsible|department|status|date|route|driver|task/i;
+const SPREADSHEET_SOURCE_HEADER_RE = /^(来源|source|文件|file)$/i;
+
+function isSpreadsheetDocumentFileName(fileName: string) {
+  return SPREADSHEET_EXTENSIONS.has(documentFileExtensionLower(fileName));
+}
+
+function normalizeSpreadsheetHeaderKey(value: unknown) {
+  return normalizeText(value)
+    .toLowerCase()
+    .replace(/[\s\u00a0:：_\-—–/\\|.,，。;；'’"“”`~!！?？()（）[\]【】{}<>《》]+/g, "");
+}
+
+function spreadsheetHeaderKeysForField(field: TableFieldDefinition) {
+  const keys = [field.id, field.label, ...(BUILT_IN_SPREADSHEET_HEADER_ALIASES[field.id] || [])]
+    .map(normalizeSpreadsheetHeaderKey)
+    .filter(Boolean);
+  return [...new Set(keys)];
+}
+
+function buildSpreadsheetHeaderMatcher(tableFields: TableFieldDefinition[]) {
+  const byKey = new Map<string, TableFieldDefinition>();
+  for (const field of tableFields) {
+    for (const key of spreadsheetHeaderKeysForField(field)) {
+      if (!byKey.has(key)) {
+        byKey.set(key, field);
+      }
+    }
+  }
+  return byKey;
+}
+
+function mapSpreadsheetHeaderRow(
+  row: string[],
+  tableFields: TableFieldDefinition[],
+): SpreadsheetHeaderMapping[] {
+  const matcher = buildSpreadsheetHeaderMatcher(tableFields);
+  const usedFields = new Set<string>();
+  const mappings: SpreadsheetHeaderMapping[] = [];
+
+  row.forEach((cell, columnIndex) => {
+    const key = normalizeSpreadsheetHeaderKey(cell);
+    if (!key) {
+      return;
+    }
+    const field = matcher.get(key);
+    if (!field || usedFields.has(field.id)) {
+      return;
+    }
+    usedFields.add(field.id);
+    mappings.push({ columnIndex, field });
+  });
+
+  return mappings;
+}
+
+function nonEmptySpreadsheetColumnIndices(row: string[]) {
+  const indices: number[] = [];
+  row.forEach((cell, index) => {
+    if (normalizeText(cell)) {
+      indices.push(index);
+    }
+  });
+  return indices;
+}
+
+function looksLikeSpreadsheetHeaderRow(row: string[], tableFields: TableFieldDefinition[]) {
+  if (mapSpreadsheetHeaderRow(row, tableFields).length > 0) {
+    return true;
+  }
+  return row.some((cell) => SPREADSHEET_HEADERISH_RE.test(normalizeText(cell)));
+}
+
+function buildPositionalSpreadsheetMappings(
+  row: string[],
+  tableFields: TableFieldDefinition[],
+): SpreadsheetHeaderMapping[] {
+  const fields = tableFields.filter((field) => field.active);
+  const columnIndices = nonEmptySpreadsheetColumnIndices(row).filter(
+    (index) => !SPREADSHEET_SOURCE_HEADER_RE.test(normalizeText(row[index])),
+  );
+  return fields.slice(0, columnIndices.length).map((field, index) => ({
+    columnIndex: columnIndices[index]!,
+    field,
+  }));
+}
+
+function completeSpreadsheetMappingsPositionally(
+  row: string[],
+  tableFields: TableFieldDefinition[],
+  exactMappings: SpreadsheetHeaderMapping[],
+) {
+  const mappedColumns = new Set(exactMappings.map((mapping) => mapping.columnIndex));
+  const mappedFields = new Set(exactMappings.map((mapping) => mapping.field.id));
+  const availableColumns = nonEmptySpreadsheetColumnIndices(row).filter(
+    (index) =>
+      !mappedColumns.has(index) &&
+      !SPREADSHEET_SOURCE_HEADER_RE.test(normalizeText(row[index])),
+  );
+  const availableFields = tableFields.filter((field) => field.active && !mappedFields.has(field.id));
+  const positional = availableFields.slice(0, availableColumns.length).map((field, index) => ({
+    columnIndex: availableColumns[index]!,
+    field,
+  }));
+  return [...exactMappings, ...positional].sort((left, right) => left.columnIndex - right.columnIndex);
+}
+
+function findSpreadsheetHeaderRow(tables: ReturnType<typeof extractSpreadsheetTables>, tableFields: TableFieldDefinition[]) {
+  let best:
+    | {
+        tableIndex: number;
+        rowIndex: number;
+        mappings: SpreadsheetHeaderMapping[];
+      }
+    | null = null;
+
+  for (let tableIndex = 0; tableIndex < tables.length; tableIndex += 1) {
+    const table = tables[tableIndex];
+    if (!table) {
+      continue;
+    }
+    const candidateRows = table.rows.slice(0, 25);
+    for (let rowIndex = 0; rowIndex < candidateRows.length; rowIndex += 1) {
+      const row = candidateRows[rowIndex] || [];
+      const mappings = mapSpreadsheetHeaderRow(row, tableFields);
+      if (!best || mappings.length > best.mappings.length) {
+        best = { tableIndex, rowIndex, mappings };
+      }
+    }
+  }
+
+  const requiredMatches = tableFields.length <= 1 ? 1 : 2;
+  if (best && best.mappings.length >= requiredMatches) {
+    return best;
+  }
+
+  for (let tableIndex = 0; tableIndex < tables.length; tableIndex += 1) {
+    const table = tables[tableIndex];
+    if (!table) {
+      continue;
+    }
+    const candidateRows = table.rows.slice(0, 25);
+    for (let rowIndex = 0; rowIndex < candidateRows.length; rowIndex += 1) {
+      const row = candidateRows[rowIndex] || [];
+      if (!looksLikeSpreadsheetHeaderRow(row, tableFields)) {
+        continue;
+      }
+      const exactMappings = mapSpreadsheetHeaderRow(row, tableFields);
+      const mappings = completeSpreadsheetMappingsPositionally(row, tableFields, exactMappings);
+      if (mappings.length > 0) {
+        return { tableIndex, rowIndex, mappings };
+      }
+    }
+  }
+
+  return null;
+}
+
+function spreadsheetCellValueForField(cell: string | undefined, field: TableFieldDefinition) {
+  const text = normalizeText(cell);
+  if (!text) {
+    return "";
+  }
+  if (field.type === "number") {
+    return normalizeNumber(text);
+  }
+  return text;
+}
+
+function setRawSpreadsheetFieldValue(raw: RawModelRecord, field: TableFieldDefinition, value: string | number | "") {
+  if (value === "") {
+    return false;
+  }
+
+  if (isBuiltInFieldId(field.id)) {
+    switch (field.id) {
+      case "date":
+        raw.date = value;
+        break;
+      case "route":
+        raw.route = value;
+        break;
+      case "driver":
+        raw.driver = value;
+        break;
+      case "taskCode":
+        raw.taskCode = value;
+        break;
+      case "total":
+        raw.total = value;
+        raw.totalSourceLabel = field.label;
+        break;
+      case "unscanned":
+        raw.unscanned = value;
+        break;
+      case "exceptions":
+        raw.exceptions = value;
+        break;
+      case "waybillStatus":
+        raw.waybillStatus = value;
+        break;
+      case "stationTeam":
+        raw.stationTeam = value;
+        break;
+    }
+    return true;
+  }
+
+  const customFieldValues =
+    raw.customFieldValues && typeof raw.customFieldValues === "object"
+      ? (raw.customFieldValues as Record<string, unknown>)
+      : {};
+  customFieldValues[field.id] = value;
+  raw.customFieldValues = customFieldValues;
+  return true;
+}
+
+function buildRawRecordsFromSpreadsheetTables(
+  tables: ReturnType<typeof extractSpreadsheetTables>,
+  tableFields: TableFieldDefinition[],
+): RawModelRecord[] {
+  const firstHeader = findSpreadsheetHeaderRow(tables, tableFields);
+  const records: RawModelRecord[] = [];
+  tables.forEach((table, tableIndex) => {
+    const header =
+      firstHeader && tableIndex === firstHeader.tableIndex
+        ? firstHeader
+        : (() => {
+            const tableOnlyHeader = findSpreadsheetHeaderRow([table], tableFields);
+            return tableOnlyHeader
+              ? { tableIndex, rowIndex: tableOnlyHeader.rowIndex, mappings: tableOnlyHeader.mappings }
+              : null;
+          })();
+    const mappings = header?.mappings.length
+      ? header.mappings
+      : buildPositionalSpreadsheetMappings(table.rows.find((row) => nonEmptySpreadsheetColumnIndices(row).length > 0) || [], tableFields);
+    if (mappings.length === 0) {
+      return;
+    }
+
+    const startRow = header
+      ? header.rowIndex + 1
+      : table.rows.findIndex((row) => nonEmptySpreadsheetColumnIndices(row).length > 0);
+    const safeStartRow = Math.max(0, startRow);
+
+    table.rows.slice(safeStartRow).forEach((row, rowOffset) => {
+      if (!header && rowOffset === 0 && looksLikeSpreadsheetHeaderRow(row, tableFields)) {
+        return;
+      }
+      const raw: RawModelRecord = {};
+      let mappedValues = 0;
+      for (const mapping of mappings) {
+        const value = spreadsheetCellValueForField(row[mapping.columnIndex], mapping.field);
+        if (setRawSpreadsheetFieldValue(raw, mapping.field, value)) {
+          mappedValues += 1;
+        }
+      }
+      if (mappedValues > 0) {
+        if (!header || mappings.length < tableFields.length) {
+          raw.reviewRequired = true;
+          raw.reviewReason = "表格列名未完全匹配，已按当前表格字段顺序导入，请人工确认。";
+        }
+        records.push(raw);
+      }
+    });
+  });
+
+  return records;
+}
+
 function recordConsistencySignature(record: PodRecord): string {
   return JSON.stringify({
     route: record.route,
@@ -4295,6 +4645,23 @@ export async function POST(request: Request) {
           );
         }
 
+        const miniPreflightAccepted = String(formData.get("miniPreflightAccepted") || "") === "1";
+        if (requestedRecognitionModel === "fast" && !miniPreflightAccepted) {
+          const estimatedRows = await estimateMiniPreflightRows(files);
+          if (estimatedRows > MINI_MODEL_RECOMMENDED_MAX_ROWS) {
+            return NextResponse.json(
+              {
+                error:
+                  "Mini is recommended for up to 20 rows. For recognition accuracy, switch to gpt-5 before starting.",
+                code: "mini_preflight_required",
+                estimatedRows,
+                limit: MINI_MODEL_RECOMMENDED_MAX_ROWS,
+              },
+              { status: 409 },
+            );
+          }
+        }
+
         const model = resolveOpenAIModelForRecognition(requestedRecognitionModel);
         if (user?.id) {
           const modelOption = RECOGNITION_MODEL_OPTIONS.find((option) => option.key === requestedRecognitionModel);
@@ -4372,9 +4739,10 @@ export async function POST(request: Request) {
         if (isStructuredDocumentFileName(file.name)) {
           let plain = "";
           let docParseWarning: string | undefined;
+          let documentBuffer: Buffer | null = null;
           try {
-            const buf = Buffer.from(await file.arrayBuffer());
-            const extracted = await extractDocumentPlainText(buf, file.name);
+            documentBuffer = Buffer.from(await file.arrayBuffer());
+            const extracted = await extractDocumentPlainText(documentBuffer, file.name);
             plain = extracted.text;
             docParseWarning = extracted.warning;
           } catch (error) {
@@ -4396,11 +4764,26 @@ export async function POST(request: Request) {
           }
 
           const attemptCount = getConsistencyAttemptCount();
-          const docAttempts = await Promise.all(
-            Array.from({ length: attemptCount }, () =>
-              callDocumentExtractionModel(plain, file.name, model, visionCtx),
-            ),
-          );
+          const rawSpreadsheetRecords =
+            documentBuffer && isSpreadsheetDocumentFileName(file.name)
+              ? buildRawRecordsFromSpreadsheetTables(
+                  extractSpreadsheetTables(documentBuffer, file.name),
+                  visionCtx.tableFields,
+                )
+              : [];
+          const docAttempts =
+            rawSpreadsheetRecords.length > 0
+              ? [
+                  {
+                    records: rawSpreadsheetRecords,
+                    imageType: guessDocumentImageType(file.name),
+                  },
+                ]
+              : await Promise.all(
+                  Array.from({ length: attemptCount }, () =>
+                    callDocumentExtractionModel(plain, file.name, model, visionCtx),
+                  ),
+                );
 
           let docPromptTokens = 0;
           let docCompletionTokens = 0;
@@ -4492,6 +4875,7 @@ export async function POST(request: Request) {
             counterVerificationResult,
           );
           checkedRecords = consistencyAnalysis.records;
+          checkedRecords = checkedRecords.map(keepOnlyNumericReviewFlags);
 
           addBillingUsage({
             quantity: 1,
@@ -4642,6 +5026,7 @@ export async function POST(request: Request) {
           counterVerificationResult,
         );
         checkedRecords = consistencyAnalysis.records;
+        checkedRecords = checkedRecords.map(keepOnlyNumericReviewFlags);
 
         totalPromptTokens += recoveryResult.usage?.prompt_tokens || 0;
         totalCompletionTokens += recoveryResult.usage?.completion_tokens || 0;

@@ -195,8 +195,165 @@ type WindowWithDirectoryPicker = Window &
   };
 
 const EXTRACTION_BATCH_SIZE = 5;
+const MINI_MODEL_RECOMMENDED_MAX_ROWS = 20;
 const SOURCE_FILTER_COLUMN_ID = "__source__";
 const EMPTY_COLUMN_FILTER_VALUE = "__orsight_empty__";
+
+type MiniPreflightSuggestion = {
+  estimatedRows: number | null;
+  limit: number;
+  source: "client" | "server";
+};
+
+class MiniPreflightRequiredError extends Error {
+  estimatedRows: number | null;
+  limit: number;
+
+  constructor(message: string, estimatedRows: number | null, limit: number) {
+    super(message);
+    this.name = "MiniPreflightRequiredError";
+    this.estimatedRows = estimatedRows;
+    this.limit = limit;
+  }
+}
+
+function getLowerFileName(file: File) {
+  return file.name.trim().toLocaleLowerCase();
+}
+
+function cellToPreflightText(value: unknown) {
+  if (value == null) {
+    return "";
+  }
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? "" : value.toISOString().slice(0, 10);
+  }
+  return String(value).replace(/\u0000/g, "").trim();
+}
+
+function trimTrailingPreflightEmptyCells(row: string[]) {
+  let end = row.length;
+  while (end > 0 && !row[end - 1]?.trim()) {
+    end -= 1;
+  }
+  return row.slice(0, end);
+}
+
+function repairPreflightWorksheetRange(sheet: XLSX.WorkSheet) {
+  if (!sheet["!ref"]) {
+    return;
+  }
+
+  const keys = Object.keys(sheet).filter((key) => !key.startsWith("!"));
+  if (keys.length === 0) {
+    return;
+  }
+
+  const range = XLSX.utils.decode_range(sheet["!ref"]);
+  let changed = false;
+  for (const key of keys) {
+    const cell = XLSX.utils.decode_cell(key);
+    if (cell.r > range.e.r) {
+      range.e.r = cell.r;
+      changed = true;
+    }
+    if (cell.c > range.e.c) {
+      range.e.c = cell.c;
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    sheet["!ref"] = XLSX.utils.encode_range(range);
+  }
+}
+
+function normalizePreflightRows(rawRows: unknown[][]) {
+  return rawRows
+    .map((row) => trimTrailingPreflightEmptyCells(row.map(cellToPreflightText)))
+    .filter((row) => row.some((cell) => cell.trim()));
+}
+
+function countDataRowsWithHeader(nonEmptyRows: string[][]) {
+  if (nonEmptyRows.length <= 1) {
+    return nonEmptyRows.length;
+  }
+  return Math.max(0, nonEmptyRows.length - 1);
+}
+
+async function estimateStructuredFileRows(file: File): Promise<number | null> {
+  const lowerName = getLowerFileName(file);
+  if (/\.(xlsx|xls|csv)$/i.test(lowerName)) {
+    const workbook = /\.(csv)$/i.test(lowerName)
+      ? XLSX.read(await file.text(), { type: "string", raw: false, cellDates: true })
+      : XLSX.read(await file.arrayBuffer(), { type: "array", raw: false, cellDates: true });
+    return workbook.SheetNames.reduce((total, sheetName) => {
+      const sheet = workbook.Sheets[sheetName];
+      if (!sheet) {
+        return total;
+      }
+      repairPreflightWorksheetRange(sheet);
+      const rows = XLSX.utils.sheet_to_json(sheet, {
+        header: 1,
+        blankrows: false,
+        defval: "",
+        raw: false,
+      }) as unknown[][];
+      return total + countDataRowsWithHeader(normalizePreflightRows(rows));
+    }, 0);
+  }
+
+  if (/\.(txt|md)$/i.test(lowerName) || /^text\//i.test(file.type)) {
+    const lines = (await file.text())
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    return lines.length <= 1 ? lines.length : Math.max(0, lines.length - 1);
+  }
+
+  return null;
+}
+
+async function getMiniPreflightSuggestion(files: File[]): Promise<MiniPreflightSuggestion | null> {
+  let estimatedRows = 0;
+
+  for (const file of files) {
+    const lowerName = getLowerFileName(file);
+    let structuredRows: number | null = null;
+    try {
+      structuredRows = await estimateStructuredFileRows(file);
+    } catch {
+      return {
+        estimatedRows: null,
+        limit: MINI_MODEL_RECOMMENDED_MAX_ROWS,
+        source: "client",
+      };
+    }
+    if (structuredRows != null) {
+      estimatedRows += structuredRows;
+      continue;
+    }
+
+    if (file.type.startsWith("image/") || /\.(png|jpe?g|webp)$/i.test(lowerName)) {
+      estimatedRows += 1;
+      continue;
+    }
+
+    return {
+      estimatedRows: null,
+      limit: MINI_MODEL_RECOMMENDED_MAX_ROWS,
+      source: "client",
+    };
+  }
+
+  return estimatedRows > MINI_MODEL_RECOMMENDED_MAX_ROWS
+    ? {
+        estimatedRows,
+        limit: MINI_MODEL_RECOMMENDED_MAX_ROWS,
+        source: "client",
+      }
+    : null;
+}
 
 /** Stable map key when a record has no route (UI label comes from `home.ungrouped`). */
 const UNGROUPED_ROUTE_KEY = "__orsight_ungrouped__";
@@ -406,6 +563,11 @@ function HomeContent() {
   const [trainingExamplesLoaded, setTrainingExamplesLoaded] = useState(0);
   const [trainingStatus, setTrainingStatus] = useState<TrainingStatusResponse | null>(null);
   const [selectedRecognitionModel, setSelectedRecognitionModel] = useState<RecognitionModelKey>("fast");
+  const [miniPreflightSuggestion, setMiniPreflightSuggestion] = useState<MiniPreflightSuggestion | null>(null);
+  const [modelSwitchSuggestion, setModelSwitchSuggestion] = useState<{
+    rowCount: number;
+    modelUsed: string;
+  } | null>(null);
   const [annotatingRecord, setAnnotatingRecord] = useState<PodRecord | null>(null);
   const [annotationImageSrc, setAnnotationImageSrc] = useState("");
   const [annotationImageName, setAnnotationImageName] = useState("");
@@ -1279,20 +1441,36 @@ function HomeContent() {
     files: File[],
     mode: "primary" | "review" = "primary",
     recognitionModel: RecognitionModelKey = selectedRecognitionModel,
+    options?: { miniPreflightAccepted?: boolean },
   ): Promise<ExtractionResponse> {
     const formData = new FormData();
     files.forEach((file) => formData.append("files", file));
     formData.append("mode", mode);
     formData.append("recognitionModel", recognitionModel);
     formData.append("formId", currentFormId);
+    if (options?.miniPreflightAccepted) {
+      formData.append("miniPreflightAccepted", "1");
+    }
 
     const response = await fetch("/api/extract", {
       method: "POST",
       body: formData,
     });
 
-    const payload = (await response.json()) as ExtractionResponse & { error?: string };
+    const payload = (await response.json()) as ExtractionResponse & {
+      error?: string;
+      code?: string;
+      estimatedRows?: number | null;
+      limit?: number;
+    };
     if (!response.ok) {
+      if (payload.code === "mini_preflight_required") {
+        throw new MiniPreflightRequiredError(
+          payload.error || t("home.miniPreflightDialogTitle"),
+          typeof payload.estimatedRows === "number" ? payload.estimatedRows : null,
+          typeof payload.limit === "number" ? payload.limit : MINI_MODEL_RECOMMENDED_MAX_ROWS,
+        );
+      }
       throw new Error(payload.error || t("home.errExtract"));
     }
 
@@ -1307,6 +1485,7 @@ function HomeContent() {
     concurrency = 3,
     mode: "primary" | "review" = "primary",
     recognitionModel: RecognitionModelKey = selectedRecognitionModel,
+    options?: { miniPreflightAccepted?: boolean },
   ): Promise<ExtractionResponse> {
     const allRecords: PodRecord[] = [];
     const allIssues: ExtractionIssue[] = [];
@@ -1327,7 +1506,7 @@ function HomeContent() {
         const batch = batches[batchIndex];
 
         try {
-          const payload = await requestExtraction(batch, mode, recognitionModel);
+          const payload = await requestExtraction(batch, mode, recognitionModel, options);
           allRecords.push(...(payload.records || []));
           allIssues.push(...(payload.issues || []));
           if (payload.modelUsed) {
@@ -1335,6 +1514,9 @@ function HomeContent() {
           }
           loadedTrainingExamples = Math.max(loadedTrainingExamples, payload.trainingExamplesLoaded || 0);
         } catch (error) {
+          if (error instanceof MiniPreflightRequiredError) {
+            throw error;
+          }
           batch.forEach((file) => {
             allIssues.push({
               imageName: file.name,
@@ -1470,6 +1652,8 @@ function HomeContent() {
     setIssues([]);
     setConfirmedCorrectRecords([]);
     setTrainingExamplesLoaded(0);
+    setMiniPreflightSuggestion(null);
+    setModelSwitchSuggestion(null);
     setErrorMessage("");
     setNoticeMessage(t("home.cleared"));
   }
@@ -1654,6 +1838,8 @@ function HomeContent() {
       return;
     }
 
+    setMiniPreflightSuggestion(null);
+    setModelSwitchSuggestion(null);
     setIsHighQualityReextracting(true);
     setErrorMessage("");
     setNoticeMessage("");
@@ -1734,22 +1920,43 @@ function HomeContent() {
     }
   }
 
-  async function extractData() {
+  async function extractData(options?: {
+    skipMiniPreflight?: boolean;
+    recognitionModel?: RecognitionModelKey;
+  }) {
     if (!uploads.length) {
       setErrorMessage(t("home.errNoUpload"));
       return;
     }
 
+    const recognitionModel = options?.recognitionModel ?? selectedRecognitionModel;
+    const filesToExtract = uploads.map((upload) => upload.file);
+    const miniPreflight =
+      recognitionModel === "fast" && !options?.skipMiniPreflight
+        ? await getMiniPreflightSuggestion(filesToExtract)
+        : null;
+
+    if (miniPreflight) {
+      setMiniPreflightSuggestion(miniPreflight);
+      setModelSwitchSuggestion(null);
+      setErrorMessage("");
+      setNoticeMessage("");
+      return;
+    }
+
+    setMiniPreflightSuggestion(null);
     setIsExtracting(true);
     setErrorMessage("");
     setNoticeMessage("");
+    setModelSwitchSuggestion(null);
 
     try {
       const payload = await runParallelExtraction(
-        uploads.map((upload) => upload.file),
+        filesToExtract,
         3,
         "primary",
-        selectedRecognitionModel,
+        recognitionModel,
+        { miniPreflightAccepted: Boolean(options?.skipMiniPreflight) },
       );
 
       setRecords(payload.records || []);
@@ -1757,16 +1964,34 @@ function HomeContent() {
       setConfirmedCorrectRecords([]);
       setTrainingExamplesLoaded(payload.trainingExamplesLoaded || 0);
       const organized = organizeRecords(payload.records || []);
+      const modelUsed = payload.modelUsed || fallbackRecognitionModelName(recognitionModel);
       const dedupeMessage =
         organized.duplicateCount > 0 ? t("home.dedupe", { n: organized.duplicateCount }) : "";
       setNoticeMessage(
         t("home.noticeExtractDone", {
           n: organized.records.length,
           dedupe: dedupeMessage,
-          model: payload.modelUsed || fallbackRecognitionModelName(selectedRecognitionModel),
+          model: modelUsed,
         }),
       );
+      if (recognitionModel === "fast" && organized.records.length > MINI_MODEL_RECOMMENDED_MAX_ROWS) {
+        setModelSwitchSuggestion({
+          rowCount: organized.records.length,
+          modelUsed,
+        });
+      }
     } catch (error) {
+      if (error instanceof MiniPreflightRequiredError) {
+        setMiniPreflightSuggestion({
+          estimatedRows: error.estimatedRows,
+          limit: error.limit,
+          source: "server",
+        });
+        setModelSwitchSuggestion(null);
+        setErrorMessage("");
+        setNoticeMessage("");
+        return;
+      }
       setErrorMessage(error instanceof Error ? error.message : t("home.errExtractFail"));
     } finally {
       setIsExtracting(false);
@@ -2662,14 +2887,14 @@ function HomeContent() {
               style={isDesktopLayout ? { height: Math.max(uploadTopSectionHeightPx, uploadTopSectionMinHeightPx) } : undefined}
             >
               <div ref={uploadTopActionsRef} className="flex flex-col gap-2">
-                <div className="rounded-xl border border-[var(--border)] bg-[var(--background)]/80 p-2.5">
-                  <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                <div className="rounded-lg border border-[var(--border)] bg-[var(--background)]/80 px-2 py-2">
+                  <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
                     <span className="text-[11px] font-semibold uppercase tracking-[0.18em] text-[var(--muted-foreground)]">
                       {t("home.modelSelectorLabel")}
                     </span>
                     <span className="text-[11px] text-[var(--muted-foreground)]">{t("home.modelLargeTableTip")}</span>
                   </div>
-                  <div className="grid gap-2 sm:grid-cols-2">
+                  <div className="grid grid-cols-2 gap-1.5">
                     {ORDINARY_RECOGNITION_MODEL_OPTIONS.map((option) => {
                       const active = selectedRecognitionModel === option.key;
                       const titleKey =
@@ -2686,21 +2911,23 @@ function HomeContent() {
                           key={option.key}
                           type="button"
                           aria-pressed={active}
-                          className={`rounded-lg border px-2.5 py-2 text-left transition ${
+                          className={`min-h-10 rounded-md border px-2 py-1.5 text-left transition ${
                             active
                               ? "border-[var(--foreground)] bg-[var(--foreground)] text-[var(--background)]"
                               : "border-[var(--border)] bg-[var(--surface)] hover:bg-[var(--background)]"
                           }`}
                           onClick={() => {
                             setSelectedRecognitionModel(option.key);
+                            setMiniPreflightSuggestion(null);
+                            setModelSwitchSuggestion(null);
                             setErrorMessage("");
                           }}
                         >
-                          <span className="flex items-center justify-between gap-2">
+                          <span className="flex items-center justify-between gap-1">
                             <span className="text-xs font-semibold">{t(titleKey)}</span>
+                            <span className="shrink-0 text-[10px] opacity-75">{option.fallbackModel}</span>
                           </span>
-                          <span className="mt-1 block text-[11px] opacity-75">{option.fallbackModel}</span>
-                          <span className="mt-1 block text-[11px] leading-4 opacity-75">{t(hintKey)}</span>
+                          <span className="mt-0.5 block text-[11px] leading-4 opacity-75">{t(hintKey)}</span>
                         </button>
                       );
                     })}
@@ -2709,7 +2936,7 @@ function HomeContent() {
                 <div className="flex flex-wrap gap-2">
                   <button
                     className="rounded-md bg-[var(--foreground)] px-3 py-2 text-sm text-[var(--background)] hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
-                    onClick={extractData}
+                    onClick={() => void extractData()}
                     disabled={isExtracting || isHighQualityReextracting || isRetryingReviewAll || !uploads.length}
                   >
                     {isExtracting ? t("home.extracting") : t("home.extract")}
@@ -3042,6 +3269,98 @@ function HomeContent() {
 
           </div>
         </section>
+
+        {miniPreflightSuggestion ? (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-950/35 px-4">
+            <div
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="mini-preflight-suggestion-title"
+              className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-5 shadow-2xl"
+            >
+              <h2 id="mini-preflight-suggestion-title" className="text-lg font-semibold text-slate-950">
+                {t("home.miniPreflightDialogTitle")}
+              </h2>
+              <p className="mt-2 text-sm leading-6 text-slate-600">
+                {miniPreflightSuggestion.estimatedRows == null
+                  ? t("home.miniPreflightUnknownDialogBody", {
+                      limit: miniPreflightSuggestion.limit,
+                    })
+                  : t("home.miniPreflightDialogBody", {
+                      rows: miniPreflightSuggestion.estimatedRows,
+                      limit: miniPreflightSuggestion.limit,
+                    })}
+              </p>
+              <div className="mt-5 flex flex-col gap-2 sm:flex-row sm:justify-end">
+                <button
+                  type="button"
+                  className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
+                  onClick={() => {
+                    setMiniPreflightSuggestion(null);
+                    void extractData({ skipMiniPreflight: true, recognitionModel: "fast" });
+                  }}
+                >
+                  {t("home.miniPreflightUseMini")}
+                </button>
+                <button
+                  type="button"
+                  className="rounded-lg bg-slate-950 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+                  disabled={isExtracting || isHighQualityReextracting || isRetryingReviewAll || !uploads.length}
+                  onClick={() => {
+                    setMiniPreflightSuggestion(null);
+                    setSelectedRecognitionModel("accurate");
+                    void extractData({ skipMiniPreflight: true, recognitionModel: "accurate" });
+                  }}
+                >
+                  {t("home.miniPreflightRunGpt5")}
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : null}
+
+        {modelSwitchSuggestion ? (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-950/35 px-4">
+            <div
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="model-switch-suggestion-title"
+              className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-5 shadow-2xl"
+            >
+              <h2 id="model-switch-suggestion-title" className="text-lg font-semibold text-slate-950">
+                {t("home.modelSwitchDialogTitle")}
+              </h2>
+              <p className="mt-2 text-sm leading-6 text-slate-600">
+                {t("home.modelSwitchDialogBody", {
+                  n: modelSwitchSuggestion.rowCount,
+                  limit: MINI_MODEL_RECOMMENDED_MAX_ROWS,
+                  current: modelSwitchSuggestion.modelUsed,
+                  model: reviewModelName,
+                })}
+              </p>
+              <div className="mt-5 flex flex-col gap-2 sm:flex-row sm:justify-end">
+                <button
+                  type="button"
+                  className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
+                  onClick={() => setModelSwitchSuggestion(null)}
+                >
+                  {t("home.modelSwitchKeepMini")}
+                </button>
+                <button
+                  type="button"
+                  className="rounded-lg bg-slate-950 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+                  disabled={isExtracting || isHighQualityReextracting || isRetryingReviewAll || !uploads.length}
+                  onClick={() => {
+                    setModelSwitchSuggestion(null);
+                    void reextractAllWithHigherModel();
+                  }}
+                >
+                  {t("home.modelSwitchRunGpt5")}
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : null}
 
         {viewerPopupPosition && (viewerGallery.length > 0 || viewerLoadError || viewerGalleryLoading) ? (
           <div

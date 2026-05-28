@@ -2,12 +2,112 @@ import * as XLSX from "@e965/xlsx";
 
 const MAX_OUTPUT_CHARS = 200_000;
 
+export type SpreadsheetTable = {
+  sheetName: string;
+  rows: string[][];
+};
+
 export function documentFileExtensionLower(name: string): string {
   const i = name.lastIndexOf(".");
   return i >= 0 ? name.slice(i).toLowerCase() : "";
 }
 
+function trimTrailingEmptyCells(row: string[]) {
+  let end = row.length;
+  while (end > 0 && !row[end - 1]?.trim()) {
+    end -= 1;
+  }
+  return row.slice(0, end);
+}
+
+function cellToText(value: unknown): string {
+  if (value == null) {
+    return "";
+  }
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? "" : value.toISOString().slice(0, 10);
+  }
+  return String(value).replace(/\u0000/g, "").trim();
+}
+
+function repairSheetRange(sheet: XLSX.WorkSheet) {
+  if (!sheet["!ref"]) {
+    return;
+  }
+
+  const keys = Object.keys(sheet).filter((key) => !key.startsWith("!"));
+  if (keys.length === 0) {
+    return;
+  }
+
+  const range = XLSX.utils.decode_range(sheet["!ref"]);
+  let changed = false;
+  for (const key of keys) {
+    const cell = XLSX.utils.decode_cell(key);
+    if (cell.r > range.e.r) {
+      range.e.r = cell.r;
+      changed = true;
+    }
+    if (cell.c > range.e.c) {
+      range.e.c = cell.c;
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    sheet["!ref"] = XLSX.utils.encode_range(range);
+  }
+}
+
+export function extractSpreadsheetTables(buffer: Buffer, fileName: string): SpreadsheetTable[] {
+  const ext = documentFileExtensionLower(fileName);
+  if (ext !== ".xlsx" && ext !== ".xls" && ext !== ".csv") {
+    return [];
+  }
+
+  const workbook =
+    ext === ".csv"
+      ? XLSX.read(buffer.toString("utf8"), { type: "string", raw: false, cellDates: true })
+      : XLSX.read(buffer, { type: "buffer", raw: false, cellDates: true });
+
+  const tables: SpreadsheetTable[] = [];
+  for (const sheetName of workbook.SheetNames.slice(0, 10)) {
+    const sheet = workbook.Sheets[sheetName];
+    if (!sheet) {
+      continue;
+    }
+
+    repairSheetRange(sheet);
+
+    const rawRows = XLSX.utils.sheet_to_json(sheet, {
+      header: 1,
+      blankrows: false,
+      defval: "",
+      raw: false,
+    }) as unknown[][];
+    const rows = rawRows
+      .map((row) => trimTrailingEmptyCells(row.map(cellToText)))
+      .filter((row) => row.some((cell) => cell.trim()));
+
+    if (rows.length > 0) {
+      tables.push({ sheetName, rows });
+    }
+  }
+
+  return tables;
+}
+
 /** 服务端可从缓冲解析为纯文本的填表数据来源（与 parse-document / extract 共用）。 */
+export function estimateSpreadsheetDataRowCount(tables: SpreadsheetTable[]) {
+  return tables.reduce((total, table) => {
+    const nonEmptyRows = table.rows.filter((row) => row.some((cell) => cell.trim()));
+    if (nonEmptyRows.length <= 1) {
+      return total + nonEmptyRows.length;
+    }
+    return total + Math.max(0, nonEmptyRows.length - 1);
+  }, 0);
+}
+
 export async function extractDocumentPlainText(
   buffer: Buffer,
   fileName: string,
@@ -33,34 +133,11 @@ export async function extractDocumentPlainText(
     const extractor = new WordExtractor();
     const doc = await extractor.extract(buffer);
     text = doc.getBody() || "";
-  } else if (ext === ".xlsx" || ext === ".xls") {
-    const workbook = XLSX.read(buffer, { type: "buffer" });
-    const parts: string[] = [];
-    for (const sheetName of workbook.SheetNames.slice(0, 10)) {
-      const sheet = workbook.Sheets[sheetName];
-      if (!sheet) {
-        continue;
-      }
-      
-      // Fix sheet range if it's incorrect (sometimes Excel files have data beyond the encoded !ref range)
-      if (sheet["!ref"]) {
-        const keys = Object.keys(sheet).filter((k) => !k.startsWith("!"));
-        if (keys.length > 0) {
-          const maxRow = Math.max(...keys.map((k) => parseInt(k.replace(/[A-Z]/g, ""), 10) || 0));
-          const range = XLSX.utils.decode_range(sheet["!ref"]);
-          if (maxRow - 1 > range.e.r) {
-            range.e.r = maxRow - 1;
-            sheet["!ref"] = XLSX.utils.encode_range(range);
-          }
-        }
-      }
-
-      const csv = XLSX.utils.sheet_to_csv(sheet, { FS: "\t", blankrows: false });
-      parts.push(`### ${sheetName}\n${csv}`);
-    }
+  } else if (ext === ".xlsx" || ext === ".xls" || ext === ".csv") {
+    const parts = extractSpreadsheetTables(buffer, fileName).map(
+      (table) => `### ${table.sheetName}\n${table.rows.map((row) => row.join("\t")).join("\n")}`,
+    );
     text = parts.join("\n\n");
-  } else if (ext === ".csv") {
-    text = buffer.toString("utf8");
   } else if (ext === ".txt" || ext === ".md") {
     text = buffer.toString("utf8");
   } else {
