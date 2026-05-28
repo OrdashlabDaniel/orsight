@@ -490,13 +490,25 @@ export const zh = {
     statsLine: "{primary} · 复审 {review} · 样本 {samples} · 训练图 {images}",
     modelSelectorLabel: "识别模型",
     modelFastName: "快速",
-    modelFastHint: "适合简单截图和快速检查。",
+    modelFastHint: "Mini：20 条以内",
     modelAccurateName: "精准",
-    modelAccurateHint: "适合大表格和待复核条目。",
+    modelAccurateHint: "GPT-5：超过 20 条建议使用",
     modelMaxName: "最高",
     modelMaxHint: "仅用于识别管家、规则生成和特殊人工授权场景。",
     modelPaidOnly: "仅 Normal",
-    modelLargeTableTip: "20 行以上大表格建议用精准。",
+    modelLargeTableTip: "Mini 适合 20 条以内；超过 20 条建议 GPT-5。",
+    modelSwitchDialogTitle: "建议切换到 GPT-5",
+    modelSwitchDialogBody:
+      "本次识别生成了 {n} 条记录，已超过 Mini 建议上限 {limit} 条。为了保证识别准确性，建议切换到 GPT-5 重新识别。",
+    modelSwitchKeepMini: "继续使用 Mini",
+    modelSwitchRunGpt5: "切换到 GPT-5 并重新识别",
+    miniPreflightDialogTitle: "建议使用 GPT-5",
+    miniPreflightDialogBody:
+      "已预先检测到约 {rows} 条记录，超过 Mini 建议上限 {limit} 条。为了保证识别准确性，建议切换到 GPT-5。",
+    miniPreflightUnknownDialogBody:
+      "无法稳定预先确认条目数。Mini 建议用于 {limit} 条以内，为了保证识别准确性，建议切换到 GPT-5。",
+    miniPreflightUseMini: "继续使用 Mini",
+    miniPreflightRunGpt5: "切换到 GPT-5 并开始识别",
     errPremiumModelRequiresNormal: "gpt-5.5 仅用于识别管家、规则生成和特殊人工授权场景，普通识别请使用 gpt-5。",
     fmTitle: "表格项目管理",
     fmIntro:
